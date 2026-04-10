@@ -118,14 +118,154 @@ const dom = {
 // INITIALIZATION
 // ════════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════════
+// AUTH GATE — DOM REFERENCES
+// ════════════════════════════════════════════════════════════════════════════
+
+const gate = {
+  overlay: $('authGate'),
+  appRoot: $('app'),
+  loginForm: $('gateLoginForm'),
+  signupForm: $('gateSignupForm'),
+  loginEmail: $('gateLoginEmail'),
+  loginPassword: $('gateLoginPassword'),
+  loginError: $('gateLoginError'),
+  loginBtn: $('gateLoginBtn'),
+  signupEmail: $('gateSignupEmail'),
+  signupPassword: $('gateSignupPassword'),
+  signupConfirm: $('gateSignupConfirm'),
+  signupError: $('gateSignupError'),
+  signupBtn: $('gateSignupBtn'),
+  tabs: document.querySelectorAll('.auth-gate-tab')
+};
+
 document.addEventListener('DOMContentLoaded', async () => {
+  initializeGateListeners();
+  await checkAuthGate();
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// AUTH GATE LOGIC
+// ════════════════════════════════════════════════════════════════════════════
+
+function initializeGateListeners() {
+  // Tab switching
+  gate.tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      gate.tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const isLogin = tab.dataset.gateTab === 'login';
+      gate.loginForm.classList.toggle('active', isLogin);
+      gate.signupForm.classList.toggle('active', !isLogin);
+    });
+  });
+
+  // Login form
+  gate.loginForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    gate.loginError.textContent = '';
+    gate.loginBtn.disabled = true;
+    gate.loginBtn.textContent = 'Signing in...';
+
+    try {
+      const result = await window.apex.auth.login(
+        gate.loginEmail.value.trim(),
+        gate.loginPassword.value
+      );
+      if (result.success) {
+        state.user = result.user;
+        state.isAuthenticated = true;
+        unlockDashboard();
+      } else {
+        gate.loginError.textContent = result.error || 'Invalid email or password';
+      }
+    } catch (err) {
+      gate.loginError.textContent = 'Connection error. Please try again.';
+    } finally {
+      gate.loginBtn.disabled = false;
+      gate.loginBtn.textContent = 'Sign In';
+    }
+  });
+
+  // Signup form
+  gate.signupForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    gate.signupError.textContent = '';
+
+    const email = gate.signupEmail.value.trim();
+    const password = gate.signupPassword.value;
+    const confirm = gate.signupConfirm.value;
+
+    if (password.length < 8) {
+      gate.signupError.textContent = 'Password must be at least 8 characters';
+      return;
+    }
+    if (password !== confirm) {
+      gate.signupError.textContent = 'Passwords do not match';
+      return;
+    }
+
+    gate.signupBtn.disabled = true;
+    gate.signupBtn.textContent = 'Creating account...';
+
+    try {
+      const result = await window.apex.auth.signup(email, password);
+      if (result.success) {
+        state.user = result.user;
+        state.isAuthenticated = true;
+        unlockDashboard();
+      } else {
+        gate.signupError.textContent = result.error || 'Signup failed';
+      }
+    } catch (err) {
+      gate.signupError.textContent = 'Connection error. Please try again.';
+    } finally {
+      gate.signupBtn.disabled = false;
+      gate.signupBtn.textContent = 'Create Account';
+    }
+  });
+}
+
+async function checkAuthGate() {
+  try {
+    const session = await window.apex.auth.getSession();
+    if (session && session.isAuthenticated && session.user) {
+      state.user = session.user;
+      state.isAuthenticated = true;
+      unlockDashboard();
+    }
+    // else: gate stays visible, user must log in
+  } catch (err) {
+    console.error('Auth gate check failed:', err);
+    // Gate stays visible on error
+  }
+}
+
+function unlockDashboard() {
+  // Hide the gate, show the app
+  gate.overlay.classList.add('hidden');
+  gate.appRoot.classList.remove('app-hidden');
+
+  // Now initialize the actual dashboard
   initializeEventListeners();
   loadSettings();
   startUptimeCounter();
-  checkAuthStatus();
+  updateAccountWidget();
   renderIntelligencePage('live');
   setupStreamHealthUpdates();
-});
+}
+
+function lockDashboard() {
+  // Show the gate, hide the app
+  gate.overlay.classList.remove('hidden');
+  gate.appRoot.classList.add('app-hidden');
+
+  // Reset gate forms
+  gate.loginForm.reset();
+  gate.signupForm.reset();
+  gate.loginError.textContent = '';
+  gate.signupError.textContent = '';
+}
 
 function initializeEventListeners() {
   // Stream controls
@@ -211,11 +351,40 @@ async function toggleLiveStream() {
 }
 
 async function startStream() {
-  dom.goLiveBtn.textContent = 'Stopping...';
+  dom.goLiveBtn.textContent = 'Starting...';
   dom.goLiveBtn.disabled = true;
 
   try {
-    const streamKey = dom.streamKey.value || 'test-key';
+    const streamKey = dom.streamKey.value || '';
+
+    // ── Username validation ──────────────────────────────────────────
+    // Chaturbate broadcast tokens have the format: <numeric_id>.<hex_hash>
+    // The RTMP URL contains the broadcaster username. We validate that
+    // the user has a linked platform account before allowing the stream
+    // to start, preventing unauthorized access to others' data.
+    if (!state.user) {
+      showAlert('You must be logged in to stream', 'error');
+      dom.goLiveBtn.disabled = false;
+      dom.goLiveBtn.textContent = 'Go Live';
+      return;
+    }
+
+    const linkedPlatforms = state.user.linkedPlatforms || [];
+    if (linkedPlatforms.length === 0) {
+      showAlert('Link a platform account in Settings before streaming. This ensures your earnings data stays secure.', 'error');
+      dom.goLiveBtn.disabled = false;
+      dom.goLiveBtn.textContent = 'Go Live';
+      return;
+    }
+
+    // Validate stream key is provided
+    if (!streamKey.trim()) {
+      showAlert('Enter your broadcast token / stream key in the Stream settings tab', 'error');
+      dom.goLiveBtn.disabled = false;
+      dom.goLiveBtn.textContent = 'Go Live';
+      return;
+    }
+
     const result = await window.apex.stream.startStream(streamKey);
 
     if (result.success) {
@@ -623,18 +792,7 @@ function attachIntelPageEventListeners(page) {
 // AUTHENTICATION
 // ════════════════════════════════════════════════════════════════════════════
 
-async function checkAuthStatus() {
-  try {
-    const session = await window.apex.auth.getSession();
-    if (session && session.user) {
-      state.user = session.user;
-      state.isAuthenticated = true;
-      updateAccountWidget();
-    }
-  } catch (error) {
-    console.error('Error checking auth status:', error);
-  }
-}
+// checkAuthStatus is now handled by checkAuthGate() at startup
 
 function updateAccountWidget() {
   if (state.isAuthenticated && state.user) {
@@ -732,8 +890,7 @@ async function handleLogout() {
     await window.apex.auth.logout();
     state.user = null;
     state.isAuthenticated = false;
-    updateAccountWidget();
-    showAlert('Logged out', 'info');
+    lockDashboard();
   } catch (error) {
     console.error('Logout error:', error);
   }
@@ -886,16 +1043,17 @@ if (window.apex?.intelligence) {
   });
 }
 
-// Listen for auth state changes
+// Listen for auth state changes (including server-side token revocation)
 if (window.apex?.auth) {
   window.apex.auth.onAuthChange?.((user) => {
     if (user) {
       state.user = user;
       state.isAuthenticated = true;
+      updateAccountWidget();
     } else {
       state.user = null;
       state.isAuthenticated = false;
+      lockDashboard();
     }
-    updateAccountWidget();
   });
 }

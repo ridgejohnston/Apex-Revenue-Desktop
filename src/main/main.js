@@ -343,54 +343,90 @@ ipcMain.handle('auth:isAdmin', () => {
 });
 
 // ─────────────────────────────────────────────
-// IPC HANDLERS - INTELLIGENCE (New)
+// AUTH GUARD HELPER
+// ─────────────────────────────────────────────
+
+function requireAuth(handlerName) {
+  if (!authService) return { success: false, error: 'Service not ready' };
+  const session = authService.getSession();
+  if (!session || !session.isAuthenticated) {
+    console.warn(`[Auth Guard] Blocked unauthenticated call to ${handlerName}`);
+    return { success: false, error: 'Authentication required' };
+  }
+  return null; // null = passed
+}
+
+// ─────────────────────────────────────────────
+// IPC HANDLERS - INTELLIGENCE (Auth-guarded)
 // ─────────────────────────────────────────────
 
 ipcMain.handle('intelligence:getLiveData', () => {
+  const denied = requireAuth('intelligence:getLiveData');
+  if (denied) return denied;
   return intelligenceService.getLiveData();
 });
 
 ipcMain.handle('intelligence:getFanLeaderboard', () => {
+  const denied = requireAuth('intelligence:getFanLeaderboard');
+  if (denied) return denied;
   return intelligenceService.getFanLeaderboard();
 });
 
 ipcMain.handle('intelligence:getEarnings', () => {
+  const denied = requireAuth('intelligence:getEarnings');
+  if (denied) return denied;
   return intelligenceService.getEarnings();
 });
 
 ipcMain.handle('intelligence:getSessions', () => {
+  const denied = requireAuth('intelligence:getSessions');
+  if (denied) return denied;
   return intelligenceService.getSessions();
 });
 
 ipcMain.handle('intelligence:getTotalEarnings', () => {
+  const denied = requireAuth('intelligence:getTotalEarnings');
+  if (denied) return denied;
   return intelligenceService.getTotalEarnings();
 });
 
 ipcMain.handle('intelligence:getSessionStats', () => {
+  const denied = requireAuth('intelligence:getSessionStats');
+  if (denied) return denied;
   return intelligenceService.getSessionStats();
 });
 
 ipcMain.handle('intelligence:getAnalytics', async (event, timeRange) => {
+  const denied = requireAuth('intelligence:getAnalytics');
+  if (denied) return denied;
   const token = authService.getAccessToken();
   return await intelligenceService.getAnalytics(token, timeRange);
 });
 
 ipcMain.handle('intelligence:checkSubscription', async () => {
+  const denied = requireAuth('intelligence:checkSubscription');
+  if (denied) return denied;
   const token = authService.getAccessToken();
   return await intelligenceService.checkSubscription(token);
 });
 
 ipcMain.handle('intelligence:startSession', (event, roomName, settings) => {
+  const denied = requireAuth('intelligence:startSession');
+  if (denied) return denied;
   intelligenceService.startSession(roomName, settings);
   return true;
 });
 
 ipcMain.handle('intelligence:endSession', (event, roomName) => {
+  const denied = requireAuth('intelligence:endSession');
+  if (denied) return denied;
   intelligenceService.endSession(roomName);
   return true;
 });
 
 ipcMain.handle('intelligence:recordTip', (event, amount, username, platform) => {
+  const denied = requireAuth('intelligence:recordTip');
+  if (denied) return denied;
   return intelligenceService.recordTip(amount, username, platform);
 });
 
@@ -399,19 +435,27 @@ ipcMain.handle('intelligence:recordTip', (event, amount, username, platform) => 
 // ─────────────────────────────────────────────
 
 ipcMain.handle('relay:connect', async (event, accessToken, username, platform) => {
+  const denied = requireAuth('relay:connect');
+  if (denied) return denied;
   return await relayService.connect(accessToken, username, platform);
 });
 
 ipcMain.handle('relay:disconnect', () => {
+  const denied = requireAuth('relay:disconnect');
+  if (denied) return denied;
   relayService.disconnect();
   return true;
 });
 
 ipcMain.handle('relay:getStatus', () => {
+  const denied = requireAuth('relay:getStatus');
+  if (denied) return denied;
   return relayService.getStatus();
 });
 
 ipcMain.handle('relay:sendHeartbeat', () => {
+  const denied = requireAuth('relay:sendHeartbeat');
+  if (denied) return denied;
   relayService.sendHeartbeat();
   return true;
 });

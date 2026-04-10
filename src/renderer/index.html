@@ -9,7 +9,61 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div id="app">
+  <!-- ════════════════════════════════════════════════════════════
+       AUTH GATE — Blocks entire dashboard until user logs in
+       ════════════════════════════════════════════════════════════ -->
+  <div id="authGate" class="auth-gate">
+    <div class="auth-gate-content">
+      <div class="auth-gate-logo">
+        <div class="auth-gate-icon">◈</div>
+        <h1 class="auth-gate-title">Apex Revenue</h1>
+        <p class="auth-gate-subtitle">LIVESTREAM MANAGEMENT PLATFORM</p>
+      </div>
+
+      <div class="auth-gate-card">
+        <div class="auth-gate-tabs">
+          <button class="auth-gate-tab active" data-gate-tab="login">Sign In</button>
+          <button class="auth-gate-tab" data-gate-tab="signup">Create Account</button>
+        </div>
+
+        <!-- Login Form -->
+        <form id="gateLoginForm" class="auth-gate-form active">
+          <div class="gate-form-group">
+            <label for="gateLoginEmail">Email</label>
+            <input type="email" id="gateLoginEmail" placeholder="you@example.com" required autocomplete="email">
+          </div>
+          <div class="gate-form-group">
+            <label for="gateLoginPassword">Password</label>
+            <input type="password" id="gateLoginPassword" placeholder="Your password" required autocomplete="current-password">
+          </div>
+          <button type="submit" class="auth-gate-btn" id="gateLoginBtn">Sign In</button>
+          <div id="gateLoginError" class="gate-form-error"></div>
+        </form>
+
+        <!-- Signup Form -->
+        <form id="gateSignupForm" class="auth-gate-form">
+          <div class="gate-form-group">
+            <label for="gateSignupEmail">Email</label>
+            <input type="email" id="gateSignupEmail" placeholder="you@example.com" required autocomplete="email">
+          </div>
+          <div class="gate-form-group">
+            <label for="gateSignupPassword">Password</label>
+            <input type="password" id="gateSignupPassword" placeholder="Min 8 characters" required autocomplete="new-password">
+          </div>
+          <div class="gate-form-group">
+            <label for="gateSignupConfirm">Confirm Password</label>
+            <input type="password" id="gateSignupConfirm" placeholder="Confirm password" required autocomplete="new-password">
+          </div>
+          <button type="submit" class="auth-gate-btn" id="gateSignupBtn">Create Account</button>
+          <div id="gateSignupError" class="gate-form-error"></div>
+        </form>
+
+        <p class="auth-gate-footer">Sign in to access your dashboard and link your streaming accounts.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="app" class="app-hidden">
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
