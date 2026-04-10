@@ -4,7 +4,17 @@
  */
 
 const Store = require('electron-store');
-const jwt_decode = require('jwt-decode');
+
+// Built-in JWT decoder (no external dependency needed)
+function jwt_decode(token) {
+  try {
+    const payload = token.split('.')[1];
+    const decoded = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    return JSON.parse(decoded);
+  } catch (e) {
+    return {};
+  }
+}
 
 // AWS Cognito Configuration
 const COGNITO_CONFIG = {
