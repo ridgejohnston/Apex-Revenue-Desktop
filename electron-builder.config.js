@@ -6,6 +6,12 @@
  */
 
 const path = require('path');
+const fs = require('fs');
+
+// Check which icon formats are available
+const hasIco = fs.existsSync(path.join(__dirname, 'assets', 'icon.ico'));
+const hasPng = fs.existsSync(path.join(__dirname, 'assets', 'icon.png'));
+const iconPath = hasIco ? 'assets/icon.ico' : (hasPng ? 'assets/icon.png' : undefined);
 
 module.exports = {
   appId: 'com.apexrevenue.desktop',
@@ -36,8 +42,8 @@ module.exports = {
     }
   ],
 
-  // Disable asar for now — obs-studio-node loads many DLLs
-  // dynamically and they need to be on the real filesystem
+  // Disable asar — obs-studio-node loads DLLs dynamically
+  // and they need to be on the real filesystem
   asar: false,
 
   // ── Windows Installer (NSIS) ──
@@ -48,30 +54,20 @@ module.exports = {
         arch: ['x64']
       }
     ],
-    icon: 'assets/icon.png',
-    // Sign if certificate is available (set CSC_LINK and CSC_KEY_PASSWORD env vars)
-    // sign: null,
+    icon: iconPath,
     artifactName: 'ApexRevenueDesktop-Setup-${version}.${ext}'
   },
 
   nsis: {
-    oneClick: false,
-    allowToChangeInstallationDirectory: true,
-    installerIcon: 'assets/icon.ico',
-    uninstallerIcon: 'assets/icon.ico',
-    installerHeaderIcon: 'assets/icon.ico',
+    oneClick: true,
     createDesktopShortcut: true,
     createStartMenuShortcut: true,
     shortcutName: 'Apex Revenue Desktop',
-    // Custom NSIS script for additional installer pages
-    include: 'scripts/installer.nsh',
     deleteAppDataOnUninstall: false,
-    // Require admin for installing native OBS libraries
-    perMachine: true,
+    perMachine: false,
     allowElevation: true,
-    // Install VC++ redistributable if needed (OBS requires it)
-    installerSidebar: null,
-    license: null
+    // Custom NSIS include for VC++ check and firewall rule
+    include: 'scripts/installer.nsh'
   },
 
   // ── macOS Installer (DMG) ──
@@ -82,13 +78,12 @@ module.exports = {
         arch: ['x64', 'arm64']
       }
     ],
-    icon: 'assets/icon.png',
+    icon: iconPath,
     category: 'public.app-category.video',
     artifactName: 'ApexRevenueDesktop-${version}-${arch}.${ext}',
     hardenedRuntime: true,
     entitlements: 'scripts/entitlements.mac.plist',
     entitlementsInherit: 'scripts/entitlements.mac.plist',
-    // Camera and microphone access required for OBS
     extendInfo: {
       NSCameraUsageDescription: 'Apex Revenue Desktop needs camera access for streaming.',
       NSMicrophoneUsageDescription: 'Apex Revenue Desktop needs microphone access for streaming.',
@@ -106,20 +101,10 @@ module.exports = {
   // ── Linux (AppImage) ──
   linux: {
     target: ['AppImage'],
-    icon: 'assets/icon.png',
+    icon: iconPath,
     category: 'AudioVideo',
     artifactName: 'ApexRevenueDesktop-${version}.${ext}'
   },
-
-  // ── Publish (auto-update) ──
-  // Uncomment and configure when ready for auto-updates
-  // publish: [
-  //   {
-  //     provider: 'github',
-  //     owner: 'ridgejohnston',
-  //     repo: 'Apex-Revenue-Desktop'
-  //   }
-  // ],
 
   // ── Build hooks ──
   afterPack: async (context) => {
