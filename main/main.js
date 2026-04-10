@@ -8,10 +8,11 @@ const {
   app, BrowserWindow, BrowserView, ipcMain, Tray,
   Menu, nativeImage, shell, session
 } = require('electron');
-const path   = require('path');
-const Store  = require('electron-store');
-const aws    = require('./aws-services');
-const config = require('../shared/aws-config');
+const path    = require('path');
+const Store   = require('electron-store');
+const aws     = require('./aws-services');
+const config  = require('../shared/aws-config');
+const { initUpdater, stopUpdater } = require('./updater');
 
 // ── Persistent store ──────────────────────────────────────────────────────────
 const store = new Store({
@@ -94,6 +95,7 @@ function createMainWindow() {
     mainWindow.show();
     setupBrowserView(store.get('selectedUrl', 'https://chaturbate.com/'));
     startCloudWatchHeartbeat();
+    initUpdater(mainWindow);   // ← start auto-updater
     // Signal renderer that AWS is live
     mainWindow.webContents.once('did-finish-load', () => {
       mainWindow.webContents.send('aws:status', { active: true, region: config.REGION });
@@ -297,8 +299,20 @@ ipcMain.handle('aws:polly-speak', async (_, text) => {
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:maximize', () => { if (mainWindow?.isMaximized()) mainWindow.unmaximize(); else mainWindow?.maximize(); });
 ipcMain.on('window:close',    () => mainWindow?.hide());
-ipcMain.on('window:quit',     () => { aws.flushFirehose(); app.quit(); });
+ipcMain.on('window:quit',     () => { aws.flushFirehose(); stopUpdater(); app.quit(); });
 ipcMain.on('shell:open',      (_, url) => shell.openExternal(url));
+
+// Reposition BrowserView when update banner appears/disappears
+ipcMain.on('update:banner-height', (_, bannerH) => {
+  if (!currentBrowserView || !mainWindow) return;
+  const [w, h] = mainWindow.getContentSize();
+  currentBrowserView.setBounds({
+    x:      SIDEBAR_W,
+    y:      TITLEBAR_H + bannerH,
+    width:  Math.max(0, w - SIDEBAR_W - PANEL_W),
+    height: Math.max(0, h - TITLEBAR_H - bannerH),
+  });
+});
 
 ipcMain.on('cam:navigate', (_, url) => {
   store.set('selectedUrl', url);
@@ -332,4 +346,4 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => { /* stay in tray on Windows */ });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); });
-app.on('before-quit', () => { aws.flushFirehose(); });
+app.on('before-quit', () => { aws.flushFirehose(); stopUpdater(); });

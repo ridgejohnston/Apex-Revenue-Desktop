@@ -35,9 +35,32 @@
   </div>
 
   <div class="tb-right">
+    <span class="tb-version" id="app-version">v1.0.0</span>
     <button class="wc-btn min" id="wc-min">─</button>
     <button class="wc-btn max" id="wc-max">□</button>
     <button class="wc-btn cls" id="wc-cls">✕</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     UPDATE BANNER (hidden until update is ready)
+════════════════════════════════════════════════════════════ -->
+<div id="update-banner" class="hidden">
+  <div class="update-banner-inner">
+    <div class="update-icon">⬆️</div>
+    <div class="update-text">
+      <span id="update-banner-title">Update available</span>
+      <span id="update-banner-sub">Downloading…</span>
+    </div>
+    <div class="update-progress-wrap" id="update-progress-wrap">
+      <div class="update-progress-bar" id="update-progress-bar"></div>
+      <span class="update-progress-pct" id="update-progress-pct">0%</span>
+    </div>
+    <div class="update-actions">
+      <button class="update-btn primary" id="btn-update-install">Restart &amp; Install</button>
+      <button class="update-btn secondary" id="btn-update-later">Later</button>
+    </div>
+    <button class="update-close" id="btn-update-close">✕</button>
   </div>
 </div>
 

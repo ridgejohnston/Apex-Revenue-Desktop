@@ -20,7 +20,9 @@
     "@aws-sdk/client-polly": "^3.1028.0",
     "@aws-sdk/client-s3": "^3.1028.0",
     "@aws-sdk/credential-providers": "^3.1028.0",
-    "electron-store": "^8.1.0"
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.8.3",
+    "js-yaml": "^4.1.1"
   },
   "devDependencies": {
     "electron": "^29.4.6",
@@ -66,7 +68,15 @@
       "shortcutName": "Apex Revenue",
       "installerIcon": "assets/icons/icon.ico",
       "uninstallerIcon": "assets/icons/icon.ico",
-      "installerHeader": "assets/icons/icon.ico"
-    }
+      "installerHeader": "assets/icons/icon.ico",
+      "differentialPackage": false
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://apex-revenue-updates-994438967527.s3.amazonaws.com",
+        "channel": "latest"
+      }
+    ]
   }
 }

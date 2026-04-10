@@ -25,6 +25,17 @@ async function init() {
   bindUrlBar();
   bindTabs();
   bindAuth();
+  bindUpdateBanner();   // ← new
+
+  // Show current version in titlebar
+  try {
+    const { app } = window.electronAPI || {};
+    // Version is baked into the asar — read from package.json via IPC
+    const status = await window.electronAPI.updater.getStatus();
+    if (status?.currentVersion) {
+      $('app-version').textContent = `v${status.currentVersion}`;
+    }
+  } catch {}
 
   // Restore last URL into URL bar
   const lastUrl = await window.electronAPI.store.get('selectedUrl');
@@ -56,6 +67,14 @@ async function init() {
     cwHeartbeats++;
     $('aws-cw-label').textContent = `CW ✓ (${cwHeartbeats})`;
   }) || window.electronAPI.removeAllListeners('aws:cw-heartbeat');
+
+  // Update events
+  window.electronAPI.onUpdateChecking(() => setUpdateState('checking'));
+  window.electronAPI.onUpdateAvailable(info => setUpdateState('available', info));
+  window.electronAPI.onUpdateProgress(info  => setUpdateState('progress', info));
+  window.electronAPI.onUpdateReady(info     => setUpdateState('ready', info));
+  window.electronAPI.onUpdateNotAvail(()    => setUpdateState('current'));
+  window.electronAPI.onUpdateError(info     => setUpdateState('error', info));
 
   checkAuth();
   setInterval(updateTimer, 1000);
@@ -200,7 +219,105 @@ async function checkAuth() {
   } catch {}
 }
 
-// ── AWS status strip ──────────────────────────────────────────────────────────
+// ── Update Banner ─────────────────────────────────────────────────────────────
+let snoozeTimer = null;
+
+function bindUpdateBanner() {
+  $('btn-update-install').addEventListener('click', () => {
+    $('btn-update-install').textContent = 'Restarting…';
+    $('btn-update-install').disabled    = true;
+    window.electronAPI.updater.installNow();
+  });
+
+  $('btn-update-later').addEventListener('click', () => {
+    // Snooze banner for 2 hours — download continues in background
+    hideUpdateBanner();
+    if (snoozeTimer) clearTimeout(snoozeTimer);
+    snoozeTimer = setTimeout(() => {
+      window.electronAPI.updater.getStatus().then(s => {
+        if (s.downloadComplete) setUpdateState('ready', { version: s.latestVersion });
+      });
+    }, 2 * 60 * 60_000);
+  });
+
+  $('btn-update-close').addEventListener('click', hideUpdateBanner);
+}
+
+function setUpdateState(state, info = {}) {
+  const banner    = $('update-banner');
+  const title     = $('update-banner-title');
+  const sub       = $('update-banner-sub');
+  const progWrap  = $('update-progress-wrap');
+  const progBar   = $('update-progress-bar');
+  const progPct   = $('update-progress-pct');
+  const installBtn = $('btn-update-install');
+  const laterBtn  = $('btn-update-later');
+
+  switch (state) {
+    case 'checking':
+      // Silent — don't show banner while just checking
+      break;
+
+    case 'available':
+      banner.classList.remove('hidden');
+      banner.className = 'update-downloading';
+      title.textContent = `Update v${info.version} available`;
+      sub.textContent   = 'Downloading in background…';
+      progWrap.style.display  = 'flex';
+      installBtn.style.display = 'none';
+      laterBtn.style.display  = 'none';
+      $('app-version').textContent = `v${info.current} → v${info.version}`;
+      notifyBannerHeight(true);
+      break;
+
+    case 'progress':
+      banner.classList.remove('hidden');
+      const pct = info.percent || 0;
+      progBar.style.width     = `${pct}%`;
+      progPct.textContent     = `${pct}%`;
+      sub.textContent         = `${formatBytes(info.bytesPerSec || 0)}/s — ${pct}%`;
+      break;
+
+    case 'ready':
+      banner.classList.remove('hidden');
+      banner.className = 'update-ready';
+      title.textContent = `v${info.version} ready to install`;
+      sub.textContent   = 'Restart to apply the update';
+      progWrap.style.display   = 'none';
+      installBtn.style.display = '';
+      laterBtn.style.display   = '';
+      installBtn.textContent   = 'Restart & Install';
+      installBtn.disabled      = false;
+      notifyBannerHeight(true);
+      break;
+
+    case 'current':
+      // Up to date — show briefly then hide
+      $('app-version').textContent = `v${info.version || '1.0.0'} ✓`;
+      break;
+
+    case 'error':
+      // Silently log — don't disrupt UI for update errors
+      console.warn('[Update] Error:', info.message);
+      break;
+  }
+}
+
+function hideUpdateBanner() {
+  $('update-banner').classList.add('hidden');
+  window.electronAPI.updater.setBannerHeight(0);
+}
+
+// Notify main process so BrowserView moves down / up
+function notifyBannerHeight(visible) {
+  window.electronAPI.updater.setBannerHeight(visible ? 52 : 0);
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
+  if (bytes < 1024 * 1024)   return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
 function updateAwsStrip() {
   if (!awsActive) return;
   $('aws-s3-label').textContent = 'S3 ready';

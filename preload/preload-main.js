@@ -43,6 +43,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     pollySpeakText: text  => ipcRenderer.invoke('aws:polly-speak', text),
   },
 
+  // ── Auto-updater ───────────────────────────────────────────────────────────
+  updater: {
+    checkNow:      ()  => ipcRenderer.invoke('update:check'),
+    getStatus:     ()  => ipcRenderer.invoke('update:status'),
+    installNow:    ()  => ipcRenderer.send('update:install'),
+    setBannerHeight: h => ipcRenderer.send('update:banner-height', h),
+  },
+
   // ── Inbound events ─────────────────────────────────────────────────────────
   onLiveUpdate:       cb => ipcRenderer.on('live-update',        (_, d) => cb(d)),
   onPlatformDetected: cb => ipcRenderer.on('platform-detected',  (_, p) => cb(p)),
@@ -52,5 +60,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onPollyAudio:       cb => ipcRenderer.on('aws:polly-audio',    (_, d) => cb(d)),
   onBackupDone:       cb => ipcRenderer.on('aws:backup-done',    (_, d) => cb(d)),
   onAwsStatus:        cb => ipcRenderer.on('aws:status',         (_, d) => cb(d)),
+
+  // ── Update event listeners ─────────────────────────────────────────────────
+  onUpdateChecking:   cb => ipcRenderer.on('update:checking',    ()     => cb()),
+  onUpdateAvailable:  cb => ipcRenderer.on('update:available',   (_, d) => cb(d)),
+  onUpdateProgress:   cb => ipcRenderer.on('update:progress',    (_, d) => cb(d)),
+  onUpdateReady:      cb => ipcRenderer.on('update:ready',       (_, d) => cb(d)),
+  onUpdateNotAvail:   cb => ipcRenderer.on('update:not-available',(_, d)=> cb(d)),
+  onUpdateError:      cb => ipcRenderer.on('update:error',       (_, d) => cb(d)),
   removeAllListeners: ch => ipcRenderer.removeAllListeners(ch),
 });
