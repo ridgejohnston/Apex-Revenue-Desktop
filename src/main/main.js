@@ -418,60 +418,63 @@ ipcMain.handle('relay:sendHeartbeat', () => {
 
 // ─────────────────────────────────────────────
 // SERVICE EVENT FORWARDING
+// (Registered after services are created in app.whenReady)
 // ─────────────────────────────────────────────
 
-// Auth service events
-authService.onAuthChange((user) => {
-  if (mainWindow) {
-    mainWindow.webContents.send('auth:changed', user);
-  }
-});
+function registerServiceEvents() {
+  // Auth service events
+  authService.onAuthChange((user) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('auth:changed', user);
+    }
+  });
 
-// Intelligence service events
-intelligenceService.on('liveUpdate', (data) => {
-  if (mainWindow) mainWindow.webContents.send('intelligence:liveUpdate', data);
-});
+  // Intelligence service events
+  intelligenceService.on('liveUpdate', (data) => {
+    if (mainWindow) mainWindow.webContents.send('intelligence:liveUpdate', data);
+  });
 
-intelligenceService.on('fanUpdate', (data) => {
-  if (mainWindow) mainWindow.webContents.send('intelligence:fanUpdate', data);
-});
+  intelligenceService.on('fanUpdate', (data) => {
+    if (mainWindow) mainWindow.webContents.send('intelligence:fanUpdate', data);
+  });
 
-intelligenceService.on('sessionStarted', (data) => {
-  if (mainWindow) mainWindow.webContents.send('intelligence:sessionStarted', data);
-});
+  intelligenceService.on('sessionStarted', (data) => {
+    if (mainWindow) mainWindow.webContents.send('intelligence:sessionStarted', data);
+  });
 
-intelligenceService.on('sessionEnded', (data) => {
-  if (mainWindow) mainWindow.webContents.send('intelligence:sessionEnded', data);
-});
+  intelligenceService.on('sessionEnded', (data) => {
+    if (mainWindow) mainWindow.webContents.send('intelligence:sessionEnded', data);
+  });
 
-intelligenceService.on('tipReceived', (data) => {
-  if (mainWindow) mainWindow.webContents.send('intelligence:tipReceived', data);
-});
+  intelligenceService.on('tipReceived', (data) => {
+    if (mainWindow) mainWindow.webContents.send('intelligence:tipReceived', data);
+  });
 
-intelligenceService.on('balanceUpdate', (data) => {
-  if (mainWindow) mainWindow.webContents.send('intelligence:balanceUpdate', data);
-});
+  intelligenceService.on('balanceUpdate', (data) => {
+    if (mainWindow) mainWindow.webContents.send('intelligence:balanceUpdate', data);
+  });
 
-// Relay service events
-relayService.on('connected', () => {
-  if (mainWindow) mainWindow.webContents.send('relay:connected');
-});
+  // Relay service events
+  relayService.on('connected', () => {
+    if (mainWindow) mainWindow.webContents.send('relay:connected');
+  });
 
-relayService.on('disconnected', () => {
-  if (mainWindow) mainWindow.webContents.send('relay:disconnected');
-});
+  relayService.on('disconnected', () => {
+    if (mainWindow) mainWindow.webContents.send('relay:disconnected');
+  });
 
-relayService.on('fanControl', (data) => {
-  if (mainWindow) mainWindow.webContents.send('relay:fanControl', data);
-});
+  relayService.on('fanControl', (data) => {
+    if (mainWindow) mainWindow.webContents.send('relay:fanControl', data);
+  });
 
-relayService.on('vibeCommand', (data) => {
-  if (mainWindow) mainWindow.webContents.send('relay:vibeCommand', data);
-});
+  relayService.on('vibeCommand', (data) => {
+    if (mainWindow) mainWindow.webContents.send('relay:vibeCommand', data);
+  });
 
-relayService.on('relayEvent', (data) => {
-  if (mainWindow) mainWindow.webContents.send('relay:event', data);
-});
+  relayService.on('relayEvent', (data) => {
+    if (mainWindow) mainWindow.webContents.send('relay:event', data);
+  });
+}
 
 // ─────────────────────────────────────────────
 // STREAM SERVICE EVENT FORWARDING (Existing)
@@ -502,6 +505,9 @@ app.whenReady().then(async () => {
   authService = new AuthService();
   intelligenceService = new IntelligenceService(authService);
   relayService = new RelayService();
+
+  // Register event forwarding now that services exist
+  registerServiceEvents();
 
   createMainWindow();
 });
