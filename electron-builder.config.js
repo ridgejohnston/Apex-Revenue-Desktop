@@ -15,7 +15,7 @@ const iconPath = hasIco ? 'assets/icon.ico' : (hasPng ? 'assets/icon.png' : unde
 
 module.exports = {
   appId: 'com.apexrevenue.desktop',
-  productName: 'Apex Revenue Desktop',
+  productName: 'Apex Revenue',
   copyright: 'Copyright 2026 Ridge Johnston',
 
   directories: {
@@ -62,7 +62,7 @@ module.exports = {
     oneClick: true,
     createDesktopShortcut: true,
     createStartMenuShortcut: true,
-    shortcutName: 'Apex Revenue Desktop',
+    shortcutName: 'Apex Revenue',
     deleteAppDataOnUninstall: false,
     perMachine: false,
     allowElevation: true,

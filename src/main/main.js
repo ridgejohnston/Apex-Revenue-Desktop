@@ -2,7 +2,7 @@
  * Apex Revenue Desktop - Main Process
  *
  * Electron main process that manages windows, IPC communication,
- * and orchestrates the OBS backend via obs-manager.
+ * orchestrates OBS backend, and integrates authentication, intelligence, and relay services.
  */
 
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
@@ -10,6 +10,9 @@ const path = require('path');
 const Store = require('electron-store');
 const obsManager = require('../obs/obs-manager');
 const streamService = require('../obs/stream-service');
+const AuthService = require('../services/auth-service');
+const IntelligenceService = require('../services/intelligence-service');
+const RelayService = require('../services/relay-service');
 
 // Persistent settings store
 const store = new Store({
@@ -38,12 +41,23 @@ const store = new Store({
     ui: {
       windowBounds: { width: 1280, height: 820 },
       alwaysOnTop: false
+    },
+    auth: {
+      autoRefresh: true
+    },
+    intelligence: {
+      updateInterval: 5000
     }
   }
 });
 
 let mainWindow = null;
 let obsInitialized = false;
+
+// Service instances
+let authService = null;
+let intelligenceService = null;
+let relayService = null;
 
 // ─────────────────────────────────────────────
 // WINDOW CREATION
@@ -57,7 +71,7 @@ function createMainWindow() {
     height: bounds.height,
     minWidth: 960,
     minHeight: 600,
-    title: 'Apex Revenue Desktop',
+    title: 'Apex Revenue — Livestream Management Platform',
     backgroundColor: '#18181c',
     webPreferences: {
       nodeIntegration: false,
@@ -289,7 +303,178 @@ ipcMain.handle('dialog:selectFile', async (event, filters) => {
 });
 
 // ─────────────────────────────────────────────
-// STREAM SERVICE EVENT FORWARDING
+// IPC HANDLERS - AUTHENTICATION (New)
+// ─────────────────────────────────────────────
+
+ipcMain.handle('auth:login', async (event, email, password) => {
+  return await authService.login(email, password);
+});
+
+ipcMain.handle('auth:signup', async (event, email, password) => {
+  return await authService.signup(email, password);
+});
+
+ipcMain.handle('auth:logout', async () => {
+  return await authService.logout();
+});
+
+ipcMain.handle('auth:getSession', () => {
+  return authService.getSession();
+});
+
+ipcMain.handle('auth:getUser', () => {
+  return authService.getUser();
+});
+
+ipcMain.handle('auth:refreshTokens', async () => {
+  return await authService.refreshTokens();
+});
+
+ipcMain.handle('auth:linkPlatform', async (event, platform, username) => {
+  return await authService.linkPlatform(platform, username);
+});
+
+ipcMain.handle('auth:unlinkPlatform', async (event, platform) => {
+  return await authService.unlinkPlatform(platform);
+});
+
+ipcMain.handle('auth:isAdmin', () => {
+  return authService.isAdmin();
+});
+
+// ─────────────────────────────────────────────
+// IPC HANDLERS - INTELLIGENCE (New)
+// ─────────────────────────────────────────────
+
+ipcMain.handle('intelligence:getLiveData', () => {
+  return intelligenceService.getLiveData();
+});
+
+ipcMain.handle('intelligence:getFanLeaderboard', () => {
+  return intelligenceService.getFanLeaderboard();
+});
+
+ipcMain.handle('intelligence:getEarnings', () => {
+  return intelligenceService.getEarnings();
+});
+
+ipcMain.handle('intelligence:getSessions', () => {
+  return intelligenceService.getSessions();
+});
+
+ipcMain.handle('intelligence:getTotalEarnings', () => {
+  return intelligenceService.getTotalEarnings();
+});
+
+ipcMain.handle('intelligence:getSessionStats', () => {
+  return intelligenceService.getSessionStats();
+});
+
+ipcMain.handle('intelligence:getAnalytics', async (event, timeRange) => {
+  const token = authService.getAccessToken();
+  return await intelligenceService.getAnalytics(token, timeRange);
+});
+
+ipcMain.handle('intelligence:checkSubscription', async () => {
+  const token = authService.getAccessToken();
+  return await intelligenceService.checkSubscription(token);
+});
+
+ipcMain.handle('intelligence:startSession', (event, roomName, settings) => {
+  intelligenceService.startSession(roomName, settings);
+  return true;
+});
+
+ipcMain.handle('intelligence:endSession', (event, roomName) => {
+  intelligenceService.endSession(roomName);
+  return true;
+});
+
+ipcMain.handle('intelligence:recordTip', (event, amount, username, platform) => {
+  return intelligenceService.recordTip(amount, username, platform);
+});
+
+// ─────────────────────────────────────────────
+// IPC HANDLERS - RELAY (New)
+// ─────────────────────────────────────────────
+
+ipcMain.handle('relay:connect', async (event, accessToken, username, platform) => {
+  return await relayService.connect(accessToken, username, platform);
+});
+
+ipcMain.handle('relay:disconnect', () => {
+  relayService.disconnect();
+  return true;
+});
+
+ipcMain.handle('relay:getStatus', () => {
+  return relayService.getStatus();
+});
+
+ipcMain.handle('relay:sendHeartbeat', () => {
+  relayService.sendHeartbeat();
+  return true;
+});
+
+// ─────────────────────────────────────────────
+// SERVICE EVENT FORWARDING
+// ─────────────────────────────────────────────
+
+// Auth service events
+authService.onAuthChange((user) => {
+  if (mainWindow) {
+    mainWindow.webContents.send('auth:changed', user);
+  }
+});
+
+// Intelligence service events
+intelligenceService.on('liveUpdate', (data) => {
+  if (mainWindow) mainWindow.webContents.send('intelligence:liveUpdate', data);
+});
+
+intelligenceService.on('fanUpdate', (data) => {
+  if (mainWindow) mainWindow.webContents.send('intelligence:fanUpdate', data);
+});
+
+intelligenceService.on('sessionStarted', (data) => {
+  if (mainWindow) mainWindow.webContents.send('intelligence:sessionStarted', data);
+});
+
+intelligenceService.on('sessionEnded', (data) => {
+  if (mainWindow) mainWindow.webContents.send('intelligence:sessionEnded', data);
+});
+
+intelligenceService.on('tipReceived', (data) => {
+  if (mainWindow) mainWindow.webContents.send('intelligence:tipReceived', data);
+});
+
+intelligenceService.on('balanceUpdate', (data) => {
+  if (mainWindow) mainWindow.webContents.send('intelligence:balanceUpdate', data);
+});
+
+// Relay service events
+relayService.on('connected', () => {
+  if (mainWindow) mainWindow.webContents.send('relay:connected');
+});
+
+relayService.on('disconnected', () => {
+  if (mainWindow) mainWindow.webContents.send('relay:disconnected');
+});
+
+relayService.on('fanControl', (data) => {
+  if (mainWindow) mainWindow.webContents.send('relay:fanControl', data);
+});
+
+relayService.on('vibeCommand', (data) => {
+  if (mainWindow) mainWindow.webContents.send('relay:vibeCommand', data);
+});
+
+relayService.on('relayEvent', (data) => {
+  if (mainWindow) mainWindow.webContents.send('relay:event', data);
+});
+
+// ─────────────────────────────────────────────
+// STREAM SERVICE EVENT FORWARDING (Existing)
 // ─────────────────────────────────────────────
 
 streamService.on('streamStart', (data) => {
@@ -312,11 +497,24 @@ streamService.on('streamHealth', (data) => {
 // APP LIFECYCLE
 // ─────────────────────────────────────────────
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Initialize services
+  authService = new AuthService();
+  intelligenceService = new IntelligenceService(authService);
+  relayService = new RelayService();
+
   createMainWindow();
 });
 
 app.on('window-all-closed', async () => {
+  // Cleanup services
+  if (relayService) {
+    relayService.disconnect();
+  }
+  if (intelligenceService) {
+    intelligenceService.stopPeriodicUpdates();
+  }
+
   await obsManager.shutdown();
   if (process.platform !== 'darwin') {
     app.quit();
@@ -330,5 +528,13 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', async () => {
+  // Cleanup services
+  if (relayService) {
+    relayService.disconnect();
+  }
+  if (intelligenceService) {
+    intelligenceService.stopPeriodicUpdates();
+  }
+
   await obsManager.shutdown();
 });

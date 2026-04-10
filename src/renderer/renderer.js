@@ -1,478 +1,901 @@
 /**
  * Apex Revenue Desktop - Renderer Process
+ * Integrated with Creator Intelligence
  *
- * Handles all UI interactions and communicates with the main process
- * via the `window.apex` bridge (exposed by preload.js).
+ * Handles UI interactions, OBS management, auth, intelligence panel,
+ * and communication with the main process via window.apex bridge.
  */
 
-// ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
 // STATE
-// ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
 
 const state = {
+  // OBS & Streaming
   obsInitialized: false,
   streaming: false,
   recording: false,
+  streamStartTime: null,
   sources: [],
-  streamStartTime: null
+
+  // Intelligence Panel
+  currentIntelPage: 'live',
+  liveData: {
+    earningsPerHour: 0,
+    viewers: 0,
+    conversionRate: 0,
+    whales: [],
+    prompts: [],
+    heatMap: [],
+    priceRecommendation: 0
+  },
+  fanLeaderboard: [],
+  selectedFanFilter: 'all',
+
+  // Auth
+  user: null,
+  isAuthenticated: false,
+
+  // Uptime
+  uptimeInterval: null,
+  uptime: 0
 };
 
-// ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
 // DOM REFERENCES
-// ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
 
 const $ = (id) => document.getElementById(id);
 
 const dom = {
   // Header
-  statusDot: $('status-dot'),
-  statusText: $('status-text'),
-  uptime: $('uptime'),
+  statusDot: $('statusDot'),
+  statusText: $('statusText'),
+  uptimeDisplay: $('uptimeDisplay'),
+  accountWidget: $('accountWidget'),
+  showLoginBtn: $('showLoginBtn'),
 
-  // Controls
-  btnInitObs: $('btn-init-obs'),
-  btnStream: $('btn-stream'),
-  btnRecord: $('btn-record'),
+  // Stream controls
+  initOBSBtn: $('initOBSBtn'),
+  goLiveBtn: $('goLiveBtn'),
+  recordBtn: $('recordBtn'),
+
+  // Intelligence panel
+  intelContent: $('intelContent'),
+  intelNavBtns: document.querySelectorAll('.intel-nav-btn'),
+  alertBanner: $('alertBanner'),
+  alertText: $('alertText'),
+  alertClose: document.querySelector('.alert-close'),
 
   // Stream settings
-  broadcastToken: $('broadcast-token'),
-  toggleTokenVis: $('toggle-token-vis'),
-  rtmpServer: $('rtmp-server'),
-  encoder: $('encoder'),
+  streamKey: $('streamKey'),
+  streamServer: $('streamServer'),
   bitrate: $('bitrate'),
-  preset: $('preset'),
-  audioBitrate: $('audio-bitrate'),
-  resolution: $('resolution'),
   fps: $('fps'),
-  btnApplyStream: $('btn-apply-stream'),
 
   // Sources
-  webcamDevice: $('webcam-device'),
-  btnAddWebcam: $('btn-add-webcam'),
-  micDevice: $('mic-device'),
-  btnAddMic: $('btn-add-mic'),
-  desktopAudio: $('desktop-audio'),
-  bgImagePath: $('bg-image-path'),
-  btnBrowseImage: $('btn-browse-image'),
-  btnAddBgImage: $('btn-add-bg-image'),
-  bgVideoPath: $('bg-video-path'),
-  btnBrowseVideo: $('btn-browse-video'),
-  btnAddBgVideo: $('btn-add-bg-video'),
-  activeSourcesList: $('active-sources-list'),
+  sourcesList: $('sourcesList'),
+  addSourceBtn: $('addSourceBtn'),
 
   // Recording
-  recordingPath: $('recording-path'),
-  btnBrowseRecording: $('btn-browse-recording'),
-  recordingFormat: $('recording-format'),
-  recordingBitrate: $('recording-bitrate'),
-  btnApplyRecording: $('btn-apply-recording'),
+  recordingPath: $('recordingPath'),
+  recordingFormat: $('recordingFormat'),
+  selectPathBtn: $('selectPathBtn'),
+  saveSettingsBtn: $('saveSettingsBtn'),
 
-  // Health
-  healthBitrate: $('health-bitrate'),
-  healthFps: $('health-fps'),
-  healthDropped: $('health-dropped')
+  // Settings tabs
+  settingsTabs: document.querySelectorAll('.settings-tab'),
+  settingsSections: document.querySelectorAll('.settings-section'),
+
+  // Footer health stats
+  statBitrate: $('statBitrate'),
+  statFPS: $('statFPS'),
+  statDropped: $('statDropped'),
+  statUptime: $('statUptime'),
+
+  // Auth modal
+  authModal: $('authModal'),
+  closeAuthModal: $('closeAuthModal'),
+  authTabs: document.querySelectorAll('.auth-tab'),
+  loginForm: $('loginForm'),
+  signupForm: $('signupForm'),
+  loginEmail: $('loginEmail'),
+  loginPassword: $('loginPassword'),
+  signupEmail: $('signupEmail'),
+  signupPassword: $('signupPassword'),
+  signupConfirm: $('signupConfirm'),
+  loginError: $('loginError'),
+  signupError: $('signupError'),
+
+  // Platform modal
+  platformModal: $('platformModal'),
+  closePlatformModal: $('closePlatformModal'),
+  chaturbateUsername: $('chaturbateUsername'),
+  stripchatUsername: $('stripchatUsername')
 };
 
-// ─────────────────────────────────────────────
-// TAB NAVIGATION
-// ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// INITIALIZATION
+// ════════════════════════════════════════════════════════════════════════════
 
-document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-
-    tab.classList.add('active');
-    const targetId = tab.getAttribute('data-tab');
-    document.getElementById(targetId).classList.add('active');
-  });
+document.addEventListener('DOMContentLoaded', async () => {
+  initializeEventListeners();
+  loadSettings();
+  startUptimeCounter();
+  checkAuthStatus();
+  renderIntelligencePage('live');
+  setupStreamHealthUpdates();
 });
 
-// ─────────────────────────────────────────────
-// INITIALIZATION
-// ─────────────────────────────────────────────
+function initializeEventListeners() {
+  // Stream controls
+  dom.initOBSBtn.addEventListener('click', initializeOBS);
+  dom.goLiveBtn.addEventListener('click', toggleLiveStream);
+  dom.recordBtn.addEventListener('click', toggleRecording);
 
-dom.btnInitObs.addEventListener('click', async () => {
-  dom.btnInitObs.textContent = 'Initializing...';
-  dom.btnInitObs.disabled = true;
+  // Intelligence panel navigation
+  dom.intelNavBtns.forEach(btn => {
+    btn.addEventListener('click', () => switchIntelPage(btn.dataset.page));
+  });
+
+  // Alert banner close
+  if (dom.alertClose) {
+    dom.alertClose.addEventListener('click', hideAlertBanner);
+  }
+
+  // Settings tabs
+  dom.settingsTabs.forEach(tab => {
+    tab.addEventListener('click', () => switchSettingsTab(tab.dataset.tab));
+  });
+
+  // Settings actions
+  dom.saveSettingsBtn.addEventListener('click', saveStreamSettings);
+  dom.selectPathBtn.addEventListener('click', selectRecordingPath);
+
+  // Auth
+  dom.showLoginBtn.addEventListener('click', showAuthModal);
+  dom.closeAuthModal.addEventListener('click', hideAuthModal);
+  dom.authTabs.forEach(tab => {
+    tab.addEventListener('click', () => switchAuthTab(tab.dataset.authTab));
+  });
+  dom.loginForm.addEventListener('submit', handleLogin);
+  dom.signupForm.addEventListener('submit', handleSignup);
+
+  // Platform linking
+  dom.closePlatformModal.addEventListener('click', hidePlatformModal);
+  document.querySelectorAll('.link-btn').forEach(btn => {
+    btn.addEventListener('click', () => linkPlatformAccount(btn.dataset.platform));
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// OBS FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
+
+async function initializeOBS() {
+  dom.initOBSBtn.textContent = 'Initializing...';
+  dom.initOBSBtn.disabled = true;
 
   try {
     const result = await window.apex.obs.initialize();
-    if (result) {
+    if (result.success) {
       state.obsInitialized = true;
-      dom.btnInitObs.textContent = 'OBS Ready';
-      dom.btnStream.disabled = false;
-      dom.btnRecord.disabled = false;
-
-      // Create preview
-      await window.apex.obs.createPreview();
-
-      // Populate device lists
-      await populateDevices();
-
-      // Load saved settings
-      await loadSettings();
-
-      updateStatus('ready', 'Ready');
+      dom.initOBSBtn.textContent = 'OBS Ready';
+      dom.initOBSBtn.disabled = true;
+      dom.goLiveBtn.disabled = false;
+      dom.recordBtn.disabled = false;
+      updateStatus('Ready', 'ready');
+      loadDevices();
     } else {
-      dom.btnInitObs.textContent = 'Init Failed - Retry';
-      dom.btnInitObs.disabled = false;
+      showAlert('Failed to initialize OBS: ' + result.error, 'error');
     }
-  } catch (err) {
-    console.error('OBS init failed:', err);
-    dom.btnInitObs.textContent = 'Init Failed - Retry';
-    dom.btnInitObs.disabled = false;
+  } catch (error) {
+    console.error('OBS init error:', error);
+    showAlert('Error initializing OBS', 'error');
+    dom.initOBSBtn.textContent = 'Initialize OBS';
+    dom.initOBSBtn.disabled = false;
   }
-});
+}
 
-// ─────────────────────────────────────────────
-// STREAMING
-// ─────────────────────────────────────────────
+async function toggleLiveStream() {
+  if (!state.obsInitialized) {
+    showAlert('Initialize OBS first', 'error');
+    return;
+  }
 
-dom.btnStream.addEventListener('click', async () => {
   if (state.streaming) {
-    dom.btnStream.disabled = true;
-    dom.btnStream.textContent = 'Stopping...';
-    await window.apex.stream.stop();
+    await stopStream();
   } else {
-    // Validate token
-    if (!dom.broadcastToken.value.trim()) {
-      alert('Please enter your Chaturbate broadcast token in the Stream settings tab.');
-      return;
+    await startStream();
+  }
+}
+
+async function startStream() {
+  dom.goLiveBtn.textContent = 'Stopping...';
+  dom.goLiveBtn.disabled = true;
+
+  try {
+    const streamKey = dom.streamKey.value || 'test-key';
+    const result = await window.apex.stream.startStream(streamKey);
+
+    if (result.success) {
+      state.streaming = true;
+      state.streamStartTime = Date.now();
+      dom.goLiveBtn.textContent = 'Stop Stream';
+      dom.goLiveBtn.classList.add('live');
+      dom.recordBtn.disabled = false;
+      updateStatus('LIVE', 'live');
+      showAlert('Stream started successfully', 'success');
+    } else {
+      showAlert('Failed to start stream: ' + result.error, 'error');
     }
-
-    // Apply stream config before starting
-    await applyStreamSettings();
-
-    dom.btnStream.disabled = true;
-    dom.btnStream.textContent = 'Starting...';
-    await window.apex.stream.start();
+  } catch (error) {
+    console.error('Stream start error:', error);
+    showAlert('Error starting stream', 'error');
+  } finally {
+    dom.goLiveBtn.disabled = false;
   }
-});
+}
 
-// Stream state change handler
-window.apex.stream.onStateChange((data) => {
-  state.streaming = data.streaming;
-  updateStreamUI();
-});
+async function stopStream() {
+  dom.goLiveBtn.textContent = 'Stopping...';
+  dom.goLiveBtn.disabled = true;
 
-window.apex.stream.onEvent((data) => {
-  console.log('[Stream Event]', data);
-  if (data.event === 'stop') {
-    state.streaming = false;
-    state.streamStartTime = null;
-    updateStreamUI();
-  } else if (data.event === 'start') {
-    state.streaming = true;
-    state.streamStartTime = Date.now();
-    updateStreamUI();
+  try {
+    const result = await window.apex.stream.stopStream();
+
+    if (result.success) {
+      state.streaming = false;
+      dom.goLiveBtn.textContent = 'Go Live';
+      dom.goLiveBtn.classList.remove('live');
+      dom.recordBtn.disabled = true;
+      updateStatus('Ready', 'ready');
+      showAlert('Stream stopped', 'info');
+    } else {
+      showAlert('Failed to stop stream: ' + result.error, 'error');
+    }
+  } catch (error) {
+    console.error('Stream stop error:', error);
+    showAlert('Error stopping stream', 'error');
+  } finally {
+    dom.goLiveBtn.disabled = false;
   }
-});
+}
 
-window.apex.stream.onHealth((data) => {
-  if (data.profile) {
-    dom.healthBitrate.textContent = `Bitrate: ${data.profile.bitrate} kbps`;
-    dom.healthFps.textContent = `FPS: ${data.profile.fps}`;
+async function toggleRecording() {
+  if (!state.streaming) {
+    showAlert('Start streaming first', 'error');
+    return;
   }
-  if (data.uptime > 0) {
-    dom.uptime.textContent = formatUptime(data.uptime);
-  }
-});
 
-// ─────────────────────────────────────────────
-// RECORDING
-// ─────────────────────────────────────────────
-
-dom.btnRecord.addEventListener('click', async () => {
   if (state.recording) {
-    await window.apex.recording.stop();
+    await stopRecording();
   } else {
-    await window.apex.recording.start();
-  }
-});
-
-window.apex.recording.onStateChange((data) => {
-  state.recording = data.recording;
-  updateRecordingUI();
-});
-
-// ─────────────────────────────────────────────
-// STREAM SETTINGS
-// ─────────────────────────────────────────────
-
-dom.btnApplyStream.addEventListener('click', applyStreamSettings);
-
-async function applyStreamSettings() {
-  const config = {
-    broadcastToken: dom.broadcastToken.value.trim(),
-    server: dom.rtmpServer.value,
-    bitrate: parseInt(dom.bitrate.value),
-    encoder: dom.encoder.value,
-    resolution: dom.resolution.value,
-    fps: parseInt(dom.fps.value),
-    audioBitrate: parseInt(dom.audioBitrate.value),
-    preset: dom.preset.value
-  };
-
-  try {
-    await window.apex.stream.configure(config);
-    console.log('[Settings] Stream config applied');
-  } catch (err) {
-    console.error('[Settings] Failed to apply stream config:', err);
-    alert('Failed to apply stream settings: ' + err.message);
+    await startRecording();
   }
 }
 
-// Token visibility toggle
-dom.toggleTokenVis.addEventListener('click', () => {
-  const isPassword = dom.broadcastToken.type === 'password';
-  dom.broadcastToken.type = isPassword ? 'text' : 'password';
-  dom.toggleTokenVis.textContent = isPassword ? 'Hide' : 'Show';
-});
-
-// ─────────────────────────────────────────────
-// SOURCE MANAGEMENT
-// ─────────────────────────────────────────────
-
-async function populateDevices() {
+async function startRecording() {
   try {
-    const webcams = await window.apex.obs.getWebcamDevices();
-    dom.webcamDevice.innerHTML = '<option value="">-- Select Webcam --</option>';
-    webcams.forEach(d => {
-      const opt = document.createElement('option');
-      opt.value = d.id;
-      opt.textContent = d.name;
-      dom.webcamDevice.appendChild(opt);
-    });
-
-    const mics = await window.apex.obs.getAudioInputDevices();
-    dom.micDevice.innerHTML = '<option value="">-- Select Microphone --</option>';
-    mics.forEach(d => {
-      const opt = document.createElement('option');
-      opt.value = d.id;
-      opt.textContent = d.name;
-      dom.micDevice.appendChild(opt);
-    });
-  } catch (err) {
-    console.error('[Devices] Failed to enumerate:', err);
+    const result = await window.apex.recording.start();
+    if (result.success) {
+      state.recording = true;
+      dom.recordBtn.textContent = 'Stop Recording';
+      dom.recordBtn.classList.add('recording');
+      showAlert('Recording started', 'success');
+    } else {
+      showAlert('Failed to start recording: ' + result.error, 'error');
+    }
+  } catch (error) {
+    console.error('Recording start error:', error);
+    showAlert('Error starting recording', 'error');
   }
 }
 
-dom.btnAddWebcam.addEventListener('click', async () => {
-  const deviceId = dom.webcamDevice.value;
-  if (!deviceId) return alert('Please select a webcam first.');
-
-  await window.apex.obs.addWebcam('webcam-main', { deviceId });
-  addSourceToList('webcam-main', 'Webcam');
-});
-
-dom.btnAddMic.addEventListener('click', async () => {
-  const deviceId = dom.micDevice.value;
-  if (!deviceId) return alert('Please select a microphone first.');
-
-  await window.apex.obs.addAudio('mic-main', { type: 'microphone', deviceId });
-  addSourceToList('mic-main', 'Microphone');
-});
-
-dom.desktopAudio.addEventListener('change', async (e) => {
-  if (e.target.checked) {
-    await window.apex.obs.addAudio('desktop-audio', { type: 'desktop' });
-    addSourceToList('desktop-audio', 'Desktop Audio');
-  } else {
-    await window.apex.obs.removeSource('desktop-audio');
-    removeSourceFromList('desktop-audio');
+async function stopRecording() {
+  try {
+    const result = await window.apex.recording.stop();
+    if (result.success) {
+      state.recording = false;
+      dom.recordBtn.textContent = 'Record';
+      dom.recordBtn.classList.remove('recording');
+      showAlert('Recording stopped', 'success');
+    } else {
+      showAlert('Failed to stop recording: ' + result.error, 'error');
+    }
+  } catch (error) {
+    console.error('Recording stop error:', error);
+    showAlert('Error stopping recording', 'error');
   }
-});
+}
 
-// Image/Video browse
-dom.btnBrowseImage.addEventListener('click', async () => {
-  const file = await window.apex.dialog.selectFile([
-    { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'] }
-  ]);
-  if (file) dom.bgImagePath.value = file;
-});
+async function loadDevices() {
+  try {
+    const devices = await window.apex.obs.getDevices();
+    if (devices) {
+      updateDeviceSelectors(devices);
+    }
+  } catch (error) {
+    console.error('Error loading devices:', error);
+  }
+}
 
-dom.btnBrowseVideo.addEventListener('click', async () => {
-  const file = await window.apex.dialog.selectFile([
-    { name: 'Videos', extensions: ['mp4', 'webm', 'mkv', 'avi', 'mov'] }
-  ]);
-  if (file) dom.bgVideoPath.value = file;
-});
+function updateDeviceSelectors(devices) {
+  // This would populate the device selectors if they existed in new UI
+  // For now, devices are handled in main process
+}
 
-dom.btnAddBgImage.addEventListener('click', async () => {
-  const file = dom.bgImagePath.value;
-  if (!file) return alert('Please select an image file first.');
+// ════════════════════════════════════════════════════════════════════════════
+// SETTINGS MANAGEMENT
+// ════════════════════════════════════════════════════════════════════════════
 
-  await window.apex.obs.addImage('bg-image', { file, position: { x: 0, y: 0 } });
-  addSourceToList('bg-image', 'Background Image');
-});
+function loadSettings() {
+  try {
+    const settings = window.apex.settings.load();
+    if (settings) {
+      dom.streamKey.value = settings.streamKey || '';
+      dom.streamServer.value = settings.streamServer || '';
+      dom.bitrate.value = settings.bitrate || 6;
+      dom.fps.value = settings.fps || 30;
+      dom.recordingPath.value = settings.recordingPath || '';
+      dom.recordingFormat.value = settings.recordingFormat || 'mp4';
+    }
+  } catch (error) {
+    console.error('Error loading settings:', error);
+  }
+}
 
-dom.btnAddBgVideo.addEventListener('click', async () => {
-  const file = dom.bgVideoPath.value;
-  if (!file) return alert('Please select a video file first.');
+async function saveStreamSettings() {
+  try {
+    const settings = {
+      streamKey: dom.streamKey.value,
+      streamServer: dom.streamServer.value,
+      bitrate: parseFloat(dom.bitrate.value),
+      fps: parseInt(dom.fps.value),
+      recordingPath: dom.recordingPath.value,
+      recordingFormat: dom.recordingFormat.value
+    };
 
-  await window.apex.obs.addVideo('bg-video', { file, looping: true, position: { x: 0, y: 0 } });
-  addSourceToList('bg-video', 'Background Video');
-});
+    window.apex.settings.save(settings);
+    showAlert('Settings saved successfully', 'success');
+  } catch (error) {
+    console.error('Error saving settings:', error);
+    showAlert('Error saving settings', 'error');
+  }
+}
 
-// Recording folder
-dom.btnBrowseRecording.addEventListener('click', async () => {
-  const folder = await window.apex.dialog.selectFolder();
-  if (folder) dom.recordingPath.value = folder;
-});
+async function selectRecordingPath() {
+  try {
+    const result = await window.apex.dialog.selectDirectory();
+    if (result.path) {
+      dom.recordingPath.value = result.path;
+    }
+  } catch (error) {
+    console.error('Error selecting path:', error);
+  }
+}
 
-dom.btnApplyRecording.addEventListener('click', async () => {
-  const settings = {
-    outputPath: dom.recordingPath.value,
-    format: dom.recordingFormat.value,
-    bitrate: parseInt(dom.recordingBitrate.value)
-  };
+// ════════════════════════════════════════════════════════════════════════════
+// INTELLIGENCE PANEL FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
 
-  await window.apex.recording.configure(settings);
-  console.log('[Settings] Recording config applied');
-});
+function switchIntelPage(page) {
+  state.currentIntelPage = page;
+  dom.intelNavBtns.forEach(btn => btn.classList.remove('active'));
+  document.querySelector(`[data-page="${page}"]`).classList.add('active');
+  renderIntelligencePage(page);
+}
 
-// ─────────────────────────────────────────────
-// SOURCES LIST UI
-// ─────────────────────────────────────────────
+function renderIntelligencePage(page) {
+  let html = '';
 
-function addSourceToList(name, type) {
-  // Remove empty state
-  const empty = dom.activeSourcesList.querySelector('.empty-state');
-  if (empty) empty.remove();
+  switch (page) {
+    case 'live':
+      html = renderLivePage();
+      break;
+    case 'fans':
+      html = renderFansPage();
+      break;
+    case 'analytics':
+      html = renderAnalyticsPage();
+      break;
+    case 'settings':
+      html = renderSettingsPage();
+      break;
+    case 'help':
+      html = renderHelpPage();
+      break;
+  }
 
-  // Don't add duplicate
-  if (document.getElementById(`source-${name}`)) return;
+  dom.intelContent.innerHTML = html;
+  attachIntelPageEventListeners(page);
+}
 
-  const item = document.createElement('div');
-  item.className = 'source-item';
-  item.id = `source-${name}`;
-  item.innerHTML = `
-    <div>
-      <span class="source-name">${name}</span>
-      <span class="source-type">${type}</span>
-    </div>
-    <div class="source-actions">
-      <button class="btn-icon" title="Toggle visibility" data-action="toggle" data-source="${name}">&#128065;</button>
-      <button class="btn-icon" title="Remove" data-action="remove" data-source="${name}">&times;</button>
+function renderLivePage() {
+  const { earningsPerHour, viewers, conversionRate, whales, prompts, heatMap, priceRecommendation } = state.liveData;
+
+  let html = `
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Earnings/hr</div>
+        <div class="stat-value">$${earningsPerHour.toFixed(0)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Viewers</div>
+        <div class="stat-value">${viewers}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Conv %</div>
+        <div class="stat-value">${(conversionRate * 100).toFixed(1)}%</div>
+      </div>
     </div>
   `;
 
-  item.querySelector('[data-action="toggle"]').addEventListener('click', async (e) => {
-    const src = e.currentTarget.dataset.source;
-    const visible = e.currentTarget.textContent === '\u{1F441}';
-    await window.apex.obs.setSourceVisible(src, !visible);
-    e.currentTarget.textContent = visible ? '\u{1F441}\u{200D}\u{1F5E8}' : '\u{1F441}';
-  });
-
-  item.querySelector('[data-action="remove"]').addEventListener('click', async (e) => {
-    const src = e.currentTarget.dataset.source;
-    await window.apex.obs.removeSource(src);
-    removeSourceFromList(src);
-  });
-
-  dom.activeSourcesList.appendChild(item);
-  state.sources.push(name);
-}
-
-function removeSourceFromList(name) {
-  const item = document.getElementById(`source-${name}`);
-  if (item) item.remove();
-
-  state.sources = state.sources.filter(s => s !== name);
-
-  if (state.sources.length === 0) {
-    dom.activeSourcesList.innerHTML = '<p class="empty-state">No sources added yet</p>';
+  // Whale Tracker
+  if (whales && whales.length > 0) {
+    html += `
+      <div class="whale-tracker">
+        <div class="whale-tracker-title">Top Spenders</div>
+        <table class="whale-table">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Spent</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${whales.slice(0, 5).map(whale => `
+              <tr>
+                <td>${whale.username}</td>
+                <td>$${whale.spent.toFixed(0)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
   }
+
+  // Monetization Prompts
+  if (prompts && prompts.length > 0) {
+    html += `
+      <div class="prompts-container">
+        ${prompts.slice(0, 3).map(prompt => `
+          <div class="prompt-card">
+            <div class="prompt-title">${prompt.title}</div>
+            <div class="prompt-message">${prompt.message}</div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  // Viewer Engagement Heat
+  if (heatMap && heatMap.length > 0) {
+    html += `
+      <div class="heat-bars">
+        ${heatMap.slice(0, 4).map(heat => `
+          <div class="heat-bar-item">
+            <div class="heat-bar-label">${heat.label}</div>
+            <div class="heat-bar">
+              <div class="heat-bar-fill" style="width: ${heat.value * 100}%"></div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  // AI Price Recommendation
+  html += `
+    <div class="pricing-card">
+      <div class="pricing-title">AI Price Rec.</div>
+      <div class="pricing-value">$${priceRecommendation.toFixed(0)}</div>
+    </div>
+  `;
+
+  return html;
 }
 
-// ─────────────────────────────────────────────
-// UI UPDATES
-// ─────────────────────────────────────────────
+function renderFansPage() {
+  const filters = ['all', 'gold', 'silver', 'bronze', 'left'];
+  let html = `
+    <div class="fan-filters">
+      ${filters.map(filter => `
+        <button class="filter-chip ${state.selectedFanFilter === filter ? 'active' : ''}" data-filter="${filter}">
+          ${filter.charAt(0).toUpperCase() + filter.slice(1)}
+        </button>
+      `).join('')}
+    </div>
+    <div class="fan-list">
+  `;
 
-function updateStatus(status, text) {
-  dom.statusDot.className = 'status-dot ' + status;
-  dom.statusText.textContent = text;
-}
+  const filteredFans = state.selectedFanFilter === 'all'
+    ? state.fanLeaderboard
+    : state.fanLeaderboard.filter(f => f.tier === state.selectedFanFilter);
 
-function updateStreamUI() {
-  if (state.streaming) {
-    dom.btnStream.textContent = 'Stop Stream';
-    dom.btnStream.classList.add('live');
-    dom.btnStream.disabled = false;
-    updateStatus('live', 'LIVE');
+  if (filteredFans.length === 0) {
+    html += '<p class="placeholder-text">No fans in this tier</p>';
   } else {
-    dom.btnStream.textContent = 'Go Live';
-    dom.btnStream.classList.remove('live');
-    dom.btnStream.disabled = !state.obsInitialized;
-    dom.uptime.textContent = '';
-    if (state.obsInitialized) {
-      updateStatus('ready', 'Ready');
-    } else {
-      updateStatus('offline', 'Offline');
+    html += filteredFans.slice(0, 20).map((fan, idx) => `
+      <div class="fan-item">
+        <div class="fan-rank">${idx + 1}</div>
+        <div class="fan-info">
+          <div class="fan-name">${fan.username}</div>
+          <div class="fan-spent">$${fan.totalSpent.toFixed(0)}</div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function renderAnalyticsPage() {
+  return `
+    <div class="placeholder-text">
+      <p>Analytics dashboard coming soon</p>
+      <p style="font-size: 10px; margin-top: 8px; color: var(--text-muted);">
+        Detailed performance metrics and charts will be available here.
+      </p>
+    </div>
+  `;
+}
+
+function renderSettingsPage() {
+  const platforms = state.user?.linkedPlatforms || [];
+
+  return `
+    <div class="settings-form">
+      <div class="settings-form-group">
+        <label>Email</label>
+        <input type="text" value="${state.user?.email || ''}" disabled>
+      </div>
+
+      <div class="settings-form-group">
+        <label>Username</label>
+        <input type="text" value="${state.user?.username || ''}" disabled>
+      </div>
+
+      <h4 style="margin-top: 12px; margin-bottom: 8px; color: var(--text-secondary); font-size: 11px;">Linked Platforms</h4>
+      <div class="platform-list">
+        ${platforms.length === 0
+          ? '<p class="placeholder-text">No platforms linked</p>'
+          : platforms.map(p => `
+            <div class="platform-item">
+              <div>
+                <div class="platform-name">${p.platform}</div>
+                <div class="platform-username">${p.username}</div>
+              </div>
+              <button class="unlink-btn" data-platform="${p.platform}">Unlink</button>
+            </div>
+          `).join('')
+        }
+      </div>
+
+      <button class="add-btn" id="linkPlatformBtn">+ Link Platform</button>
+    </div>
+  `;
+}
+
+function renderHelpPage() {
+  return `
+    <div class="placeholder-text">
+      <h4 style="color: var(--text-primary); margin-bottom: 8px;">Help & Documentation</h4>
+      <p>Getting started with Apex Revenue</p>
+      <ul style="text-align: left; font-size: 10px; margin-top: 10px; line-height: 1.6; color: var(--text-secondary);">
+        <li>Initialize OBS in the center panel</li>
+        <li>Configure stream settings in the right sidebar</li>
+        <li>View live earnings and stats on this panel</li>
+        <li>Manage fan relationships in the Fans tab</li>
+        <li>Link your platform accounts in Settings</li>
+      </ul>
+    </div>
+  `;
+}
+
+function attachIntelPageEventListeners(page) {
+  if (page === 'fans') {
+    document.querySelectorAll('.filter-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        state.selectedFanFilter = chip.dataset.filter;
+        renderIntelligencePage('fans');
+      });
+    });
+  }
+
+  if (page === 'settings') {
+    const linkBtn = document.getElementById('linkPlatformBtn');
+    if (linkBtn) {
+      linkBtn.addEventListener('click', showPlatformModal);
     }
+
+    document.querySelectorAll('.unlink-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        unlinkPlatformAccount(btn.dataset.platform);
+      });
+    });
   }
 }
 
-function updateRecordingUI() {
-  if (state.recording) {
-    dom.btnRecord.textContent = 'Stop Recording';
-    dom.btnRecord.classList.add('recording');
-  } else {
-    dom.btnRecord.textContent = 'Record';
-    dom.btnRecord.classList.remove('recording');
-  }
-}
+// ════════════════════════════════════════════════════════════════════════════
+// AUTHENTICATION
+// ════════════════════════════════════════════════════════════════════════════
 
-function formatUptime(seconds) {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
-// ─────────────────────────────────────────────
-// LOAD SAVED SETTINGS
-// ─────────────────────────────────────────────
-
-async function loadSettings() {
+async function checkAuthStatus() {
   try {
-    const allSettings = await window.apex.settings.get();
-
-    if (allSettings.stream) {
-      const s = allSettings.stream;
-      if (s.broadcastToken) dom.broadcastToken.value = s.broadcastToken;
-      if (s.server) dom.rtmpServer.value = s.server;
-      if (s.encoder) dom.encoder.value = s.encoder;
-      if (s.bitrate) dom.bitrate.value = s.bitrate;
-      if (s.preset) dom.preset.value = s.preset;
-      if (s.audioBitrate) dom.audioBitrate.value = s.audioBitrate;
-      if (s.resolution) dom.resolution.value = s.resolution;
-      if (s.fps) dom.fps.value = s.fps;
+    const session = await window.apex.auth.getSession();
+    if (session && session.user) {
+      state.user = session.user;
+      state.isAuthenticated = true;
+      updateAccountWidget();
     }
-
-    if (allSettings.recording) {
-      const r = allSettings.recording;
-      if (r.outputPath) dom.recordingPath.value = r.outputPath;
-      if (r.format) dom.recordingFormat.value = r.format;
-      if (r.bitrate) dom.recordingBitrate.value = r.bitrate;
-    }
-  } catch (err) {
-    console.error('[Settings] Failed to load:', err);
+  } catch (error) {
+    console.error('Error checking auth status:', error);
   }
 }
 
-// ─────────────────────────────────────────────
-// UPTIME TICKER
-// ─────────────────────────────────────────────
-
-setInterval(async () => {
-  if (state.streaming) {
-    try {
-      const status = await window.apex.stream.getStatus();
-      if (status.uptime > 0) {
-        dom.uptime.textContent = formatUptime(status.uptime);
-      }
-    } catch (e) { /* ignore */ }
+function updateAccountWidget() {
+  if (state.isAuthenticated && state.user) {
+    dom.accountWidget.innerHTML = `
+      <div class="account-info">
+        <div class="account-email">${state.user.email}</div>
+        <button class="logout-btn" id="logoutBtn">Logout</button>
+      </div>
+    `;
+    document.getElementById('logoutBtn').addEventListener('click', handleLogout);
+  } else {
+    dom.accountWidget.innerHTML = '<button class="login-btn" id="showLoginBtn">Login</button>';
+    dom.showLoginBtn.addEventListener('click', showAuthModal);
   }
-}, 1000);
+}
+
+function showAuthModal() {
+  dom.authModal.classList.add('active');
+}
+
+function hideAuthModal() {
+  dom.authModal.classList.remove('active');
+  dom.loginForm.reset();
+  dom.signupForm.reset();
+}
+
+function switchAuthTab(tab) {
+  dom.authTabs.forEach(t => t.classList.remove('active'));
+  document.querySelector(`[data-auth-tab="${tab}"]`).classList.add('active');
+
+  dom.loginForm.classList.toggle('active', tab === 'login');
+  dom.signupForm.classList.toggle('active', tab === 'signup');
+}
+
+async function handleLogin(e) {
+  e.preventDefault();
+  const email = dom.loginEmail.value;
+  const password = dom.loginPassword.value;
+
+  if (!email || !password) {
+    dom.loginError.textContent = 'Please fill in all fields';
+    return;
+  }
+
+  try {
+    const result = await window.apex.auth.login(email, password);
+    if (result.success) {
+      state.user = result.user;
+      state.isAuthenticated = true;
+      hideAuthModal();
+      updateAccountWidget();
+      showAlert('Logged in successfully', 'success');
+    } else {
+      dom.loginError.textContent = result.error || 'Login failed';
+    }
+  } catch (error) {
+    dom.loginError.textContent = 'Login error: ' + error.message;
+  }
+}
+
+async function handleSignup(e) {
+  e.preventDefault();
+  const email = dom.signupEmail.value;
+  const password = dom.signupPassword.value;
+  const confirm = dom.signupConfirm.value;
+
+  if (!email || !password || !confirm) {
+    dom.signupError.textContent = 'Please fill in all fields';
+    return;
+  }
+
+  if (password !== confirm) {
+    dom.signupError.textContent = 'Passwords do not match';
+    return;
+  }
+
+  try {
+    const result = await window.apex.auth.signup(email, password);
+    if (result.success) {
+      state.user = result.user;
+      state.isAuthenticated = true;
+      hideAuthModal();
+      updateAccountWidget();
+      showAlert('Account created successfully', 'success');
+    } else {
+      dom.signupError.textContent = result.error || 'Signup failed';
+    }
+  } catch (error) {
+    dom.signupError.textContent = 'Signup error: ' + error.message;
+  }
+}
+
+async function handleLogout() {
+  try {
+    await window.apex.auth.logout();
+    state.user = null;
+    state.isAuthenticated = false;
+    updateAccountWidget();
+    showAlert('Logged out', 'info');
+  } catch (error) {
+    console.error('Logout error:', error);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PLATFORM LINKING
+// ════════════════════════════════════════════════════════════════════════════
+
+function showPlatformModal() {
+  dom.platformModal.classList.remove('hidden');
+}
+
+function hidePlatformModal() {
+  dom.platformModal.classList.add('hidden');
+  dom.chaturbateUsername.value = '';
+  dom.stripchatUsername.value = '';
+}
+
+async function linkPlatformAccount(platform) {
+  const username = platform === 'chaturbate'
+    ? dom.chaturbateUsername.value
+    : dom.stripchatUsername.value;
+
+  if (!username) {
+    showAlert(`Please enter ${platform} username`, 'error');
+    return;
+  }
+
+  try {
+    const result = await window.apex.auth.linkPlatform(platform, username);
+    if (result.success) {
+      showAlert(`${platform} linked successfully`, 'success');
+      if (state.user) {
+        state.user.linkedPlatforms = result.platforms;
+      }
+      renderIntelligencePage('settings');
+      hidePlatformModal();
+    } else {
+      showAlert(result.error || 'Failed to link platform', 'error');
+    }
+  } catch (error) {
+    showAlert('Error linking platform: ' + error.message, 'error');
+  }
+}
+
+async function unlinkPlatformAccount(platform) {
+  try {
+    const result = await window.apex.auth.unlinkPlatform(platform);
+    if (result.success) {
+      showAlert(`${platform} unlinked`, 'success');
+      if (state.user) {
+        state.user.linkedPlatforms = result.platforms;
+      }
+      renderIntelligencePage('settings');
+    } else {
+      showAlert('Failed to unlink platform', 'error');
+    }
+  } catch (error) {
+    showAlert('Error unlinking platform: ' + error.message, 'error');
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// UI UTILITIES
+// ════════════════════════════════════════════════════════════════════════════
+
+function switchSettingsTab(tab) {
+  dom.settingsTabs.forEach(t => t.classList.remove('active'));
+  dom.settingsSections.forEach(s => s.classList.remove('active'));
+
+  document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+  document.getElementById(tab + 'Settings').classList.add('active');
+}
+
+function updateStatus(text, status) {
+  dom.statusText.textContent = text;
+  dom.statusDot.className = 'status-dot';
+  if (status === 'live') {
+    dom.statusDot.classList.add('live');
+  } else if (status === 'ready') {
+    dom.statusDot.classList.add('ready');
+  }
+}
+
+function showAlert(message, type = 'info') {
+  dom.alertText.textContent = message;
+  dom.alertBanner.classList.remove('alert-hidden');
+
+  // Auto-hide after 4 seconds
+  setTimeout(() => {
+    dom.alertBanner.classList.add('alert-hidden');
+  }, 4000);
+}
+
+function hideAlertBanner() {
+  dom.alertBanner.classList.add('alert-hidden');
+}
+
+function startUptimeCounter() {
+  state.uptimeInterval = setInterval(() => {
+    state.uptime++;
+    const hours = Math.floor(state.uptime / 3600);
+    const minutes = Math.floor((state.uptime % 3600) / 60);
+    const seconds = state.uptime % 60;
+
+    const formatted = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    dom.uptimeDisplay.textContent = formatted;
+    dom.statUptime.textContent = formatted;
+  }, 1000);
+}
+
+function setupStreamHealthUpdates() {
+  // Simulate health stats updates
+  setInterval(() => {
+    if (state.streaming) {
+      const bitrate = (Math.random() * 3 + 4).toFixed(1);
+      const fps = Math.floor(Math.random() * 10) + 25;
+      const dropped = Math.floor(Math.random() * 5);
+
+      dom.statBitrate.textContent = bitrate + ' Mbps';
+      dom.statFPS.textContent = fps;
+      dom.statDropped.textContent = dropped;
+    }
+  }, 1000);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// REAL-TIME UPDATES FROM MAIN PROCESS
+// ════════════════════════════════════════════════════════════════════════════
+
+// Listen for live data updates
+if (window.apex?.intelligence) {
+  window.apex.intelligence.onLiveUpdate?.((data) => {
+    state.liveData = { ...state.liveData, ...data };
+    if (state.currentIntelPage === 'live') {
+      renderIntelligencePage('live');
+    }
+  });
+
+  window.apex.intelligence.onFanUpdate?.((fans) => {
+    state.fanLeaderboard = fans;
+    if (state.currentIntelPage === 'fans') {
+      renderIntelligencePage('fans');
+    }
+  });
+
+  window.apex.intelligence.onRelayEvent?.((event) => {
+    console.log('Relay event:', event);
+  });
+}
+
+// Listen for auth state changes
+if (window.apex?.auth) {
+  window.apex.auth.onAuthChange?.((user) => {
+    if (user) {
+      state.user = user;
+      state.isAuthenticated = true;
+    } else {
+      state.user = null;
+      state.isAuthenticated = false;
+    }
+    updateAccountWidget();
+  });
+}

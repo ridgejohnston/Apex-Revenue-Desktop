@@ -3,215 +3,272 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
-  <title>Apex Revenue Desktop</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self'; connect-src 'self' https://cognito-idp.us-east-1.amazonaws.com https://7g6qsxoos3.execute-api.us-east-1.amazonaws.com https://us.i.posthog.com wss://mr5rjohfed.execute-api.us-east-1.amazonaws.com">
+  <title>Apex Revenue — Livestream Management Platform</title>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <div id="app">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="logo-section">
+          <div class="logo-icon">◈</div>
+          <div class="logo-text">
+            <h1 class="logo-title">Apex Revenue</h1>
+            <p class="logo-subtitle">LIVESTREAM MANAGEMENT PLATFORM</p>
+          </div>
+        </div>
+      </div>
 
-  <!-- Header Bar -->
-  <header class="header">
-    <div class="header-brand">
-      <span class="logo">AR</span>
-      <h1>Apex Revenue Desktop</h1>
+      <div class="header-center">
+        <div class="status-indicator">
+          <span class="status-dot" id="statusDot"></span>
+          <span class="status-text" id="statusText">Offline</span>
+        </div>
+        <div class="uptime-display" id="uptimeDisplay">00:00:00</div>
+      </div>
+
+      <div class="header-right">
+        <div class="account-section">
+          <div id="accountWidget" class="account-widget">
+            <button class="login-btn" id="showLoginBtn">Login</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <div class="main-container">
+      <!-- Left Intelligence Panel -->
+      <aside class="intelligence-panel">
+        <div class="intel-header">
+          <div class="intel-title-bar">
+            <h2 class="intel-title">CREATOR INTELLIGENCE</h2>
+            <span class="live-badge">LIVE</span>
+          </div>
+        </div>
+
+        <div class="intel-content" id="intelContent">
+          <!-- Content loads dynamically based on active page -->
+        </div>
+
+        <nav class="intel-nav">
+          <button class="intel-nav-btn active" data-page="live" title="Live Stats">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="10" cy="10" r="4" fill="currentColor"/>
+            </svg>
+          </button>
+          <button class="intel-nav-btn" data-page="fans" title="Fan Leaderboard">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <circle cx="6" cy="5" r="2" fill="currentColor"/>
+              <circle cx="14" cy="5" r="2" fill="currentColor"/>
+              <circle cx="10" cy="12" r="2.5" fill="currentColor"/>
+              <path d="M4 8a4 4 0 0 1 12 0" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M7 14a6 6 0 0 1 6 0" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </button>
+          <button class="intel-nav-btn" data-page="analytics" title="Analytics">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <rect x="3" y="10" width="2" height="7" fill="currentColor"/>
+              <rect x="8" y="6" width="2" height="11" fill="currentColor"/>
+              <rect x="13" y="3" width="2" height="14" fill="currentColor"/>
+            </svg>
+          </button>
+          <button class="intel-nav-btn" data-page="settings" title="Settings">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <circle cx="10" cy="10" r="1.5" fill="currentColor"/>
+              <path d="M10 3v2m0 10v2M3 10H1m16 0h2" stroke="currentColor" stroke-width="1.5" fill="none"/>
+              <circle cx="10" cy="10" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </button>
+          <button class="intel-nav-btn" data-page="help" title="Help">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <text x="10" y="12" text-anchor="middle" font-size="10" font-weight="bold" fill="currentColor">?</text>
+            </svg>
+          </button>
+        </nav>
+      </aside>
+
+      <!-- Center Stream Area -->
+      <main class="stream-area">
+        <!-- Stream Status Alert -->
+        <div id="alertBanner" class="alert-banner alert-hidden" role="alert">
+          <span id="alertText"></span>
+          <button class="alert-close" aria-label="Close">✕</button>
+        </div>
+
+        <!-- OBS Preview -->
+        <div class="preview-container">
+          <div id="obsPreview" class="obs-preview">
+            <div class="preview-placeholder">
+              <div class="placeholder-icon">▶</div>
+              <p>OBS Preview</p>
+              <p class="placeholder-hint">Initialize OBS to display preview</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stream Controls -->
+        <div class="stream-controls">
+          <button id="initOBSBtn" class="control-btn primary">Initialize OBS</button>
+          <button id="goLiveBtn" class="control-btn secondary" disabled>Go Live</button>
+          <button id="recordBtn" class="control-btn secondary" disabled>Record</button>
+        </div>
+      </main>
+
+      <!-- Right Settings Panel -->
+      <aside class="settings-panel">
+        <div class="settings-tabs">
+          <button class="settings-tab active" data-tab="stream">Stream</button>
+          <button class="settings-tab" data-tab="sources">Sources</button>
+          <button class="settings-tab" data-tab="output">Output</button>
+        </div>
+
+        <div class="settings-content">
+          <!-- Stream Tab -->
+          <div class="settings-section active" id="streamSettings">
+            <div class="setting-group">
+              <label for="streamKey">Stream Key</label>
+              <input type="password" id="streamKey" placeholder="Enter your stream key">
+              <button class="toggle-visibility" type="button">Show</button>
+            </div>
+            <div class="setting-group">
+              <label for="streamServer">Server</label>
+              <input type="text" id="streamServer" placeholder="rtmp://...">
+            </div>
+            <div class="setting-group">
+              <label for="bitrate">Bitrate (Mbps)</label>
+              <input type="number" id="bitrate" min="0.5" max="50" step="0.5" value="6">
+            </div>
+            <div class="setting-group">
+              <label for="fps">FPS</label>
+              <select id="fps">
+                <option value="30">30 FPS</option>
+                <option value="60">60 FPS</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Sources Tab -->
+          <div class="settings-section" id="sourcesSettings">
+            <div class="sources-list" id="sourcesList">
+              <p class="placeholder-text">No sources configured</p>
+            </div>
+            <button id="addSourceBtn" class="add-btn">+ Add Source</button>
+          </div>
+
+          <!-- Output Tab -->
+          <div class="settings-section" id="outputSettings">
+            <div class="setting-group">
+              <label for="recordingPath">Recording Path</label>
+              <input type="text" id="recordingPath" placeholder="/path/to/recordings">
+              <button id="selectPathBtn" class="select-btn">Browse</button>
+            </div>
+            <div class="setting-group">
+              <label for="recordingFormat">Format</label>
+              <select id="recordingFormat">
+                <option value="mp4">MP4</option>
+                <option value="mkv">MKV</option>
+                <option value="flv">FLV</option>
+              </select>
+            </div>
+            <button id="saveSettingsBtn" class="save-btn">Save Settings</button>
+          </div>
+        </div>
+      </aside>
     </div>
-    <div class="header-status" id="status-bar">
-      <span class="status-dot offline" id="status-dot"></span>
-      <span id="status-text">Offline</span>
-      <span class="uptime" id="uptime"></span>
-    </div>
-  </header>
 
-  <!-- Main Layout -->
-  <div class="main-layout">
+    <!-- Footer Stream Health Stats -->
+    <footer class="app-footer">
+      <div class="health-stat">
+        <span class="stat-label">Bitrate:</span>
+        <span class="stat-value" id="statBitrate">—</span>
+      </div>
+      <div class="health-stat">
+        <span class="stat-label">FPS:</span>
+        <span class="stat-value" id="statFPS">—</span>
+      </div>
+      <div class="health-stat">
+        <span class="stat-label">Dropped:</span>
+        <span class="stat-value" id="statDropped">—</span>
+      </div>
+      <div class="health-stat">
+        <span class="stat-label">Uptime:</span>
+        <span class="stat-value" id="statUptime">—</span>
+      </div>
+    </footer>
+  </div>
 
-    <!-- Left: Preview + Controls -->
-    <div class="preview-panel">
-      <!-- OBS Preview Area -->
-      <div class="preview-container" id="preview-container">
-        <div class="preview-placeholder" id="preview-placeholder">
-          <p>Stream Preview</p>
-          <small>Initialize OBS to see your stream</small>
-        </div>
+  <!-- Login Modal -->
+  <div id="authModal" class="auth-modal hidden">
+    <div class="auth-modal-content">
+      <button class="auth-modal-close" id="closeAuthModal">✕</button>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-auth-tab="login">Login</button>
+        <button class="auth-tab" data-auth-tab="signup">Sign Up</button>
       </div>
 
-      <!-- Stream Controls -->
-      <div class="stream-controls">
-        <button class="btn btn-init" id="btn-init-obs">Initialize OBS</button>
-        <button class="btn btn-stream" id="btn-stream" disabled>Go Live</button>
-        <button class="btn btn-record" id="btn-record" disabled>Record</button>
-      </div>
-    </div>
-
-    <!-- Right: Settings Panel -->
-    <div class="settings-panel">
-      <!-- Tab Navigation -->
-      <div class="tabs">
-        <button class="tab active" data-tab="stream-settings">Stream</button>
-        <button class="tab" data-tab="sources-settings">Sources</button>
-        <button class="tab" data-tab="output-settings">Output</button>
-      </div>
-
-      <!-- Stream Settings Tab -->
-      <div class="tab-content active" id="stream-settings">
-        <div class="setting-group">
-          <h3>Chaturbate Connection</h3>
-
-          <label>Broadcast Token (Stream Key)</label>
-          <div class="input-row">
-            <input type="password" id="broadcast-token" placeholder="Paste your broadcast token here">
-            <button class="btn btn-small" id="toggle-token-vis">Show</button>
-          </div>
-          <small class="hint">Get from: Broadcast Yourself > Use External Encoder > View RTMP info</small>
-
-          <label>RTMP Server</label>
-          <select id="rtmp-server">
-            <option value="global">Global (Recommended)</option>
-          </select>
+      <!-- Login Form -->
+      <form id="loginForm" class="auth-form active">
+        <h3>Sign In to Apex Revenue</h3>
+        <div class="form-group">
+          <label for="loginEmail">Email</label>
+          <input type="email" id="loginEmail" required>
         </div>
-
-        <div class="setting-group">
-          <h3>Encoding</h3>
-
-          <label>Encoder</label>
-          <select id="encoder">
-            <option value="x264">x264 (CPU)</option>
-            <option value="nvenc">NVENC (NVIDIA GPU)</option>
-            <option value="qsv">Quick Sync (Intel GPU)</option>
-          </select>
-
-          <label>Video Bitrate (kbps)</label>
-          <input type="number" id="bitrate" value="2500" min="500" max="20000" step="100">
-
-          <label>Preset</label>
-          <select id="preset">
-            <option value="ultrafast">Ultrafast</option>
-            <option value="superfast">Superfast</option>
-            <option value="veryfast" selected>Veryfast</option>
-            <option value="faster">Faster</option>
-            <option value="fast">Fast</option>
-            <option value="medium">Medium</option>
-          </select>
-
-          <label>Audio Bitrate (kbps)</label>
-          <select id="audio-bitrate">
-            <option value="96">96</option>
-            <option value="128">128</option>
-            <option value="160" selected>160</option>
-            <option value="192">192</option>
-            <option value="256">256</option>
-            <option value="320">320</option>
-          </select>
+        <div class="form-group">
+          <label for="loginPassword">Password</label>
+          <input type="password" id="loginPassword" required>
         </div>
+        <button type="submit" class="auth-btn">Sign In</button>
+        <div id="loginError" class="form-error"></div>
+      </form>
 
-        <div class="setting-group">
-          <h3>Video</h3>
-
-          <label>Resolution</label>
-          <select id="resolution">
-            <option value="1920x1080">1920x1080 (1080p)</option>
-            <option value="1280x720">1280x720 (720p)</option>
-            <option value="2560x1440">2560x1440 (1440p)</option>
-            <option value="3840x2160">3840x2160 (4K)</option>
-          </select>
-
-          <label>FPS</label>
-          <select id="fps">
-            <option value="24">24</option>
-            <option value="30" selected>30</option>
-            <option value="60">60</option>
-          </select>
+      <!-- Signup Form -->
+      <form id="signupForm" class="auth-form">
+        <h3>Create Apex Revenue Account</h3>
+        <div class="form-group">
+          <label for="signupEmail">Email</label>
+          <input type="email" id="signupEmail" required>
         </div>
-
-        <button class="btn btn-apply" id="btn-apply-stream">Apply Stream Settings</button>
-      </div>
-
-      <!-- Sources Settings Tab -->
-      <div class="tab-content" id="sources-settings">
-        <div class="setting-group">
-          <h3>Camera</h3>
-
-          <label>Webcam Device</label>
-          <select id="webcam-device">
-            <option value="">-- Select Webcam --</option>
-          </select>
-          <button class="btn btn-small" id="btn-add-webcam">Add Webcam</button>
+        <div class="form-group">
+          <label for="signupPassword">Password</label>
+          <input type="password" id="signupPassword" required>
         </div>
-
-        <div class="setting-group">
-          <h3>Audio</h3>
-
-          <label>Microphone</label>
-          <select id="mic-device">
-            <option value="">-- Select Microphone --</option>
-          </select>
-          <button class="btn btn-small" id="btn-add-mic">Add Microphone</button>
-
-          <label class="checkbox-label">
-            <input type="checkbox" id="desktop-audio" checked>
-            Capture Desktop Audio
-          </label>
+        <div class="form-group">
+          <label for="signupConfirm">Confirm Password</label>
+          <input type="password" id="signupConfirm" required>
         </div>
-
-        <div class="setting-group">
-          <h3>Overlays</h3>
-
-          <label>Background Image</label>
-          <div class="input-row">
-            <input type="text" id="bg-image-path" placeholder="Select an image file" readonly>
-            <button class="btn btn-small" id="btn-browse-image">Browse</button>
-          </div>
-          <button class="btn btn-small" id="btn-add-bg-image">Add Background Image</button>
-
-          <label>Background Video</label>
-          <div class="input-row">
-            <input type="text" id="bg-video-path" placeholder="Select a video file" readonly>
-            <button class="btn btn-small" id="btn-browse-video">Browse</button>
-          </div>
-          <button class="btn btn-small" id="btn-add-bg-video">Add Background Video</button>
-        </div>
-
-        <div class="setting-group">
-          <h3>Active Sources</h3>
-          <div id="active-sources-list" class="sources-list">
-            <p class="empty-state">No sources added yet</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Output Settings Tab -->
-      <div class="tab-content" id="output-settings">
-        <div class="setting-group">
-          <h3>Recording</h3>
-
-          <label>Output Folder</label>
-          <div class="input-row">
-            <input type="text" id="recording-path" placeholder="Select output folder" readonly>
-            <button class="btn btn-small" id="btn-browse-recording">Browse</button>
-          </div>
-
-          <label>Format</label>
-          <select id="recording-format">
-            <option value="mkv">MKV (Recommended)</option>
-            <option value="mp4">MP4</option>
-            <option value="flv">FLV</option>
-          </select>
-
-          <label>Recording Bitrate (kbps)</label>
-          <input type="number" id="recording-bitrate" value="6000" min="1000" max="50000" step="500">
-        </div>
-
-        <button class="btn btn-apply" id="btn-apply-recording">Apply Recording Settings</button>
-      </div>
+        <button type="submit" class="auth-btn">Create Account</button>
+        <div id="signupError" class="form-error"></div>
+      </form>
     </div>
   </div>
 
-  <!-- Footer: Stream Health -->
-  <footer class="footer" id="stream-health">
-    <span id="health-bitrate">--</span>
-    <span id="health-fps">--</span>
-    <span id="health-dropped">--</span>
-  </footer>
+  <!-- Platform Linking Modal -->
+  <div id="platformModal" class="platform-modal hidden">
+    <div class="platform-modal-content">
+      <button class="platform-modal-close" id="closePlatformModal">✕</button>
+      <h3>Link Platform Account</h3>
+
+      <div class="platform-options">
+        <div class="platform-option">
+          <h4>Chaturbate</h4>
+          <input type="text" id="chaturbateUsername" placeholder="Username">
+          <button class="link-btn" data-platform="chaturbate">Link</button>
+        </div>
+        <div class="platform-option">
+          <h4>Stripchat</h4>
+          <input type="text" id="stripchatUsername" placeholder="Username">
+          <button class="link-btn" data-platform="stripchat">Link</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="renderer.js"></script>
 </body>
