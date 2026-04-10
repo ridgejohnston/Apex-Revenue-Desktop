@@ -68,5 +68,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onUpdateReady:      cb => ipcRenderer.on('update:ready',       (_, d) => cb(d)),
   onUpdateNotAvail:   cb => ipcRenderer.on('update:not-available',(_, d)=> cb(d)),
   onUpdateError:      cb => ipcRenderer.on('update:error',       (_, d) => cb(d)),
+
+  // App asset (app.asar) hot-update events
+  onAppUpdateDownloading: cb => ipcRenderer.on('app-update:downloading', (_, d) => cb(d)),
+  onAppUpdateProgress:    cb => ipcRenderer.on('app-update:progress',    (_, d) => cb(d)),
+  onAppUpdateReady:       cb => ipcRenderer.on('app-update:ready',       (_, d) => cb(d)),
+  onAppUpdateError:       cb => ipcRenderer.on('app-update:error',       (_, d) => cb(d)),
   removeAllListeners: ch => ipcRenderer.removeAllListeners(ch),
 });

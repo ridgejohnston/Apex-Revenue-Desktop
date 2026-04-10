@@ -12,7 +12,8 @@ const path    = require('path');
 const Store   = require('electron-store');
 const aws     = require('./aws-services');
 const config  = require('../shared/aws-config');
-const { initUpdater, stopUpdater } = require('./updater');
+const { initUpdater, stopUpdater }       = require('./updater');
+const { initAppUpdater, stopAppUpdater } = require('./app-updater');
 
 // ── Persistent store ──────────────────────────────────────────────────────────
 const store = new Store({
@@ -95,7 +96,8 @@ function createMainWindow() {
     mainWindow.show();
     setupBrowserView(store.get('selectedUrl', 'https://chaturbate.com/'));
     startCloudWatchHeartbeat();
-    initUpdater(mainWindow);   // ← start auto-updater
+    initUpdater(mainWindow);      // full installer updates via electron-updater
+    initAppUpdater(mainWindow);   // hot app.asar updates from S3
     // Signal renderer that AWS is live
     mainWindow.webContents.once('did-finish-load', () => {
       mainWindow.webContents.send('aws:status', { active: true, region: config.REGION });
@@ -346,4 +348,4 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => { /* stay in tray on Windows */ });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); });
-app.on('before-quit', () => { aws.flushFirehose(); stopUpdater(); });
+app.on('before-quit', () => { aws.flushFirehose(); stopUpdater(); stopAppUpdater(); });

@@ -68,13 +68,19 @@ async function init() {
     $('aws-cw-label').textContent = `CW ✓ (${cwHeartbeats})`;
   }) || window.electronAPI.removeAllListeners('aws:cw-heartbeat');
 
-  // Update events
+  // Update events (electron-updater — full installer)
   window.electronAPI.onUpdateChecking(() => setUpdateState('checking'));
   window.electronAPI.onUpdateAvailable(info => setUpdateState('available', info));
   window.electronAPI.onUpdateProgress(info  => setUpdateState('progress', info));
   window.electronAPI.onUpdateReady(info     => setUpdateState('ready', info));
   window.electronAPI.onUpdateNotAvail(()    => setUpdateState('current'));
   window.electronAPI.onUpdateError(info     => setUpdateState('error', info));
+
+  // App asset hot-update events (app.asar from S3)
+  window.electronAPI.onAppUpdateDownloading(info => setAppUpdateState('downloading', info));
+  window.electronAPI.onAppUpdateProgress(info    => setAppUpdateState('progress', info));
+  window.electronAPI.onAppUpdateReady(info       => setAppUpdateState('ready', info));
+  window.electronAPI.onAppUpdateError(info       => setAppUpdateState('error', info));
 
   checkAuth();
   setInterval(updateTimer, 1000);
@@ -217,6 +223,59 @@ async function checkAuth() {
       $('footer-user').textContent = 'Not signed in';
     }
   } catch {}
+}
+
+// ── App Asset (app.asar) hot-update state ─────────────────────────────────────
+// This is a lightweight secondary indicator — uses the same banner but styled
+// differently (blue) so Ridge can distinguish S3 hot-updates from full releases.
+function setAppUpdateState(state, info = {}) {
+  const banner    = $('update-banner');
+  const title     = $('update-banner-title');
+  const sub       = $('update-banner-sub');
+  const progWrap  = $('update-progress-wrap');
+  const progBar   = $('update-progress-bar');
+  const progPct   = $('update-progress-pct');
+  const installBtn = $('btn-update-install');
+  const laterBtn  = $('btn-update-later');
+
+  switch (state) {
+    case 'downloading':
+      banner.classList.remove('hidden');
+      banner.className = 'app-update-downloading';
+      title.textContent = `App update v${info.version} downloading`;
+      sub.textContent   = 'Fetching latest app from AWS S3…';
+      progWrap.style.display   = 'flex';
+      installBtn.style.display = 'none';
+      laterBtn.style.display   = 'none';
+      notifyBannerHeight(true);
+      break;
+
+    case 'progress':
+      banner.classList.remove('hidden');
+      progBar.style.width = `${info.percent || 0}%`;
+      progPct.textContent = `${info.percent || 0}%`;
+      sub.textContent = `${formatBytes(info.bytes)} / ${formatBytes(info.total)}`;
+      break;
+
+    case 'ready':
+      banner.classList.remove('hidden');
+      banner.className = 'app-update-ready';
+      title.textContent = `App updated to v${info.version}`;
+      sub.textContent   = 'Restart to load the latest version';
+      progWrap.style.display   = 'none';
+      installBtn.style.display = '';
+      laterBtn.style.display   = '';
+      installBtn.textContent   = 'Restart Now';
+      installBtn.disabled      = false;
+      // Override: restart closes and lets batch script swap the asar
+      installBtn.onclick = () => window.electronAPI.window.quit();
+      notifyBannerHeight(true);
+      break;
+
+    case 'error':
+      console.warn('[AppUpdate] S3 update error:', info.message);
+      break;
+  }
 }
 
 // ── Update Banner ─────────────────────────────────────────────────────────────

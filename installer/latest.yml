@@ -1,8 +1,8 @@
 version: 1.0.0
 files:
   - url: ApexRevenue-Setup-1.0.0.exe
-    sha512: 9YDAI6U7qluywhzxbm70IbtuCKhz2ZKTooNR03h3g7d3YA1pjeRAIizjQTOdwvABZN6Vvpkr6qP/NezOwz4xYw==
-    size: 78664489
+    sha512: xl1uAZKo+DAOaYDt90AXmBnElRUo6oT4+Lg39pmovuDsyIVsHl/Y3ckl92so7QQWsbeswjBANlbU4sOmD6p7Mw==
+    size: 77682835
 path: ApexRevenue-Setup-1.0.0.exe
-sha512: 9YDAI6U7qluywhzxbm70IbtuCKhz2ZKTooNR03h3g7d3YA1pjeRAIizjQTOdwvABZN6Vvpkr6qP/NezOwz4xYw==
-releaseDate: '2026-04-10T14:12:52.000Z'
+sha512: xl1uAZKo+DAOaYDt90AXmBnElRUo6oT4+Lg39pmovuDsyIVsHl/Y3ckl92so7QQWsbeswjBANlbU4sOmD6p7Mw==
+releaseDate: '2026-04-10T14:42:45.000Z'
