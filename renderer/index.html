@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Apex Revenue Desktop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════
+     TITLEBAR (drag region, URL bar, window controls)
+════════════════════════════════════════════════════════════ -->
+<div id="titlebar">
+  <div class="tb-left">
+    <img class="tb-logo-img" src="../assets/icons/icon32.png" alt="" onerror="this.style.display='none'">
+    <span class="tb-logo-text">APEX <span class="tb-logo-rev">REVENUE</span></span>
+    <div class="tb-live-badge"><div class="live-dot" id="live-dot"></div><span id="live-label">OFFLINE</span></div>
+    <div class="tb-aws-badge" id="aws-badge" title="AWS active">
+      <span class="aws-dot"></span>AWS ☁️
+    </div>
+  </div>
+
+  <div class="tb-browser">
+    <button class="tb-nav-btn" id="btn-back"   title="Back">◀</button>
+    <button class="tb-nav-btn" id="btn-fwd"    title="Forward">▶</button>
+    <button class="tb-nav-btn" id="btn-reload" title="Reload">↻</button>
+    <div class="tb-urlbar-wrap">
+      <span class="tb-lock">🔒</span>
+      <input id="url-bar" type="text" spellcheck="false" placeholder="Navigate to any platform…">
+    </div>
+    <button class="tb-nav-btn" id="btn-backup" title="Backup session to S3">💾</button>
+  </div>
+
+  <div class="tb-right">
+    <button class="wc-btn min" id="wc-min">─</button>
+    <button class="wc-btn max" id="wc-max">□</button>
+    <button class="wc-btn cls" id="wc-cls">✕</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     APP BODY  (sidebar | BrowserView | analytics panel)
+════════════════════════════════════════════════════════════ -->
+<div id="app-body">
+
+  <!-- ── LEFT SIDEBAR — all platform categories ──────────────────── -->
+  <nav id="sidebar">
+    <div id="sidebar-scroll">
+
+      <!-- Search box -->
+      <div class="sb-search-wrap">
+        <input id="sb-search" type="text" placeholder="🔍 Find platform…" spellcheck="false">
+      </div>
+
+      <!-- LIVE CAMS ──────────────────────────────────────────────── -->
+      <div class="sb-category" data-cat="live">
+        <div class="sb-cat-header" data-cat="live">
+          <span class="sb-cat-icon">📡</span>
+          <span class="sb-cat-label">LIVE CAMS</span>
+          <span class="sb-cat-chevron">▾</span>
+        </div>
+        <div class="sb-cat-items">
+          <div class="sb-item tracked" data-url="https://chaturbate.com/">
+            <span class="sb-item-icon">🟠</span>
+            <span class="sb-item-name">Chaturbate</span>
+            <span class="sb-track-badge" title="Analytics active">⚡</span>
+          </div>
+          <div class="sb-item tracked" data-url="https://stripchat.com/">
+            <span class="sb-item-icon">🔵</span>
+            <span class="sb-item-name">Stripchat</span>
+            <span class="sb-track-badge" title="Analytics active">⚡</span>
+          </div>
+          <div class="sb-item tracked" data-url="https://myfreecams.com/">
+            <span class="sb-item-icon">🟢</span>
+            <span class="sb-item-name">MyFreeCams</span>
+            <span class="sb-track-badge" title="Analytics active">⚡</span>
+          </div>
+          <div class="sb-item tracked" data-url="https://xtease.com/">
+            <span class="sb-item-icon">🟣</span>
+            <span class="sb-item-name">xTease</span>
+            <span class="sb-track-badge" title="Analytics active">⚡</span>
+          </div>
+          <div class="sb-item" data-url="https://camsoda.com/">
+            <span class="sb-item-icon">🟡</span>
+            <span class="sb-item-name">CamSoda</span>
+          </div>
+          <div class="sb-item" data-url="https://www.flirt4free.com/">
+            <span class="sb-item-icon">🔴</span>
+            <span class="sb-item-name">Flirt4Free</span>
+          </div>
+          <div class="sb-item" data-url="https://www.livejasmin.com/">
+            <span class="sb-item-icon">💎</span>
+            <span class="sb-item-name">LiveJasmin</span>
+          </div>
+          <div class="sb-item" data-url="https://bongacams.com/">
+            <span class="sb-item-icon">🎯</span>
+            <span class="sb-item-name">BongaCams</span>
+          </div>
+          <div class="sb-item" data-url="https://www.cam4.com/">
+            <span class="sb-item-icon">🎬</span>
+            <span class="sb-item-name">Cam4</span>
+          </div>
+          <div class="sb-item" data-url="https://www.imlive.com/">
+            <span class="sb-item-icon">📺</span>
+            <span class="sb-item-name">ImLive</span>
+          </div>
+          <div class="sb-item" data-url="https://www.streamate.com/">
+            <span class="sb-item-icon">📡</span>
+            <span class="sb-item-name">Streamate</span>
+          </div>
+          <div class="sb-item" data-url="https://www.cams.com/">
+            <span class="sb-item-icon">🎥</span>
+            <span class="sb-item-name">Cams.com</span>
+          </div>
+          <div class="sb-item" data-url="https://www.amateur.tv/">
+            <span class="sb-item-icon">🎦</span>
+            <span class="sb-item-name">Amateur.tv</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- FAN SITES ──────────────────────────────────────────────── -->
+      <div class="sb-category" data-cat="fans">
+        <div class="sb-cat-header" data-cat="fans">
+          <span class="sb-cat-icon">💜</span>
+          <span class="sb-cat-label">FAN SITES</span>
+          <span class="sb-cat-chevron">▾</span>
+        </div>
+        <div class="sb-cat-items">
+          <div class="sb-item" data-url="https://onlyfans.com/">
+            <span class="sb-item-icon">💙</span>
+            <span class="sb-item-name">OnlyFans</span>
+          </div>
+          <div class="sb-item" data-url="https://fansly.com/">
+            <span class="sb-item-icon">💚</span>
+            <span class="sb-item-name">Fansly</span>
+          </div>
+          <div class="sb-item" data-url="https://www.manyvids.com/">
+            <span class="sb-item-icon">🎞</span>
+            <span class="sb-item-name">ManyVids</span>
+          </div>
+          <div class="sb-item" data-url="https://fanvue.com/">
+            <span class="sb-item-icon">👁</span>
+            <span class="sb-item-name">Fanvue</span>
+          </div>
+          <div class="sb-item" data-url="https://www.patreon.com/">
+            <span class="sb-item-icon">🎨</span>
+            <span class="sb-item-name">Patreon</span>
+          </div>
+          <div class="sb-item" data-url="https://avnstars.com/">
+            <span class="sb-item-icon">⭐</span>
+            <span class="sb-item-name">AVN Stars</span>
+          </div>
+          <div class="sb-item" data-url="https://loyalfans.com/">
+            <span class="sb-item-icon">🏅</span>
+            <span class="sb-item-name">LoyalFans</span>
+          </div>
+          <div class="sb-item" data-url="https://frisk.chat/">
+            <span class="sb-item-icon">🌀</span>
+            <span class="sb-item-name">Frisk</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- CLIP STORES ─────────────────────────────────────────────── -->
+      <div class="sb-category" data-cat="clips">
+        <div class="sb-cat-header" data-cat="clips">
+          <span class="sb-cat-icon">🎬</span>
+          <span class="sb-cat-label">CLIP STORES</span>
+          <span class="sb-cat-chevron">▾</span>
+        </div>
+        <div class="sb-cat-items">
+          <div class="sb-item" data-url="https://www.clips4sale.com/">
+            <span class="sb-item-icon">🛒</span>
+            <span class="sb-item-name">Clips4Sale</span>
+          </div>
+          <div class="sb-item" data-url="https://www.iwantclips.com/">
+            <span class="sb-item-icon">🎞</span>
+            <span class="sb-item-name">iWantClips</span>
+          </div>
+          <div class="sb-item" data-url="https://www.modelhub.com/">
+            <span class="sb-item-icon">🏪</span>
+            <span class="sb-item-name">Modelhub</span>
+          </div>
+          <div class="sb-item" data-url="https://www.niteflirt.com/">
+            <span class="sb-item-icon">📞</span>
+            <span class="sb-item-name">NiteFlirt</span>
+          </div>
+          <div class="sb-item" data-url="https://www.kinkbomb.com/">
+            <span class="sb-item-icon">💣</span>
+            <span class="sb-item-name">Kinkbomb</span>
+          </div>
+          <div class="sb-item" data-url="https://pornhub.com/model">
+            <span class="sb-item-icon">🎭</span>
+            <span class="sb-item-name">PH Model Hub</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ANALYTICS & TOOLS ─────────────────────────────────────── -->
+      <div class="sb-category" data-cat="analytics">
+        <div class="sb-cat-header" data-cat="analytics">
+          <span class="sb-cat-icon">📊</span>
+          <span class="sb-cat-label">ANALYTICS</span>
+          <span class="sb-cat-chevron">▾</span>
+        </div>
+        <div class="sb-cat-items">
+          <div class="sb-item highlight" data-url="https://apexrevenue.works/">
+            <span class="sb-item-icon">⚡</span>
+            <span class="sb-item-name">Apex Revenue</span>
+          </div>
+          <div class="sb-item" data-url="https://chaturbate.com/affiliates/">
+            <span class="sb-item-icon">📈</span>
+            <span class="sb-item-name">CB Affiliates</span>
+          </div>
+          <div class="sb-item" data-url="https://chaturbate.com/stats/">
+            <span class="sb-item-icon">📉</span>
+            <span class="sb-item-name">CB Stats</span>
+          </div>
+          <div class="sb-item" data-url="https://us-east-1.console.aws.amazon.com/cloudwatch/home">
+            <span class="sb-item-icon">☁️</span>
+            <span class="sb-item-name">CloudWatch</span>
+          </div>
+          <div class="sb-item" data-url="https://us-east-1.console.aws.amazon.com/s3/buckets/apex-revenue-sessions-994438967527">
+            <span class="sb-item-icon">🪣</span>
+            <span class="sb-item-name">S3 Sessions</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- SOCIAL & MARKETING ──────────────────────────────────────── -->
+      <div class="sb-category" data-cat="social">
+        <div class="sb-cat-header" data-cat="social">
+          <span class="sb-cat-icon">🌐</span>
+          <span class="sb-cat-label">SOCIAL</span>
+          <span class="sb-cat-chevron">▾</span>
+        </div>
+        <div class="sb-cat-items">
+          <div class="sb-item" data-url="https://x.com/">
+            <span class="sb-item-icon">🐦</span>
+            <span class="sb-item-name">Twitter / X</span>
+          </div>
+          <div class="sb-item" data-url="https://www.reddit.com/r/sexworkers/">
+            <span class="sb-item-icon">🟠</span>
+            <span class="sb-item-name">Reddit SWers</span>
+          </div>
+          <div class="sb-item" data-url="https://discord.com/">
+            <span class="sb-item-icon">💬</span>
+            <span class="sb-item-name">Discord</span>
+          </div>
+          <div class="sb-item" data-url="https://www.instagram.com/">
+            <span class="sb-item-icon">📷</span>
+            <span class="sb-item-name">Instagram</span>
+          </div>
+          <div class="sb-item" data-url="https://www.tiktok.com/">
+            <span class="sb-item-icon">🎵</span>
+            <span class="sb-item-name">TikTok</span>
+          </div>
+          <div class="sb-item" data-url="https://www.youtube.com/">
+            <span class="sb-item-icon">▶️</span>
+            <span class="sb-item-name">YouTube</span>
+          </div>
+          <div class="sb-item" data-url="https://linktr.ee/">
+            <span class="sb-item-icon">🌿</span>
+            <span class="sb-item-name">Linktree</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- RESOURCES ──────────────────────────────────────────────── -->
+      <div class="sb-category" data-cat="resources">
+        <div class="sb-cat-header" data-cat="resources">
+          <span class="sb-cat-icon">📚</span>
+          <span class="sb-cat-label">RESOURCES</span>
+          <span class="sb-cat-chevron">▾</span>
+        </div>
+        <div class="sb-cat-items">
+          <div class="sb-item" data-url="https://www.reddit.com/r/ChaturbateModels/">
+            <span class="sb-item-icon">💡</span>
+            <span class="sb-item-name">CB Models</span>
+          </div>
+          <div class="sb-item" data-url="https://stripchat.com/blog/">
+            <span class="sb-item-icon">📝</span>
+            <span class="sb-item-name">Stripchat Blog</span>
+          </div>
+          <div class="sb-item" data-url="https://aww.chaturbate.com/">
+            <span class="sb-item-icon">🌐</span>
+            <span class="sb-item-name">CB Support</span>
+          </div>
+          <div class="sb-item" data-url="https://docs.aws.amazon.com/bedrock/">
+            <span class="sb-item-icon">🤖</span>
+            <span class="sb-item-name">Bedrock Docs</span>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /sidebar-scroll -->
+  </nav>
+
+  <!-- BrowserView renders here (injected by Electron between sidebar and panel) -->
+  <div id="browser-placeholder">
+    <div class="ph-inner">
+      <div class="ph-logo">⚡</div>
+      <div class="ph-title">APEX REVENUE DESKTOP</div>
+      <div class="ph-sub">Select a platform from the sidebar</div>
+    </div>
+  </div>
+
+  <!-- ── RIGHT PANEL — Live & Fans tabs only ──────────────────────── -->
+  <aside id="panel">
+
+    <!-- Tab bar -->
+    <div id="panel-tabs">
+      <button class="tab-btn active" data-tab="live">⚡ Live</button>
+      <button class="tab-btn"        data-tab="fans">💜 Fans</button>
+    </div>
+
+    <!-- ─── TAB: LIVE ──────────────────────────────────────────── -->
+    <div class="tab-pane active" id="tab-live">
+
+      <!-- Auth notice -->
+      <div id="auth-notice" class="notice-card">
+        <div class="notice-icon">🔐</div>
+        <div class="notice-body">
+          <div class="notice-title">Not signed in</div>
+          <div class="notice-sub">Sign in to enable AI prompts &amp; sync</div>
+          <button class="notice-cta" id="btn-signin-panel">Sign In</button>
+        </div>
+      </div>
+
+      <!-- Session header -->
+      <div class="ps">
+        <div class="section-header">
+          <span class="section-title">⚡ LIVE SESSION</span>
+          <span class="session-timer" id="session-timer">00:00:00</span>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-card tips">
+            <div class="stat-label">TOKENS/HR</div>
+            <div class="stat-value" id="stat-tph">0</div>
+            <div class="stat-sub">Current rate</div>
+          </div>
+          <div class="stat-card viewers">
+            <div class="stat-label">VIEWERS</div>
+            <div class="stat-value" id="stat-viewers">0</div>
+            <div class="stat-sub">Live now</div>
+          </div>
+          <div class="stat-card conv">
+            <div class="stat-label">CONV %</div>
+            <div class="stat-value" id="stat-conv">0.0<span>%</span></div>
+            <div class="stat-sub">Tippers/viewers</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Bedrock AI prompt (auto-generated, silent) -->
+      <div id="prompt-banner" class="ai-banner hidden">
+        <div class="ai-left">
+          <span class="ai-badge" id="ai-badge">BEDROCK AI</span>
+          <div class="ai-text" id="ai-prompt-text"></div>
+        </div>
+        <button class="ai-dismiss" id="btn-dismiss-prompt">✕</button>
+      </div>
+
+      <!-- Whale tracker -->
+      <div class="ps">
+        <div class="section-header">
+          <span class="section-title">🐋 WHALE TRACKER</span>
+          <span class="section-badge" id="whale-count">0</span>
+        </div>
+        <div id="whale-list" class="fan-list">
+          <div class="empty-state">Waiting for high-value tippers…</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Recent tips -->
+      <div class="ps">
+        <div class="section-header">
+          <span class="section-title">💰 RECENT TIPS</span>
+        </div>
+        <div id="tip-feed" class="tip-feed">
+          <div class="empty-state">No tips recorded yet…</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Session summary -->
+      <div class="ps">
+        <div class="section-header"><span class="section-title">📊 SUMMARY</span></div>
+        <div class="summary-grid">
+          <div class="summary-row"><span>Total Tokens</span><span id="sum-tokens">0</span></div>
+          <div class="summary-row"><span>Tippers</span><span id="sum-tippers">0</span></div>
+          <div class="summary-row"><span>Peak Viewers</span><span id="sum-peak">0</span></div>
+          <div class="summary-row"><span>Avg Tip</span><span id="sum-avg">0 tkn</span></div>
+          <div class="summary-row"><span>Largest Tip</span><span id="sum-largest">0 tkn</span></div>
+          <div class="summary-row"><span>Platform</span><span id="sum-platform" class="plat-tag">—</span></div>
+        </div>
+      </div>
+
+      <!-- AWS status strip (bottom of live tab — passive info only) -->
+      <div id="aws-strip">
+        <div class="aws-strip-item" id="aws-s3-status" title="S3 Session Backup">
+          <span>🪣</span><span id="aws-s3-label">S3 ready</span>
+        </div>
+        <div class="aws-strip-item" id="aws-cw-status" title="CloudWatch Metrics">
+          <span>📈</span><span id="aws-cw-label">CW live</span>
+        </div>
+        <div class="aws-strip-item" id="aws-fh-status" title="Kinesis Firehose">
+          <span>🔥</span><span id="aws-fh-label">FH ready</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── TAB: FANS ──────────────────────────────────────────── -->
+    <div class="tab-pane" id="tab-fans">
+      <div class="ps">
+        <div class="section-header">
+          <span class="section-title">💜 FAN LEADERBOARD</span>
+          <span class="section-badge" id="fan-count">0</span>
+        </div>
+        <div id="fan-list" class="fan-list">
+          <div class="empty-state">Fan data accumulating…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Panel footer -->
+    <div id="panel-footer">
+      <span id="footer-user">Not signed in</span>
+      <a id="footer-upgrade" href="#">Upgrade ⚡</a>
+    </div>
+  </aside>
+
+</div><!-- /app-body -->
+
+<!-- Sign-in modal -->
+<div id="modal-signin" class="modal hidden">
+  <div class="modal-box">
+    <button class="modal-close" id="btn-modal-close">✕</button>
+    <div class="modal-logo">⚡</div>
+    <h2 class="modal-title">Sign in to Apex Revenue</h2>
+    <p class="modal-sub">Unlocks AI prompts, cloud sync &amp; Platinum features</p>
+    <div id="signin-error" class="form-error hidden"></div>
+    <div class="form-group">
+      <label>Email</label>
+      <input type="email" id="input-email" placeholder="you@example.com">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="input-password" placeholder="••••••••">
+    </div>
+    <button class="form-submit" id="btn-signin-submit">Sign In</button>
+    <div class="modal-links">
+      <a id="link-signup" href="#">Create account</a>
+      <a id="link-forgot" href="#">Forgot password?</a>
+    </div>
+  </div>
+</div>
+
+<!-- Hidden Polly audio player -->
+<audio id="polly-audio" style="display:none"></audio>
+
+<script src="../shared/apex-config.js"></script>
+<script src="../shared/auth.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

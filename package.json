@@ -1,0 +1,72 @@
+{
+  "name": "apex-revenue-desktop",
+  "version": "1.0.0",
+  "description": "Apex Revenue Desktop \u2014 Creator Intelligence Engine for Windows",
+  "main": "main/main.js",
+  "author": "Ridge Johnston",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win",
+    "build:dir": "electron-builder --dir --win",
+    "pack": "electron-builder --dir"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1028.0",
+    "@aws-sdk/client-cloudwatch": "^3.1028.0",
+    "@aws-sdk/client-firehose": "^3.1028.0",
+    "@aws-sdk/client-iot-data-plane": "^3.1028.0",
+    "@aws-sdk/client-polly": "^3.1028.0",
+    "@aws-sdk/client-s3": "^3.1028.0",
+    "@aws-sdk/credential-providers": "^3.1028.0",
+    "electron-store": "^8.1.0"
+  },
+  "devDependencies": {
+    "electron": "^29.4.6",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "works.apexrevenue.desktop",
+    "productName": "Apex Revenue",
+    "copyright": "Copyright \u00a9 2025 Ridge Johnston",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build-resources"
+    },
+    "files": [
+      "main/**/*",
+      "preload/**/*",
+      "renderer/**/*",
+      "overlay/**/*",
+      "shared/**/*",
+      "config/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "node_modules/@aws-sdk/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icons/icon.ico",
+      "artifactName": "ApexRevenue-Setup-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Apex Revenue",
+      "installerIcon": "assets/icons/icon.ico",
+      "uninstallerIcon": "assets/icons/icon.ico",
+      "installerHeader": "assets/icons/icon.ico"
+    }
+  }
+}

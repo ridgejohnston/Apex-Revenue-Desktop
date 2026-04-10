@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.cache/
+*.log
+.DS_Store
+Thumbs.db
+*.swp
+.env
+installer/ApexRevenue-Setup-1.0.0.exe
+config/aws-defaults.json
