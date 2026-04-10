@@ -13,10 +13,25 @@ const { v4: uuidv4 } = require('uuid');
 
 let osn;
 try {
-  osn = require('@streamlabs/obs-studio-node');
-} catch (e) {
-  console.warn('[OBS Manager] obs-studio-node not available:', e.message);
-  osn = null;
+  // Try loading from local osn/ directory (downloaded by scripts/setup-osn.js)
+  const osnPath = path.join(__dirname, '..', '..', 'osn');
+  osn = require(osnPath);
+} catch (e1) {
+  try {
+    // Fallback: try from extraResources path (packaged Electron app)
+    const resourcePath = process.resourcesPath
+      ? path.join(process.resourcesPath, 'osn')
+      : null;
+    if (resourcePath) {
+      osn = require(resourcePath);
+    } else {
+      throw e1;
+    }
+  } catch (e2) {
+    console.warn('[OBS Manager] obs-studio-node not available:', e2.message);
+    console.warn('[OBS Manager] Run "npm run setup" to download OBS binaries');
+    osn = null;
+  }
 }
 
 class OBSManager {
@@ -63,9 +78,13 @@ class OBSManager {
       const uniqueId = `apex-revenue-${uuidv4()}`;
       osn.NodeObs.IPC.host(uniqueId);
 
-      // 2. Set the working directory to the obs-studio-node module
-      const osnPath = path.join(__dirname, '..', '..', 'node_modules', '@streamlabs', 'obs-studio-node');
-      osn.NodeObs.SetWorkingDirectory(osnPath);
+      // 2. Set the working directory to the osn module
+      let osnWorkDir = path.join(__dirname, '..', '..', 'osn');
+      // In packaged app, use extraResources path
+      if (process.resourcesPath && !require('fs').existsSync(osnWorkDir)) {
+        osnWorkDir = path.join(process.resourcesPath, 'osn');
+      }
+      osn.NodeObs.SetWorkingDirectory(osnWorkDir);
 
       // 3. Initialize the OBS API
       const initResult = osn.NodeObs.OBS_API_initAPI(locale, dataPath, '1.0.0');
