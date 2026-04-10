@@ -8,36 +8,11 @@
     "dev": "cross-env NODE_ENV=development electron .",
     "setup": "node scripts/setup-osn.js",
     "postinstall": "node scripts/setup-osn.js",
-    "build": "electron-builder",
-    "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac"
-  },
-  "build": {
-    "appId": "com.apexrevenue.desktop",
-    "productName": "Apex Revenue Desktop",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "src/**/*",
-      "assets/**/*",
-      "osn/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "osn",
-        "to": "osn",
-        "filter": ["**/*"]
-      }
-    ],
-    "win": {
-      "target": ["nsis"],
-      "icon": "assets/icon.ico"
-    },
-    "mac": {
-      "target": ["dmg"],
-      "icon": "assets/icon.icns"
-    }
+    "build": "node scripts/build-installer.js",
+    "build:win": "node scripts/build-installer.js --win",
+    "build:mac": "node scripts/build-installer.js --mac",
+    "build:dir": "node scripts/build-installer.js --dir",
+    "build:quick": "npx electron-builder --config electron-builder.config.js --dir"
   },
   "dependencies": {
     "electron-store": "^8.1.0",
