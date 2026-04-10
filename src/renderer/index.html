@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>Apex Revenue Desktop</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Header Bar -->
+  <header class="header">
+    <div class="header-brand">
+      <span class="logo">AR</span>
+      <h1>Apex Revenue Desktop</h1>
+    </div>
+    <div class="header-status" id="status-bar">
+      <span class="status-dot offline" id="status-dot"></span>
+      <span id="status-text">Offline</span>
+      <span class="uptime" id="uptime"></span>
+    </div>
+  </header>
+
+  <!-- Main Layout -->
+  <div class="main-layout">
+
+    <!-- Left: Preview + Controls -->
+    <div class="preview-panel">
+      <!-- OBS Preview Area -->
+      <div class="preview-container" id="preview-container">
+        <div class="preview-placeholder" id="preview-placeholder">
+          <p>Stream Preview</p>
+          <small>Initialize OBS to see your stream</small>
+        </div>
+      </div>
+
+      <!-- Stream Controls -->
+      <div class="stream-controls">
+        <button class="btn btn-init" id="btn-init-obs">Initialize OBS</button>
+        <button class="btn btn-stream" id="btn-stream" disabled>Go Live</button>
+        <button class="btn btn-record" id="btn-record" disabled>Record</button>
+      </div>
+    </div>
+
+    <!-- Right: Settings Panel -->
+    <div class="settings-panel">
+      <!-- Tab Navigation -->
+      <div class="tabs">
+        <button class="tab active" data-tab="stream-settings">Stream</button>
+        <button class="tab" data-tab="sources-settings">Sources</button>
+        <button class="tab" data-tab="output-settings">Output</button>
+      </div>
+
+      <!-- Stream Settings Tab -->
+      <div class="tab-content active" id="stream-settings">
+        <div class="setting-group">
+          <h3>Chaturbate Connection</h3>
+
+          <label>Broadcast Token (Stream Key)</label>
+          <div class="input-row">
+            <input type="password" id="broadcast-token" placeholder="Paste your broadcast token here">
+            <button class="btn btn-small" id="toggle-token-vis">Show</button>
+          </div>
+          <small class="hint">Get from: Broadcast Yourself > Use External Encoder > View RTMP info</small>
+
+          <label>RTMP Server</label>
+          <select id="rtmp-server">
+            <option value="global">Global (Recommended)</option>
+          </select>
+        </div>
+
+        <div class="setting-group">
+          <h3>Encoding</h3>
+
+          <label>Encoder</label>
+          <select id="encoder">
+            <option value="x264">x264 (CPU)</option>
+            <option value="nvenc">NVENC (NVIDIA GPU)</option>
+            <option value="qsv">Quick Sync (Intel GPU)</option>
+          </select>
+
+          <label>Video Bitrate (kbps)</label>
+          <input type="number" id="bitrate" value="2500" min="500" max="20000" step="100">
+
+          <label>Preset</label>
+          <select id="preset">
+            <option value="ultrafast">Ultrafast</option>
+            <option value="superfast">Superfast</option>
+            <option value="veryfast" selected>Veryfast</option>
+            <option value="faster">Faster</option>
+            <option value="fast">Fast</option>
+            <option value="medium">Medium</option>
+          </select>
+
+          <label>Audio Bitrate (kbps)</label>
+          <select id="audio-bitrate">
+            <option value="96">96</option>
+            <option value="128">128</option>
+            <option value="160" selected>160</option>
+            <option value="192">192</option>
+            <option value="256">256</option>
+            <option value="320">320</option>
+          </select>
+        </div>
+
+        <div class="setting-group">
+          <h3>Video</h3>
+
+          <label>Resolution</label>
+          <select id="resolution">
+            <option value="1920x1080">1920x1080 (1080p)</option>
+            <option value="1280x720">1280x720 (720p)</option>
+            <option value="2560x1440">2560x1440 (1440p)</option>
+            <option value="3840x2160">3840x2160 (4K)</option>
+          </select>
+
+          <label>FPS</label>
+          <select id="fps">
+            <option value="24">24</option>
+            <option value="30" selected>30</option>
+            <option value="60">60</option>
+          </select>
+        </div>
+
+        <button class="btn btn-apply" id="btn-apply-stream">Apply Stream Settings</button>
+      </div>
+
+      <!-- Sources Settings Tab -->
+      <div class="tab-content" id="sources-settings">
+        <div class="setting-group">
+          <h3>Camera</h3>
+
+          <label>Webcam Device</label>
+          <select id="webcam-device">
+            <option value="">-- Select Webcam --</option>
+          </select>
+          <button class="btn btn-small" id="btn-add-webcam">Add Webcam</button>
+        </div>
+
+        <div class="setting-group">
+          <h3>Audio</h3>
+
+          <label>Microphone</label>
+          <select id="mic-device">
+            <option value="">-- Select Microphone --</option>
+          </select>
+          <button class="btn btn-small" id="btn-add-mic">Add Microphone</button>
+
+          <label class="checkbox-label">
+            <input type="checkbox" id="desktop-audio" checked>
+            Capture Desktop Audio
+          </label>
+        </div>
+
+        <div class="setting-group">
+          <h3>Overlays</h3>
+
+          <label>Background Image</label>
+          <div class="input-row">
+            <input type="text" id="bg-image-path" placeholder="Select an image file" readonly>
+            <button class="btn btn-small" id="btn-browse-image">Browse</button>
+          </div>
+          <button class="btn btn-small" id="btn-add-bg-image">Add Background Image</button>
+
+          <label>Background Video</label>
+          <div class="input-row">
+            <input type="text" id="bg-video-path" placeholder="Select a video file" readonly>
+            <button class="btn btn-small" id="btn-browse-video">Browse</button>
+          </div>
+          <button class="btn btn-small" id="btn-add-bg-video">Add Background Video</button>
+        </div>
+
+        <div class="setting-group">
+          <h3>Active Sources</h3>
+          <div id="active-sources-list" class="sources-list">
+            <p class="empty-state">No sources added yet</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Output Settings Tab -->
+      <div class="tab-content" id="output-settings">
+        <div class="setting-group">
+          <h3>Recording</h3>
+
+          <label>Output Folder</label>
+          <div class="input-row">
+            <input type="text" id="recording-path" placeholder="Select output folder" readonly>
+            <button class="btn btn-small" id="btn-browse-recording">Browse</button>
+          </div>
+
+          <label>Format</label>
+          <select id="recording-format">
+            <option value="mkv">MKV (Recommended)</option>
+            <option value="mp4">MP4</option>
+            <option value="flv">FLV</option>
+          </select>
+
+          <label>Recording Bitrate (kbps)</label>
+          <input type="number" id="recording-bitrate" value="6000" min="1000" max="50000" step="500">
+        </div>
+
+        <button class="btn btn-apply" id="btn-apply-recording">Apply Recording Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer: Stream Health -->
+  <footer class="footer" id="stream-health">
+    <span id="health-bitrate">--</span>
+    <span id="health-fps">--</span>
+    <span id="health-dropped">--</span>
+  </footer>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
