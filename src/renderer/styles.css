@@ -12,9 +12,9 @@
   --text-primary: #e8e8ec;
   --text-secondary: #9898a6;
   --text-muted: #6a6a78;
-  --accent: #f05d23;
-  --accent-hover: #ff7340;
-  --accent-dim: rgba(240, 93, 35, 0.15);
+  --accent: #e01020;
+  --accent-hover: #ff2535;
+  --accent-dim: rgba(224, 16, 32, 0.15);
   --success: #2ecc71;
   --danger: #e74c3c;
   --warning: #f39c12;
@@ -102,7 +102,7 @@ body {
   font-weight: 700;
   letter-spacing: 2px;
   text-transform: uppercase;
-  color: var(--text-secondary);
+  color: var(--accent);
 }
 
 .auth-gate-card {

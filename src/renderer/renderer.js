@@ -248,7 +248,7 @@ function showVerificationStep(email, password) {
 
   formContent.innerHTML = `
     <div class="auth-gate-verify">
-      <h3 style="color:#f05d23;margin:0 0 8px;">Check your email</h3>
+      <h3 style="color:#e01020;margin:0 0 8px;">Check your email</h3>
       <p style="color:#aaa;font-size:13px;margin:0 0 16px;">
         We sent a verification code to <strong style="color:#fff;">${email}</strong>
       </p>
@@ -1234,6 +1234,7 @@ function attachSensationsListeners() {
       renderIntelligencePage('sensations');
     });
   }
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // AUTHENTICATION
