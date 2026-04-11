@@ -48,18 +48,19 @@ jobs:
         shell: cmd
 
       - name: Decode code signing certificate
+        shell: powershell
         run: |
-          echo "${{ secrets.WIN_CSC_LINK }}" > cert.b64
-          certutil -decode cert.b64 cert.pfx
-          del cert.b64
-        shell: cmd
+          $pfxBytes = [Convert]::FromBase64String("${{ secrets.WIN_CSC_LINK }}")
+          [IO.File]::WriteAllBytes("${{ github.workspace }}\cert.pfx", $pfxBytes)
+          Write-Host "Certificate decoded to ${{ github.workspace }}\cert.pfx"
+          Test-Path "${{ github.workspace }}\cert.pfx"
 
       - name: Build Windows installer
         run: npx electron-builder --win --config electron-builder.config.js
         shell: cmd
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: cert.pfx
+          CSC_LINK: ${{ github.workspace }}\cert.pfx
           CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
 
       - name: List build output
