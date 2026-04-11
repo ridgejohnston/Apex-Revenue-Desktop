@@ -35,7 +35,9 @@ contextBridge.exposeInMainWorld('apex', {
   stream: {
     configure: (config) => ipcRenderer.invoke('stream:configure', config),
     start: () => ipcRenderer.invoke('stream:start'),
+    startStream: (streamKey) => ipcRenderer.invoke('stream:startStream', streamKey),
     stop: () => ipcRenderer.invoke('stream:stop'),
+    stopStream: () => ipcRenderer.invoke('stream:stop'),
     getStatus: () => ipcRenderer.invoke('stream:getStatus'),
     getServers: () => ipcRenderer.invoke('stream:getServers'),
     onStateChange: (cb) => {

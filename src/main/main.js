@@ -226,20 +226,55 @@ ipcMain.handle('stream:configure', (event, config) => {
 });
 
 ipcMain.handle('stream:start', async () => {
-  await streamService.startStream();
-  // Notify renderer of state change
-  if (mainWindow) {
-    mainWindow.webContents.send('stream:stateChange', { streaming: true });
+  try {
+    await streamService.startStream();
+    if (mainWindow) {
+      mainWindow.webContents.send('stream:stateChange', { streaming: true });
+    }
+    return { success: true };
+  } catch (err) {
+    console.error('[Main] Stream start error:', err);
+    return { success: false, error: err.message || String(err) };
   }
-  return true;
+});
+
+ipcMain.handle('stream:startStream', async (event, streamKey) => {
+  try {
+    // Configure stream with the provided key and saved settings
+    const streamSettings = store.get('stream') || {};
+    streamService.configure({
+      broadcastToken: streamKey,
+      server: streamSettings.server || 'global',
+      bitrate: streamSettings.bitrate || 2500,
+      encoder: streamSettings.encoder || 'x264',
+      resolution: streamSettings.resolution || '1920x1080',
+      fps: streamSettings.fps || 30,
+      audioBitrate: streamSettings.audioBitrate || 160,
+      preset: streamSettings.preset || 'veryfast'
+    });
+
+    await streamService.startStream();
+    if (mainWindow) {
+      mainWindow.webContents.send('stream:stateChange', { streaming: true });
+    }
+    return { success: true };
+  } catch (err) {
+    console.error('[Main] Stream startStream error:', err);
+    return { success: false, error: err.message || String(err) };
+  }
 });
 
 ipcMain.handle('stream:stop', async () => {
-  await streamService.stopStream();
-  if (mainWindow) {
-    mainWindow.webContents.send('stream:stateChange', { streaming: false });
+  try {
+    await streamService.stopStream();
+    if (mainWindow) {
+      mainWindow.webContents.send('stream:stateChange', { streaming: false });
+    }
+    return { success: true };
+  } catch (err) {
+    console.error('[Main] Stream stop error:', err);
+    return { success: false, error: err.message || String(err) };
   }
-  return true;
 });
 
 ipcMain.handle('stream:getStatus', () => {
