@@ -174,6 +174,9 @@ class OBSManager {
     setSetting('Video', 'FPSType', 'Common FPS Values');
     setSetting('Video', 'ScaleType', 'bilinear');
 
+    // Keyframe interval — required by Chaturbate (2 seconds)
+    setSetting('Video', 'keyint_sec', 2);
+
     console.log(`[OBS Manager] Video configured: ${baseResolution} -> ${outputResolution} @ ${fps}fps`);
   }
 
@@ -514,14 +517,36 @@ class OBSManager {
 
     const encoderId = encoderMap[encoder] || 'obs_x264';
 
-    setSetting('Output', 'Mode', 'Advanced');
+    // Use Simple output mode — Advanced mode parameter names vary by obs-studio-node version
+    setSetting('Output', 'Mode', 'Simple');
     setSetting('Output', 'StreamEncoder', encoderId);
     setSetting('Output', 'VBitrate', bitrate);
     setSetting('Output', 'ABitrate', String(audioBitrate));
     setSetting('Output', 'Preset', preset);
     setSetting('Output', 'rate_control', rateControl);
 
-    console.log(`[OBS Manager] Stream encoder configured: ${encoder} @ ${bitrate}kbps`);
+    // Keyframe interval — Chaturbate requires exactly 2 seconds
+    setSetting('Output', 'Keyint', 2);
+    setSetting('Output', 'keyint_sec', 2);
+
+    // Also try setting keyframe via Video category (some osn versions)
+    setSetting('Video', 'keyint_sec', 2);
+
+    // Dump Output settings for debugging
+    try {
+      const outputData = osn.NodeObs.OBS_settings_getSettings('Output').data;
+      console.log('[OBS Manager] ═══ Output settings after encoder config ═══');
+      for (const sub of outputData || []) {
+        console.log(`  [Subcategory: "${sub.nameSubCategory}"]`);
+        for (const param of sub.parameters) {
+          console.log(`    ${param.name} = ${JSON.stringify(param.currentValue)}`);
+        }
+      }
+    } catch (e) {
+      console.warn('[OBS Manager] Could not dump Output settings:', e.message);
+    }
+
+    console.log(`[OBS Manager] Stream encoder configured: ${encoder} @ ${bitrate}kbps, keyframe: 2s`);
   }
 
   /**
@@ -579,36 +604,82 @@ class OBSManager {
       throw new Error('RTMP server URL and stream key are required');
     }
 
-    // Log what OBS currently has for Stream settings before we change them
+    // ── APPROACH 1: Use OBS Settings API ────────────────────────────
+    // Dump ALL Stream parameters so we can see what names OBS actually uses
     try {
-      const currentStream = osn.NodeObs.OBS_settings_getSettings('Stream').data;
-      console.log('[OBS Manager] Current Stream settings BEFORE configure:');
-      for (const sub of currentStream || []) {
+      const streamData = osn.NodeObs.OBS_settings_getSettings('Stream').data;
+      console.log('[OBS Manager] ═══ ALL Stream settings parameters ═══');
+      for (const sub of streamData || []) {
+        console.log(`  [Subcategory: "${sub.nameSubCategory}"]`);
         for (const param of sub.parameters) {
-          console.log(`  [${sub.nameSubCategory}] ${param.name} = ${JSON.stringify(param.currentValue)} (type: ${param.type})`);
+          console.log(`    ${param.name} = ${JSON.stringify(param.currentValue)} (type: ${param.type}, values: ${JSON.stringify(param.values || []).substring(0, 200)})`);
         }
       }
     } catch (e) {
-      console.warn('[OBS Manager] Could not read current Stream settings:', e.message);
+      console.warn('[OBS Manager] Could not read Stream settings:', e.message);
     }
 
-    // Apply RTMP custom settings
-    // Try both known parameter names for stream type
+    // Try every known parameter name variant for stream type
     setSetting('Stream', 'streamType', 'rtmp_custom');
     setSetting('Stream', 'StreamType', 'rtmp_custom');
     setSetting('Stream', 'service', 'rtmp_custom');
+    setSetting('Stream', 'type', 'rtmp_custom');
+
+    // Set RTMP server and key
     setSetting('Stream', 'server', server);
     setSetting('Stream', 'key', key);
+    setSetting('Stream', 'url', server);      // Alternative param name
+    setSetting('Stream', 'stream_key', key);  // Alternative param name
 
-    // Verify the settings were applied
+    // ── APPROACH 2: Use ServiceFactory API (obs-studio-node native) ──
+    try {
+      if (osn.ServiceFactory) {
+        console.log('[OBS Manager] Using ServiceFactory API for RTMP...');
+
+        // Try to create/update the streaming service directly
+        const serviceSettings = {
+          server: server,
+          key: key
+        };
+
+        let service;
+        try {
+          // Try creating rtmp_custom service
+          service = osn.ServiceFactory.create('rtmp_custom', 'apex-stream-service', serviceSettings);
+          console.log('[OBS Manager] ServiceFactory created rtmp_custom service');
+        } catch (e1) {
+          console.warn('[OBS Manager] ServiceFactory.create failed:', e1.message);
+          try {
+            // Fallback: try legacySettings approach
+            service = osn.ServiceFactory.create('rtmp_common', 'apex-stream-service', serviceSettings);
+            console.log('[OBS Manager] ServiceFactory created rtmp_common service');
+          } catch (e2) {
+            console.warn('[OBS Manager] ServiceFactory fallback also failed:', e2.message);
+          }
+        }
+
+        if (service) {
+          // If obs-studio-node has a way to set the active service
+          if (typeof osn.NodeObs.OBS_service_setService === 'function') {
+            osn.NodeObs.OBS_service_setService(service);
+            console.log('[OBS Manager] Service set via OBS_service_setService');
+          }
+          this._streamService = service;
+        }
+      } else {
+        console.log('[OBS Manager] ServiceFactory not available, using settings API only');
+      }
+    } catch (e) {
+      console.warn('[OBS Manager] ServiceFactory approach failed:', e.message);
+    }
+
+    // Verify what OBS ended up with
     try {
       const afterStream = osn.NodeObs.OBS_settings_getSettings('Stream').data;
-      console.log('[OBS Manager] Stream settings AFTER configure:');
+      console.log('[OBS Manager] ═══ Stream settings AFTER configure ═══');
       for (const sub of afterStream || []) {
         for (const param of sub.parameters) {
-          if (['streamType', 'StreamType', 'service', 'server', 'key', 'url'].includes(param.name)) {
-            console.log(`  [${sub.nameSubCategory}] ${param.name} = ${JSON.stringify(param.currentValue)}`);
-          }
+          console.log(`    ${param.name} = ${JSON.stringify(param.currentValue)}`);
         }
       }
     } catch (e) {
