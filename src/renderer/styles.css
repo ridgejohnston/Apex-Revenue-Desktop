@@ -858,6 +858,14 @@ body {
   margin-top: 4px;
 }
 
+.obs-preview.preview-active {
+  background: #000;
+}
+
+.obs-preview.preview-active .preview-placeholder {
+  display: none;
+}
+
 .stream-controls {
   display: flex;
   gap: 12px;

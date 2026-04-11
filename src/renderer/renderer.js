@@ -602,6 +602,21 @@ async function initializeOBS() {
       dom.recordBtn.disabled = false;
       updateStatus('Ready', 'ready');
       loadDevices();
+
+      // Create the OBS preview and hide the placeholder
+      try {
+        await window.apex.obs.createPreview();
+        const previewEl = document.getElementById('obsPreview');
+        if (previewEl) {
+          const placeholder = previewEl.querySelector('.preview-placeholder');
+          if (placeholder) placeholder.style.display = 'none';
+          previewEl.classList.add('preview-active');
+        }
+        console.log('[OBS] Preview created successfully');
+      } catch (previewErr) {
+        console.warn('[OBS] Preview creation failed:', previewErr);
+        // Non-fatal — stream still works without preview
+      }
     } else {
       showAlert('Failed to initialize OBS: ' + (result.error || 'Unknown error'), 'error');
       dom.initOBSBtn.textContent = 'Initialize OBS';
