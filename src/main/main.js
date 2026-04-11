@@ -344,26 +344,52 @@ ipcMain.handle('dialog:selectFile', async (event, filters) => {
 // ─────────────────────────────────────────────
 
 ipcMain.handle('auth:login', async (event, email, password) => {
-  return await authService.login(email, password);
+  if (!authService) return { success: false, error: 'Auth service not ready' };
+  try {
+    return await authService.login(email, password);
+  } catch (err) {
+    console.error('auth:login IPC error:', err);
+    return { success: false, error: err.message || 'Login failed' };
+  }
 });
 
 ipcMain.handle('auth:signup', async (event, email, password) => {
-  return await authService.signup(email, password);
+  if (!authService) return { success: false, error: 'Auth service not ready' };
+  try {
+    return await authService.signup(email, password);
+  } catch (err) {
+    console.error('auth:signup IPC error:', err);
+    return { success: false, error: err.message || 'Signup failed' };
+  }
 });
 
 ipcMain.handle('auth:confirmSignup', async (event, email, code) => {
-  return await authService.confirmSignup(email, code);
+  if (!authService) return { success: false, error: 'Auth service not ready' };
+  try {
+    return await authService.confirmSignup(email, code);
+  } catch (err) {
+    console.error('auth:confirmSignup IPC error:', err);
+    return { success: false, error: err.message || 'Confirmation failed' };
+  }
 });
 
 ipcMain.handle('auth:logout', async () => {
-  return await authService.logout();
+  if (!authService) return { success: false, error: 'Auth service not ready' };
+  try {
+    return await authService.logout();
+  } catch (err) {
+    console.error('auth:logout IPC error:', err);
+    return { success: false, error: err.message || 'Logout failed' };
+  }
 });
 
 ipcMain.handle('auth:getSession', () => {
+  if (!authService) return { isAuthenticated: false, user: null, tokens: {} };
   return authService.getSession();
 });
 
 ipcMain.handle('auth:getUser', () => {
+  if (!authService) return null;
   return authService.getUser();
 });
 

@@ -29,25 +29,56 @@ const COGNITO_CONFIG = {
 
 const API_ENDPOINT = 'https://7g6qsxoos3.execute-api.us-east-1.amazonaws.com/prod';
 
+// Fetch with timeout wrapper
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error('Request timed out. Check your internet connection.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // ── Low-level Cognito request (matches Edge extension pattern) ──
 async function cognitoRequest(action, payload) {
-  const res = await fetch(COGNITO_CONFIG.endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-amz-json-1.1',
-      'X-Amz-Target': `AWSCognitoIdentityProviderService.${action}`
-    },
-    body: JSON.stringify(payload)
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
-  const data = await res.json();
+  try {
+    console.log(`[Cognito] ${action} request starting...`);
+    const res = await fetch(COGNITO_CONFIG.endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-amz-json-1.1',
+        'X-Amz-Target': `AWSCognitoIdentityProviderService.${action}`
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
 
-  if (!res.ok) {
-    const msg = data.message || data.__type || `Cognito error (${res.status})`;
-    throw new Error(msg);
+    const data = await res.json();
+    console.log(`[Cognito] ${action} response: ${res.status}`);
+
+    if (!res.ok) {
+      const msg = data.message || data.__type || `Cognito error (${res.status})`;
+      throw new Error(msg);
+    }
+
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error('Request timed out. Check your internet connection.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return data;
 }
 
 class AuthService {
@@ -114,6 +145,7 @@ class AuthService {
   // ──────────────────────────────────────────────
 
   async login(email, password) {
+    console.log('[AuthService] login() called for:', email);
     try {
       const data = await cognitoRequest('InitiateAuth', {
         ClientId: COGNITO_CONFIG.clientId,
@@ -264,7 +296,7 @@ class AuthService {
     try {
       await this.ensureValidToken();
 
-      const response = await fetch(`${API_ENDPOINT}/linked-accounts`, {
+      const response = await fetchWithTimeout(`${API_ENDPOINT}/linked-accounts`, {
         method: 'POST',
         headers: {
           'Authorization': this.tokens.accessToken,
@@ -300,7 +332,7 @@ class AuthService {
       // Ensure token is still valid (Cognito IdTokens expire after 1 hour)
       await this.ensureValidToken();
 
-      const response = await fetch(`${API_ENDPOINT}/link-platform`, {
+      const response = await fetchWithTimeout(`${API_ENDPOINT}/link-platform`, {
         method: 'POST',
         headers: {
           'Authorization': this.tokens.accessToken,
@@ -346,7 +378,7 @@ class AuthService {
       // Ensure token is still valid (Cognito IdTokens expire after 1 hour)
       await this.ensureValidToken();
 
-      const response = await fetch(`${API_ENDPOINT}/unlink-platform`, {
+      const response = await fetchWithTimeout(`${API_ENDPOINT}/unlink-platform`, {
         method: 'POST',
         headers: {
           'Authorization': this.tokens.accessToken,

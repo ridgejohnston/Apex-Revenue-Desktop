@@ -169,20 +169,23 @@ function initializeGateListeners() {
     gate.loginError.textContent = '';
     gate.loginBtn.disabled = true;
     gate.loginBtn.textContent = 'Signing in...';
+    console.log('[Gate] Login form submitted');
 
     try {
       const result = await window.apex.auth.login(
         gate.loginEmail.value.trim(),
         gate.loginPassword.value
       );
-      if (result.success) {
+      console.log('[Gate] Login result:', result?.success, result?.error);
+      if (result && result.success) {
         state.user = result.user;
         state.isAuthenticated = true;
         unlockDashboard();
       } else {
-        gate.loginError.textContent = result.error || 'Invalid email or password';
+        gate.loginError.textContent = (result && result.error) || 'Invalid email or password';
       }
     } catch (err) {
+      console.error('[Gate] Login error:', err);
       gate.loginError.textContent = 'Connection error. Please try again.';
     } finally {
       gate.loginBtn.disabled = false;
