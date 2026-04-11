@@ -263,6 +263,9 @@ class AuthService {
     }
 
     try {
+      // Ensure token is still valid (Cognito IdTokens expire after 1 hour)
+      await this.ensureValidToken();
+
       const response = await fetch(`${API_ENDPOINT}/link-platform`, {
         method: 'POST',
         headers: {
@@ -309,6 +312,9 @@ class AuthService {
     }
 
     try {
+      // Ensure token is still valid (Cognito IdTokens expire after 1 hour)
+      await this.ensureValidToken();
+
       const response = await fetch(`${API_ENDPOINT}/unlink-platform`, {
         method: 'POST',
         headers: {
