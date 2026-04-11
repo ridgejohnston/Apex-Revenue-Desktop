@@ -92,6 +92,7 @@ contextBridge.exposeInMainWorld('apex', {
     getSession: () => ipcRenderer.invoke('auth:getSession'),
     getUser: () => ipcRenderer.invoke('auth:getUser'),
     refreshTokens: () => ipcRenderer.invoke('auth:refreshTokens'),
+    getLinkedAccounts: () => ipcRenderer.invoke('auth:getLinkedAccounts'),
     linkPlatform: (platform, username) =>
       ipcRenderer.invoke('auth:linkPlatform', platform, username),
     unlinkPlatform: (platform) => ipcRenderer.invoke('auth:unlinkPlatform', platform),

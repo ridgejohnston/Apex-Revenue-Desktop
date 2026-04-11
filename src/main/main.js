@@ -334,6 +334,10 @@ ipcMain.handle('auth:refreshTokens', async () => {
   return await authService.refreshTokens();
 });
 
+ipcMain.handle('auth:getLinkedAccounts', async () => {
+  return await authService.getLinkedAccounts();
+});
+
 ipcMain.handle('auth:linkPlatform', async (event, platform, username) => {
   return await authService.linkPlatform(platform, username);
 });

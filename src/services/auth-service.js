@@ -142,6 +142,9 @@ class AuthService {
       this.user = this.parseTokenUser(result.IdToken);
       this.store.set('user', this.user);
 
+      // Fetch linked platform accounts from the server
+      await this.getLinkedAccounts().catch(() => {});
+
       this.notifyListeners(this.user);
 
       return {
@@ -254,6 +257,37 @@ class AuthService {
   }
 
   // ──────────────────────────────────────────────
+  // GET LINKED ACCOUNTS (via API Gateway)
+  // ──────────────────────────────────────────────
+
+  async getLinkedAccounts() {
+    try {
+      await this.ensureValidToken();
+
+      const response = await fetch(`${API_ENDPOINT}/linked-accounts`, {
+        method: 'POST',
+        headers: {
+          'Authorization': this.tokens.accessToken,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const data = await response.json();
+      const accounts = Array.isArray(data.accounts) ? data.accounts : (Array.isArray(data) ? data : []);
+
+      if (this.user) {
+        this.user.linkedPlatforms = accounts;
+        this.store.set('user', this.user);
+      }
+
+      return accounts;
+    } catch (error) {
+      console.warn('getLinkedAccounts error:', error.message);
+      return this.user?.linkedPlatforms || [];
+    }
+  }
+
+  // ──────────────────────────────────────────────
   // LINK PLATFORM ACCOUNT (via API Gateway)
   // ──────────────────────────────────────────────
 
@@ -272,7 +306,7 @@ class AuthService {
           'Authorization': this.tokens.accessToken,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ platform, username })
+        body: JSON.stringify({ platform, username: username.toLowerCase().trim() })
       });
 
       const data = await response.json();
@@ -281,17 +315,14 @@ class AuthService {
         throw new Error(data.error || data.message || 'Failed to link platform');
       }
 
-      // Update user with linked platforms
-      if (this.user) {
-        this.user.linkedPlatforms = data.linkedPlatforms || data.accounts || [];
-        this.store.set('user', this.user);
-      }
+      // Fetch the updated linked accounts list (matches Edge extension pattern)
+      const accounts = await this.getLinkedAccounts();
 
       this.notifyListeners(this.user);
 
       return {
         success: true,
-        platforms: this.user?.linkedPlatforms || []
+        platforms: accounts
       };
     } catch (error) {
       console.error('Platform link error:', error);
@@ -330,17 +361,14 @@ class AuthService {
         throw new Error(data.error || data.message || 'Failed to unlink platform');
       }
 
-      // Update user
-      if (this.user) {
-        this.user.linkedPlatforms = data.linkedPlatforms || data.accounts || [];
-        this.store.set('user', this.user);
-      }
+      // Fetch the updated linked accounts list (matches Edge extension pattern)
+      const accounts = await this.getLinkedAccounts();
 
       this.notifyListeners(this.user);
 
       return {
         success: true,
-        platforms: this.user?.linkedPlatforms || []
+        platforms: accounts
       };
     } catch (error) {
       console.error('Platform unlink error:', error);

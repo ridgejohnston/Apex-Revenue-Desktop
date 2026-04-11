@@ -310,6 +310,16 @@ async function checkAuthGate() {
       state.user = session.user;
       state.isAuthenticated = true;
       unlockDashboard();
+
+      // Refresh linked accounts from server (stored list may be stale)
+      try {
+        const accounts = await window.apex.auth.getLinkedAccounts();
+        if (state.user) {
+          state.user.linkedPlatforms = accounts;
+        }
+      } catch (e) {
+        console.warn('Failed to refresh linked accounts:', e);
+      }
     }
     // else: gate stays visible, user must log in
   } catch (err) {
