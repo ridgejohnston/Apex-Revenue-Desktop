@@ -55,7 +55,11 @@ module.exports = {
       }
     ],
     icon: iconPath,
-    artifactName: 'ApexRevenueDesktop-Setup-${version}.${ext}'
+    artifactName: 'ApexRevenueDesktop-Setup-${version}.${ext}',
+    signingHashAlgorithms: ['sha256'],
+    // electron-builder auto-reads CSC_LINK and CSC_KEY_PASSWORD env vars
+    // for code signing. The CI workflow decodes the base64 .pfx from
+    // GitHub Secrets and sets these env vars before the build step.
   },
 
   nsis: {
