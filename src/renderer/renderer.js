@@ -634,12 +634,9 @@ async function startStream() {
 
   try {
     const streamKey = dom.streamKey.value || '';
+    const rtmpUrl = dom.streamServer.value || '';
 
     // ── Username validation ──────────────────────────────────────────
-    // Chaturbate broadcast tokens have the format: <numeric_id>.<hex_hash>
-    // The RTMP URL contains the broadcaster username. We validate that
-    // the user has a linked platform account before allowing the stream
-    // to start, preventing unauthorized access to others' data.
     if (!state.user) {
       showAlert('You must be logged in to stream', 'error');
       dom.goLiveBtn.disabled = false;
@@ -663,7 +660,16 @@ async function startStream() {
       return;
     }
 
-    const result = await window.apex.stream.startStream(streamKey);
+    // Validate RTMP URL is provided
+    if (!rtmpUrl.trim()) {
+      showAlert('Enter your RTMP URL in the Stream settings tab', 'error');
+      dom.goLiveBtn.disabled = false;
+      dom.goLiveBtn.textContent = 'Go Live';
+      return;
+    }
+
+    console.log('[Stream] Starting with RTMP URL:', rtmpUrl, 'Key length:', streamKey.length);
+    const result = await window.apex.stream.startStream(streamKey, rtmpUrl);
 
     if (result.success) {
       state.streaming = true;

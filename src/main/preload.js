@@ -35,7 +35,7 @@ contextBridge.exposeInMainWorld('apex', {
   stream: {
     configure: (config) => ipcRenderer.invoke('stream:configure', config),
     start: () => ipcRenderer.invoke('stream:start'),
-    startStream: (streamKey) => ipcRenderer.invoke('stream:startStream', streamKey),
+    startStream: (streamKey, rtmpUrl) => ipcRenderer.invoke('stream:startStream', streamKey, rtmpUrl),
     stop: () => ipcRenderer.invoke('stream:stop'),
     stopStream: () => ipcRenderer.invoke('stream:stop'),
     getStatus: () => ipcRenderer.invoke('stream:getStatus'),

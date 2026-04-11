@@ -35,7 +35,10 @@ function setSetting(category, parameter, value) {
   if (found) {
     osn.NodeObs.OBS_settings_saveSettings(category, settings);
   } else {
-    console.warn(`[OBS Settings] Parameter "${parameter}" not found in category "${category}"`);
+    // Only warn for critical params, not for alternate name attempts
+    if (!['streamType', 'StreamType', 'service'].includes(parameter)) {
+      console.warn(`[OBS Settings] Parameter "${parameter}" not found in category "${category}"`);
+    }
   }
 }
 
@@ -576,11 +579,43 @@ class OBSManager {
       throw new Error('RTMP server URL and stream key are required');
     }
 
+    // Log what OBS currently has for Stream settings before we change them
+    try {
+      const currentStream = osn.NodeObs.OBS_settings_getSettings('Stream').data;
+      console.log('[OBS Manager] Current Stream settings BEFORE configure:');
+      for (const sub of currentStream || []) {
+        for (const param of sub.parameters) {
+          console.log(`  [${sub.nameSubCategory}] ${param.name} = ${JSON.stringify(param.currentValue)} (type: ${param.type})`);
+        }
+      }
+    } catch (e) {
+      console.warn('[OBS Manager] Could not read current Stream settings:', e.message);
+    }
+
+    // Apply RTMP custom settings
+    // Try both known parameter names for stream type
     setSetting('Stream', 'streamType', 'rtmp_custom');
+    setSetting('Stream', 'StreamType', 'rtmp_custom');
+    setSetting('Stream', 'service', 'rtmp_custom');
     setSetting('Stream', 'server', server);
     setSetting('Stream', 'key', key);
 
-    console.log(`[OBS Manager] Stream service configured: ${server}`);
+    // Verify the settings were applied
+    try {
+      const afterStream = osn.NodeObs.OBS_settings_getSettings('Stream').data;
+      console.log('[OBS Manager] Stream settings AFTER configure:');
+      for (const sub of afterStream || []) {
+        for (const param of sub.parameters) {
+          if (['streamType', 'StreamType', 'service', 'server', 'key', 'url'].includes(param.name)) {
+            console.log(`  [${sub.nameSubCategory}] ${param.name} = ${JSON.stringify(param.currentValue)}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[OBS Manager] Could not verify Stream settings:', e.message);
+    }
+
+    console.log(`[OBS Manager] Stream service configured: ${server} (key length: ${key.length})`);
   }
 
   // ─────────────────────────────────────────────

@@ -52,10 +52,12 @@ class StreamService {
       throw new Error('Broadcast token is required. Get it from Chaturbate: Broadcast Yourself -> Use External Encoder -> View RTMP/OBS broadcast information');
     }
 
-    // Resolve server URL
-    const serverUrl = CHATURBATE_SERVERS[server]
-      ? CHATURBATE_SERVERS[server].url
-      : server; // Allow custom RTMP URLs
+    // Resolve server URL — use as-is if it looks like a URL, otherwise look up preset
+    const serverUrl = server.startsWith('rtmp://') || server.startsWith('rtmps://')
+      ? server
+      : (CHATURBATE_SERVERS[server] ? CHATURBATE_SERVERS[server].url : server);
+
+    console.log(`[Stream Service] Resolved server: "${server}" -> "${serverUrl}"`);
 
     this.profile = {
       broadcastToken,

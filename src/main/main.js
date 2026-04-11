@@ -240,13 +240,15 @@ ipcMain.handle('stream:start', async () => {
   }
 });
 
-ipcMain.handle('stream:startStream', async (event, streamKey) => {
+ipcMain.handle('stream:startStream', async (event, streamKey, rtmpUrl) => {
   try {
-    // Configure stream with the provided key and saved settings
+    // Configure stream with the provided key, RTMP URL, and saved settings
     const streamSettings = store.get('stream') || {};
+    const serverUrl = rtmpUrl || streamSettings.streamServer || 'global';
+    console.log('[Main] stream:startStream - RTMP URL:', serverUrl, '| Key length:', streamKey?.length);
     streamService.configure({
       broadcastToken: streamKey,
-      server: streamSettings.server || 'global',
+      server: serverUrl,
       bitrate: streamSettings.bitrate || 2500,
       encoder: streamSettings.encoder || 'x264',
       resolution: streamSettings.resolution || '1920x1080',
