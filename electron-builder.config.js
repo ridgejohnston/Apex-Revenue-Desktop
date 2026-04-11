@@ -56,10 +56,9 @@ module.exports = {
     ],
     icon: iconPath,
     artifactName: 'ApexRevenueDesktop-Setup-${version}.${ext}',
-    signingHashAlgorithms: ['sha256'],
-    // electron-builder auto-reads CSC_LINK and CSC_KEY_PASSWORD env vars
-    // for code signing. The CI workflow decodes the base64 .pfx from
-    // GitHub Secrets and sets these env vars before the build step.
+    // Code signing disabled — self-signed certs make SmartScreen worse.
+    // Use a CA-issued cert (e.g. SSL.com, Sectigo) when ready for public distribution.
+    signDll: false,
   },
 
   nsis: {
