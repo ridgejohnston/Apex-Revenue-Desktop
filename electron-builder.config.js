@@ -58,7 +58,7 @@ module.exports = {
     artifactName: 'ApexRevenueDesktop-Setup-${version}.${ext}',
     // Code signing disabled — self-signed certs make SmartScreen worse.
     // Use a CA-issued cert (e.g. SSL.com, Sectigo) when ready for public distribution.
-    signDll: false,
+    signDlls: false,
   },
 
   nsis: {
