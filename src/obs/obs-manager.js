@@ -11,6 +11,47 @@
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
+// ── OBS Settings helpers ──────────────────────────────────────────────────
+// OBS_settings_saveSettings expects the FULL settings structure returned by
+// OBS_settings_getSettings, not a flat key-value object. We must:
+//   1. Get the current settings (array of subcategories with parameters)
+//   2. Find each parameter by name and update its currentValue
+//   3. Save the entire modified structure back
+
+function setSetting(category, parameter, value) {
+  const settings = osn.NodeObs.OBS_settings_getSettings(category).data;
+  if (!settings) return;
+
+  let found = false;
+  for (const sub of settings) {
+    for (const param of sub.parameters) {
+      if (param.name === parameter) {
+        param.currentValue = value;
+        found = true;
+      }
+    }
+  }
+
+  if (found) {
+    osn.NodeObs.OBS_settings_saveSettings(category, settings);
+  } else {
+    console.warn(`[OBS Settings] Parameter "${parameter}" not found in category "${category}"`);
+  }
+}
+
+function getAvailableValues(category, subcategory, parameter) {
+  const settings = osn.NodeObs.OBS_settings_getSettings(category).data;
+  if (!settings) return [];
+
+  const sub = settings.find(s => s.nameSubCategory === subcategory);
+  if (!sub) return [];
+
+  const param = sub.parameters.find(p => p.name === parameter);
+  if (!param || !param.values) return [];
+
+  return param.values.map(v => Object.values(v)[0]);
+}
+
 let osn;
 try {
   // Try loading from local osn/ directory (downloaded by scripts/setup-osn.js)
@@ -124,13 +165,11 @@ class OBSManager {
       fps = 30
     } = settings;
 
-    osn.NodeObs.OBS_settings_saveSettings('Video', {
-      Base: baseResolution,
-      Output: outputResolution,
-      FPSCommon: String(fps),
-      FPSType: 'Common FPS Values',
-      ScaleType: 'bilinear'
-    });
+    setSetting('Video', 'Base', baseResolution);
+    setSetting('Video', 'Output', outputResolution);
+    setSetting('Video', 'FPSCommon', String(fps));
+    setSetting('Video', 'FPSType', 'Common FPS Values');
+    setSetting('Video', 'ScaleType', 'bilinear');
 
     console.log(`[OBS Manager] Video configured: ${baseResolution} -> ${outputResolution} @ ${fps}fps`);
   }
@@ -472,14 +511,12 @@ class OBSManager {
 
     const encoderId = encoderMap[encoder] || 'obs_x264';
 
-    osn.NodeObs.OBS_settings_saveSettings('Output', {
-      Mode: 'Advanced',
-      StreamEncoder: encoderId,
-      VBitrate: bitrate,
-      ABitrate: String(audioBitrate),
-      Preset: preset,
-      rate_control: rateControl
-    });
+    setSetting('Output', 'Mode', 'Advanced');
+    setSetting('Output', 'StreamEncoder', encoderId);
+    setSetting('Output', 'VBitrate', bitrate);
+    setSetting('Output', 'ABitrate', String(audioBitrate));
+    setSetting('Output', 'Preset', preset);
+    setSetting('Output', 'rate_control', rateControl);
 
     console.log(`[OBS Manager] Stream encoder configured: ${encoder} @ ${bitrate}kbps`);
   }
@@ -508,12 +545,10 @@ class OBSManager {
       'nvenc': 'ffmpeg_nvenc'
     };
 
-    osn.NodeObs.OBS_settings_saveSettings('Output', {
-      RecEncoder: encoderMap[encoder] || 'obs_x264',
-      RecFilePath: outputPath,
-      RecFormat: format,
-      RecVBitrate: bitrate
-    });
+    setSetting('Output', 'RecEncoder', encoderMap[encoder] || 'obs_x264');
+    setSetting('Output', 'RecFilePath', outputPath);
+    setSetting('Output', 'RecFormat', format);
+    setSetting('Output', 'RecVBitrate', bitrate);
 
     console.log(`[OBS Manager] Recording configured: ${format} @ ${bitrate}kbps -> ${outputPath}`);
   }
@@ -541,11 +576,9 @@ class OBSManager {
       throw new Error('RTMP server URL and stream key are required');
     }
 
-    osn.NodeObs.OBS_settings_saveSettings('Stream', {
-      streamType: 'rtmp_custom',
-      server: server,
-      key: key
-    });
+    setSetting('Stream', 'streamType', 'rtmp_custom');
+    setSetting('Stream', 'server', server);
+    setSetting('Stream', 'key', key);
 
     console.log(`[OBS Manager] Stream service configured: ${server}`);
   }
