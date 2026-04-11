@@ -13,6 +13,7 @@ const streamService = require('../obs/stream-service');
 const AuthService = require('../services/auth-service');
 const IntelligenceService = require('../services/intelligence-service');
 const RelayService = require('../services/relay-service');
+const SensationsService = require('../services/sensations-service');
 
 // Persistent settings store
 const store = new Store({
@@ -58,6 +59,7 @@ let obsInitialized = false;
 let authService = null;
 let intelligenceService = null;
 let relayService = null;
+let sensationsService = null;
 
 // ─────────────────────────────────────────────
 // WINDOW CREATION
@@ -504,6 +506,71 @@ ipcMain.handle('relay:sendHeartbeat', () => {
 });
 
 // ─────────────────────────────────────────────
+// IPC HANDLERS - SENSATIONS (New)
+// ─────────────────────────────────────────────
+
+ipcMain.handle('sensations:getState', () => {
+  return sensationsService ? sensationsService.getState() : null;
+});
+
+ipcMain.handle('sensations:getSettings', () => {
+  return sensationsService ? sensationsService.getSettings() : null;
+});
+
+ipcMain.handle('sensations:configure', (event, settings) => {
+  if (!sensationsService) return { success: false, error: 'Service not initialized' };
+  try {
+    sensationsService.configure(settings);
+    store.set('sensations', settings);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('sensations:handleTip', (event, amount, username, platform) => {
+  if (!sensationsService) return { success: false, error: 'Service not initialized' };
+  try {
+    sensationsService.handleTip(amount, username, platform);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('sensations:getTiers', () => {
+  return sensationsService ? sensationsService.getTiers() : [];
+});
+
+ipcMain.handle('sensations:adjustTier', (event, tierIndex, changes) => {
+  if (!sensationsService) return { success: false, error: 'Service not initialized' };
+  try {
+    sensationsService.adjustTier(tierIndex, changes);
+    const settings = sensationsService.getSettings();
+    store.set('sensations', settings);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('sensations:getQueue', () => {
+  return sensationsService ? sensationsService.getQueueStatus() : { queue: [], isProcessing: false };
+});
+
+ipcMain.handle('sensations:resetSession', () => {
+  if (!sensationsService) return { success: false, error: 'Service not initialized' };
+  sensationsService.resetSession();
+  return { success: true };
+});
+
+ipcMain.handle('sensations:setConnected', (event, connected) => {
+  if (!sensationsService) return { success: false, error: 'Service not initialized' };
+  sensationsService.setToyConnected(connected);
+  return { success: true };
+});
+
+// ─────────────────────────────────────────────
 // SERVICE EVENT FORWARDING
 // (Registered after services are created in app.whenReady)
 // ─────────────────────────────────────────────
@@ -561,6 +628,43 @@ function registerServiceEvents() {
   relayService.on('relayEvent', (data) => {
     if (mainWindow) mainWindow.webContents.send('relay:event', data);
   });
+
+  // Sensations service events
+  sensationsService.on('vibrate', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:vibrate', data);
+  });
+
+  sensationsService.on('notice', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:notice', data);
+  });
+
+  sensationsService.on('goalReached', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:goalReached', data);
+  });
+
+  sensationsService.on('autoReset', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:autoReset', data);
+  });
+
+  sensationsService.on('grandFinale', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:grandFinale', data);
+  });
+
+  sensationsService.on('comboHit', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:comboHit', data);
+  });
+
+  sensationsService.on('leaderboardUpdate', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:leaderboardUpdate', data);
+  });
+
+  sensationsService.on('queueUpdate', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:queueUpdate', data);
+  });
+
+  sensationsService.on('tierChange', (data) => {
+    if (mainWindow) mainWindow.webContents.send('sensations:tierChange', data);
+  });
 }
 
 // ─────────────────────────────────────────────
@@ -592,6 +696,10 @@ app.whenReady().then(async () => {
   authService = new AuthService();
   intelligenceService = new IntelligenceService(authService);
   relayService = new RelayService();
+  sensationsService = new SensationsService();
+  // Restore saved sensations settings
+  const savedSensations = store.get('sensations');
+  if (savedSensations) sensationsService.configure(savedSensations);
 
   // Register event forwarding now that services exist
   registerServiceEvents();

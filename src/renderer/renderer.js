@@ -36,6 +36,9 @@ const state = {
   user: null,
   isAuthenticated: false,
 
+  // Sensations
+  sensations: {},
+
   // Uptime
   uptimeInterval: null,
   uptime: 0
@@ -843,6 +846,9 @@ function renderIntelligencePage(page) {
     case 'settings':
       html = renderSettingsPage();
       break;
+    case 'sensations':
+      html = renderSensationsPage();
+      break;
     case 'help':
       html = renderHelpPage();
       break;
@@ -1036,6 +1042,141 @@ function renderHelpPage() {
   `;
 }
 
+// ────────────────────────────────────────────────────
+// SENSATIONS PAGE
+// ────────────────────────────────────────────────────
+
+function renderSensationsPage() {
+  const s = state.sensations || {};
+  const tiers = s.tiers || [];
+  const connected = s.connected || false;
+  const arProgress = s.arProgress || 0;
+  const arCount = s.arCount || 0;
+  const arTokens = s.arTokens || 200;
+  const arPercent = arTokens > 0 ? Math.min(100, Math.round((arProgress / arTokens) * 100)) : 0;
+  const goalProgress = s.goalProgress || 0;
+  const goalTokens = s.goalTokens || 1000;
+  const goalEnabled = s.goalEnabled || false;
+  const goalPercent = goalTokens > 0 ? Math.min(100, Math.round((goalProgress / goalTokens) * 100)) : 0;
+  const sessionTokens = s.sessionTokens || 0;
+  const leaderboard = s.leaderboard || [];
+  const queueLength = s.queueLength || 0;
+  const processing = s.processing || false;
+  const comboBonus = s.comboBonus || false;
+
+  let tierCardsHtml = tiers.map((t, i) => `
+    <div class="sens-tier-card" data-tier="${t.id}">
+      <div class="sens-tier-header">
+        <span class="sens-tier-emoji">${t.emoji || ''}</span>
+        <span class="sens-tier-label">${t.label}</span>
+      </div>
+      <div class="sens-tier-detail">
+        <span>${t.min}–${t.max === 999999 ? '∞' : t.max} tkns</span>
+        <span>Lv ${t.vibe} • ${t.secs}s</span>
+      </div>
+    </div>
+  `).join('');
+
+  let leaderboardHtml = leaderboard.length === 0
+    ? '<div class="sens-empty">No tips yet this session</div>'
+    : leaderboard.slice(0, 5).map((entry, i) => `
+      <div class="sens-lb-row">
+        <span class="sens-lb-rank">${i === 0 ? '👑' : i + 1}</span>
+        <span class="sens-lb-name">${entry.user || entry.username}</span>
+        <span class="sens-lb-amount">${entry.total || entry.amount} tkns</span>
+      </div>
+    `).join('');
+
+  return `
+    <div class="sensations-page">
+      <!-- Connection Status -->
+      <div class="sens-status ${connected ? 'sens-connected' : 'sens-disconnected'}">
+        <span class="sens-status-dot"></span>
+        <span>${connected ? 'Toy Connected' : 'Toy Disconnected'}</span>
+        <button class="sens-toggle-btn" id="sensToggleConnect">${connected ? 'Disconnect' : 'Connect'}</button>
+      </div>
+
+      <!-- Session Stats Row -->
+      <div class="sens-stats-row">
+        <div class="sens-stat">
+          <div class="sens-stat-value">${sessionTokens}</div>
+          <div class="sens-stat-label">Session Tokens</div>
+        </div>
+        <div class="sens-stat">
+          <div class="sens-stat-value">${queueLength}</div>
+          <div class="sens-stat-label">Queue${processing ? ' ▶' : ''}</div>
+        </div>
+        <div class="sens-stat">
+          <div class="sens-stat-value">${arCount}</div>
+          <div class="sens-stat-label">Goals Hit</div>
+        </div>
+      </div>
+
+      <!-- Auto-Reset Goal -->
+      <div class="sens-section">
+        <div class="sens-section-title">Auto-Reset Goal</div>
+        <div class="sens-progress-bar">
+          <div class="sens-progress-fill" style="width: ${arPercent}%"></div>
+        </div>
+        <div class="sens-progress-label">${arProgress} / ${arTokens} tokens (${arPercent}%)</div>
+      </div>
+
+      ${goalEnabled ? `
+      <!-- Session Goal -->
+      <div class="sens-section">
+        <div class="sens-section-title">Session Goal</div>
+        <div class="sens-progress-bar">
+          <div class="sens-progress-fill sens-goal-fill" style="width: ${goalPercent}%"></div>
+        </div>
+        <div class="sens-progress-label">${goalProgress} / ${goalTokens} tokens</div>
+      </div>
+      ` : ''}
+
+      <!-- Vibration Tiers -->
+      <div class="sens-section">
+        <div class="sens-section-title">Vibration Tiers</div>
+        <div class="sens-tier-grid">${tierCardsHtml || '<div class="sens-empty">Configure tiers in settings</div>'}</div>
+      </div>
+
+      <!-- Leaderboard -->
+      <div class="sens-section">
+        <div class="sens-section-title">Top Tippers</div>
+        <div class="sens-leaderboard">${leaderboardHtml}</div>
+      </div>
+
+      <!-- Actions -->
+      <div class="sens-actions">
+        <button class="sens-action-btn" id="sensResetSession">Reset Session</button>
+      </div>
+    </div>
+  `;
+}
+
+async function loadSensationsState() {
+  if (!window.apex?.sensations) return;
+  try {
+    const [stateData, tiers, settings, queue] = await Promise.all([
+      window.apex.sensations.getState(),
+      window.apex.sensations.getTiers(),
+      window.apex.sensations.getSettings(),
+      window.apex.sensations.getQueue()
+    ]);
+    if (stateData) {
+      state.sensations = {
+        ...stateData,
+        tiers: tiers || [],
+        arTokens: settings?.ar_tokens || 200,
+        goalTokens: settings?.goal_tokens || 1000,
+        goalEnabled: settings?.enable_goal === 'yes',
+        comboBonus: settings?.combo_bonus === 'yes',
+        queueLength: queue?.length || 0,
+      };
+    }
+  } catch (err) {
+    console.warn('Failed to load sensations state:', err);
+  }
+}
+
 function attachIntelPageEventListeners(page) {
   if (page === 'fans') {
     document.querySelectorAll('.filter-chip').forEach(chip => {
@@ -1058,7 +1199,38 @@ function attachIntelPageEventListeners(page) {
       });
     });
   }
+
+  if (page === 'sensations') {
+    loadSensationsState().then(() => {
+      if (state.currentIntelPage === 'sensations') {
+        dom.intelContent.innerHTML = renderSensationsPage();
+        // Re-attach after re-render
+        attachSensationsListeners();
+      }
+    });
+    attachSensationsListeners();
+  }
 }
+
+function attachSensationsListeners() {
+  const toggleBtn = document.getElementById('sensToggleConnect');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', async () => {
+      const connected = state.sensations?.connected || false;
+      await window.apex.sensations.setConnected(!connected);
+      state.sensations = { ...state.sensations, connected: !connected };
+      renderIntelligencePage('sensations');
+    });
+  }
+
+  const resetBtn = document.getElementById('sensResetSession');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      await window.apex.sensations.resetSession();
+      await loadSensationsState();
+      renderIntelligencePage('sensations');
+    });
+  }
 
 // ════════════════════════════════════════════════════════════════════════════
 // AUTHENTICATION
@@ -1312,6 +1484,56 @@ if (window.apex?.intelligence) {
 
   window.apex.intelligence.onRelayEvent?.((event) => {
     console.log('Relay event:', event);
+  });
+}
+
+// Listen for sensations real-time events
+if (window.apex?.sensations) {
+  window.apex.sensations.onQueueUpdate?.((data) => {
+    if (state.sensations) {
+      state.sensations.queueLength = data.length || 0;
+      state.sensations.processing = data.processing || false;
+    }
+    if (state.currentIntelPage === 'sensations') renderIntelligencePage('sensations');
+  });
+
+  window.apex.sensations.onLeaderboardUpdate?.((data) => {
+    if (state.sensations) state.sensations.leaderboard = data || [];
+    if (state.currentIntelPage === 'sensations') renderIntelligencePage('sensations');
+  });
+
+  window.apex.sensations.onGoalReached?.((data) => {
+    showAlert(`Goal reached! ${data.description || ''}`, 'success');
+    if (state.sensations) {
+      state.sensations.arProgress = 0;
+      state.sensations.arCount = (state.sensations.arCount || 0) + 1;
+    }
+    if (state.currentIntelPage === 'sensations') renderIntelligencePage('sensations');
+  });
+
+  window.apex.sensations.onAutoReset?.((data) => {
+    if (state.sensations) {
+      state.sensations.arProgress = data.overflow || 0;
+      state.sensations.arCount = data.count || state.sensations.arCount;
+    }
+    if (state.currentIntelPage === 'sensations') renderIntelligencePage('sensations');
+  });
+
+  window.apex.sensations.onComboHit?.((data) => {
+    showAlert(`${data.username} combo x${data.count}! ${data.multiplier}x bonus`, 'success');
+  });
+
+  window.apex.sensations.onVibrate?.((data) => {
+    if (state.sensations) state.sensations.sessionTokens = data.sessionTokens || state.sensations.sessionTokens;
+    if (state.currentIntelPage === 'sensations') renderIntelligencePage('sensations');
+  });
+
+  window.apex.sensations.onGrandFinale?.(() => {
+    showAlert('GRAND FINALE! All goals complete!', 'success');
+  });
+
+  window.apex.sensations.onNotice?.((data) => {
+    console.log('Sensations notice:', data.message);
   });
 }
 

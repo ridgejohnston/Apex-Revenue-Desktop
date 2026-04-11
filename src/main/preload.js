@@ -156,6 +156,55 @@ contextBridge.exposeInMainWorld('apex', {
   // RELAY (New)
   // ──────────────────────────────────────────────
 
+  // ──────────────────────────────────────────────
+  // SENSATIONS (New)
+  // ──────────────────────────────────────────────
+
+  sensations: {
+    getState: () => ipcRenderer.invoke('sensations:getState'),
+    getSettings: () => ipcRenderer.invoke('sensations:getSettings'),
+    configure: (settings) => ipcRenderer.invoke('sensations:configure', settings),
+    handleTip: (amount, username, platform) =>
+      ipcRenderer.invoke('sensations:handleTip', amount, username, platform),
+    getTiers: () => ipcRenderer.invoke('sensations:getTiers'),
+    adjustTier: (tierIndex, changes) =>
+      ipcRenderer.invoke('sensations:adjustTier', tierIndex, changes),
+    getQueue: () => ipcRenderer.invoke('sensations:getQueue'),
+    resetSession: () => ipcRenderer.invoke('sensations:resetSession'),
+    setConnected: (connected) => ipcRenderer.invoke('sensations:setConnected', connected),
+    onVibrate: (cb) => {
+      ipcRenderer.on('sensations:vibrate', (_, data) => cb(data));
+    },
+    onNotice: (cb) => {
+      ipcRenderer.on('sensations:notice', (_, data) => cb(data));
+    },
+    onGoalReached: (cb) => {
+      ipcRenderer.on('sensations:goalReached', (_, data) => cb(data));
+    },
+    onAutoReset: (cb) => {
+      ipcRenderer.on('sensations:autoReset', (_, data) => cb(data));
+    },
+    onGrandFinale: (cb) => {
+      ipcRenderer.on('sensations:grandFinale', (_, data) => cb(data));
+    },
+    onComboHit: (cb) => {
+      ipcRenderer.on('sensations:comboHit', (_, data) => cb(data));
+    },
+    onLeaderboardUpdate: (cb) => {
+      ipcRenderer.on('sensations:leaderboardUpdate', (_, data) => cb(data));
+    },
+    onQueueUpdate: (cb) => {
+      ipcRenderer.on('sensations:queueUpdate', (_, data) => cb(data));
+    },
+    onTierChange: (cb) => {
+      ipcRenderer.on('sensations:tierChange', (_, data) => cb(data));
+    }
+  },
+
+  // ──────────────────────────────────────────────
+  // RELAY (New)
+  // ──────────────────────────────────────────────
+
   relay: {
     connect: (accessToken, username, platform) =>
       ipcRenderer.invoke('relay:connect', accessToken, username, platform),
