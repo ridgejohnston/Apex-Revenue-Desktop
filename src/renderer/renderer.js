@@ -211,9 +211,18 @@ function initializeGateListeners() {
     try {
       const result = await window.apex.auth.signup(email, password);
       if (result.success) {
-        state.user = result.user;
-        state.isAuthenticated = true;
-        unlockDashboard();
+        if (result.needsVerification) {
+          // Show verification code input
+          showVerificationStep(email, password);
+        } else {
+          // Auto-confirmed (unlikely but handle it) — sign in directly
+          const loginResult = await window.apex.auth.login(email, password);
+          if (loginResult.success) {
+            state.user = loginResult.user;
+            state.isAuthenticated = true;
+            unlockDashboard();
+          }
+        }
       } else {
         gate.signupError.textContent = result.error || 'Signup failed';
       }
@@ -223,6 +232,74 @@ function initializeGateListeners() {
       gate.signupBtn.disabled = false;
       gate.signupBtn.textContent = 'Create Account';
     }
+  });
+}
+
+function showVerificationStep(email, password) {
+  // Replace the signup form content with a verification code input
+  const formContent = gate.signupForm.querySelector('.auth-gate-form-inner') || gate.signupForm;
+  const originalHTML = formContent.innerHTML;
+
+  formContent.innerHTML = `
+    <div class="auth-gate-verify">
+      <h3 style="color:#f05d23;margin:0 0 8px;">Check your email</h3>
+      <p style="color:#aaa;font-size:13px;margin:0 0 16px;">
+        We sent a verification code to <strong style="color:#fff;">${email}</strong>
+      </p>
+      <input type="text" id="gateVerifyCode" placeholder="Enter verification code"
+        class="auth-gate-input" autocomplete="one-time-code" style="text-align:center;letter-spacing:4px;font-size:18px;" />
+      <div id="gateVerifyError" class="auth-gate-error"></div>
+      <button type="button" id="gateVerifyBtn" class="auth-gate-btn">Verify & Sign In</button>
+      <button type="button" id="gateBackToSignup" class="auth-gate-link" style="margin-top:8px;background:none;border:none;color:#888;cursor:pointer;font-size:12px;">
+        Back to sign up
+      </button>
+    </div>
+  `;
+
+  const codeInput = document.getElementById('gateVerifyCode');
+  const verifyBtn = document.getElementById('gateVerifyBtn');
+  const verifyError = document.getElementById('gateVerifyError');
+  const backBtn = document.getElementById('gateBackToSignup');
+
+  codeInput.focus();
+
+  verifyBtn.addEventListener('click', async () => {
+    const code = codeInput.value.trim();
+    if (!code) { verifyError.textContent = 'Please enter the verification code'; return; }
+
+    verifyBtn.disabled = true;
+    verifyBtn.textContent = 'Verifying...';
+    verifyError.textContent = '';
+
+    try {
+      const confirmResult = await window.apex.auth.confirmSignup(email, code);
+      if (confirmResult.success) {
+        // Now sign in with the verified account
+        verifyBtn.textContent = 'Signing in...';
+        const loginResult = await window.apex.auth.login(email, password);
+        if (loginResult.success) {
+          state.user = loginResult.user;
+          state.isAuthenticated = true;
+          unlockDashboard();
+        } else {
+          verifyError.textContent = loginResult.error || 'Sign in failed after verification';
+          verifyBtn.disabled = false;
+          verifyBtn.textContent = 'Verify & Sign In';
+        }
+      } else {
+        verifyError.textContent = confirmResult.error || 'Invalid code';
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = 'Verify & Sign In';
+      }
+    } catch (err) {
+      verifyError.textContent = 'Connection error. Please try again.';
+      verifyBtn.disabled = false;
+      verifyBtn.textContent = 'Verify & Sign In';
+    }
+  });
+
+  backBtn.addEventListener('click', () => {
+    formContent.innerHTML = originalHTML;
   });
 }
 

@@ -87,6 +87,7 @@ contextBridge.exposeInMainWorld('apex', {
   auth: {
     login: (email, password) => ipcRenderer.invoke('auth:login', email, password),
     signup: (email, password) => ipcRenderer.invoke('auth:signup', email, password),
+    confirmSignup: (email, code) => ipcRenderer.invoke('auth:confirmSignup', email, code),
     logout: () => ipcRenderer.invoke('auth:logout'),
     getSession: () => ipcRenderer.invoke('auth:getSession'),
     getUser: () => ipcRenderer.invoke('auth:getUser'),

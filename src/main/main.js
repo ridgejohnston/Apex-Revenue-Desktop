@@ -314,6 +314,10 @@ ipcMain.handle('auth:signup', async (event, email, password) => {
   return await authService.signup(email, password);
 });
 
+ipcMain.handle('auth:confirmSignup', async (event, email, code) => {
+  return await authService.confirmSignup(email, code);
+});
+
 ipcMain.handle('auth:logout', async () => {
   return await authService.logout();
 });

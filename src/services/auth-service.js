@@ -1,6 +1,9 @@
 /**
  * Apex Revenue Auth Service
  * AWS Cognito authentication for Electron main process
+ *
+ * Talks directly to Cognito's API (cognito-idp) using the
+ * X-Amz-Target header — same approach as the Edge extension.
  */
 
 const Store = require('electron-store');
@@ -21,11 +24,31 @@ const COGNITO_CONFIG = {
   clientId: '2q57i2f3sl6lcl8rlu7tt3dgdf',
   region: 'us-east-1',
   endpoint: 'https://cognito-idp.us-east-1.amazonaws.com',
-  issuer: 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EjYUEgmKm',
   userPoolId: 'us-east-1_EjYUEgmKm'
 };
 
 const API_ENDPOINT = 'https://7g6qsxoos3.execute-api.us-east-1.amazonaws.com/prod';
+
+// ── Low-level Cognito request (matches Edge extension pattern) ──
+async function cognitoRequest(action, payload) {
+  const res = await fetch(COGNITO_CONFIG.endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-amz-json-1.1',
+      'X-Amz-Target': `AWSCognitoIdentityProviderService.${action}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    const msg = data.message || data.__type || `Cognito error (${res.status})`;
+    throw new Error(msg);
+  }
+
+  return data;
+}
 
 class AuthService {
   constructor() {
@@ -39,42 +62,25 @@ class AuthService {
   }
 
   // ──────────────────────────────────────────────
-  // SIGN UP
+  // SIGN UP (direct Cognito)
   // ──────────────────────────────────────────────
 
   async signup(email, password) {
     try {
-      const response = await fetch(`${API_ENDPOINT}/auth/signup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+      const data = await cognitoRequest('SignUp', {
+        ClientId: COGNITO_CONFIG.clientId,
+        Username: email.toLowerCase().trim(),
+        Password: password,
+        UserAttributes: [
+          { Name: 'email', Value: email.toLowerCase().trim() }
+        ]
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Signup failed');
-      }
-
-      // Store tokens
-      this.tokens = {
-        accessToken: data.accessToken,
-        idToken: data.idToken,
-        refreshToken: data.refreshToken,
-        expiresIn: data.expiresIn
-      };
-      this.store.set('tokens', this.tokens);
-
-      // Parse and store user info
-      this.user = this.parseTokenUser(data.idToken);
-      this.store.set('user', this.user);
-
-      this.notifyListeners(this.user);
 
       return {
         success: true,
-        user: this.user,
-        tokens: this.tokens
+        userId: data.UserSub,
+        confirmed: data.UserConfirmed,
+        needsVerification: !data.UserConfirmed
       };
     } catch (error) {
       console.error('Signup error:', error);
@@ -86,34 +92,54 @@ class AuthService {
   }
 
   // ──────────────────────────────────────────────
-  // SIGN IN
+  // CONFIRM SIGN UP (verification code)
+  // ──────────────────────────────────────────────
+
+  async confirmSignup(email, code) {
+    try {
+      await cognitoRequest('ConfirmSignUp', {
+        ClientId: COGNITO_CONFIG.clientId,
+        Username: email.toLowerCase().trim(),
+        ConfirmationCode: code.trim()
+      });
+      return { success: true };
+    } catch (error) {
+      console.error('Confirm signup error:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // SIGN IN (direct Cognito InitiateAuth)
   // ──────────────────────────────────────────────
 
   async login(email, password) {
     try {
-      const response = await fetch(`${API_ENDPOINT}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+      const data = await cognitoRequest('InitiateAuth', {
+        ClientId: COGNITO_CONFIG.clientId,
+        AuthFlow: 'USER_PASSWORD_AUTH',
+        AuthParameters: {
+          USERNAME: email.toLowerCase().trim(),
+          PASSWORD: password
+        }
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Login failed');
+      const result = data.AuthenticationResult;
+      if (!result || !result.IdToken) {
+        throw new Error('Sign in failed — unexpected response.');
       }
 
       // Store tokens
       this.tokens = {
-        accessToken: data.accessToken,
-        idToken: data.idToken,
-        refreshToken: data.refreshToken,
-        expiresIn: data.expiresIn
+        accessToken: result.IdToken,       // IdToken is what API Gateway validates
+        idToken: result.IdToken,
+        refreshToken: result.RefreshToken,
+        expiresIn: result.ExpiresIn
       };
       this.store.set('tokens', this.tokens);
 
       // Parse and store user info
-      this.user = this.parseTokenUser(data.idToken);
+      this.user = this.parseTokenUser(result.IdToken);
       this.store.set('user', this.user);
 
       this.notifyListeners(this.user);
@@ -138,15 +164,11 @@ class AuthService {
 
   async logout() {
     try {
-      // Optionally call backend to invalidate tokens
+      // Attempt Cognito global sign out
       if (this.tokens.accessToken) {
-        await fetch(`${API_ENDPOINT}/auth/logout`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${this.tokens.accessToken}`,
-            'Content-Type': 'application/json'
-          }
-        }).catch(() => {}); // Ignore errors
+        await cognitoRequest('GlobalSignOut', {
+          AccessToken: this.tokens.accessToken
+        }).catch(() => {});
       }
 
       // Clear local storage
@@ -160,15 +182,18 @@ class AuthService {
       return { success: true };
     } catch (error) {
       console.error('Logout error:', error);
-      return {
-        success: false,
-        error: error.message
-      };
+      // Still clear locally even if remote sign-out fails
+      this.tokens = {};
+      this.user = null;
+      this.store.delete('tokens');
+      this.store.delete('user');
+      this.notifyListeners(null);
+      return { success: false, error: error.message };
     }
   }
 
   // ──────────────────────────────────────────────
-  // TOKEN REFRESH
+  // TOKEN REFRESH (direct Cognito)
   // ──────────────────────────────────────────────
 
   async refreshTokens() {
@@ -177,21 +202,23 @@ class AuthService {
     }
 
     try {
-      const response = await fetch(`${API_ENDPOINT}/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken: this.tokens.refreshToken })
+      const data = await cognitoRequest('InitiateAuth', {
+        ClientId: COGNITO_CONFIG.clientId,
+        AuthFlow: 'REFRESH_TOKEN_AUTH',
+        AuthParameters: {
+          REFRESH_TOKEN: this.tokens.refreshToken
+        }
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Token refresh failed');
-      }
-
-      this.tokens.accessToken = data.accessToken;
-      this.tokens.idToken = data.idToken;
+      const result = data.AuthenticationResult;
+      this.tokens.accessToken = result.IdToken;
+      this.tokens.idToken = result.IdToken;
+      // Cognito doesn't return a new refresh token on refresh
       this.store.set('tokens', this.tokens);
+
+      // Update user from new token
+      this.user = this.parseTokenUser(result.IdToken);
+      this.store.set('user', this.user);
 
       return { success: true, tokens: this.tokens };
     } catch (error) {
@@ -227,7 +254,7 @@ class AuthService {
   }
 
   // ──────────────────────────────────────────────
-  // LINK PLATFORM ACCOUNT
+  // LINK PLATFORM ACCOUNT (via API Gateway)
   // ──────────────────────────────────────────────
 
   async linkPlatform(platform, username) {
@@ -236,7 +263,7 @@ class AuthService {
     }
 
     try {
-      const response = await fetch(`${API_ENDPOINT}/auth/link-platform`, {
+      const response = await fetch(`${API_ENDPOINT}/link-platform`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.tokens.accessToken}`,
@@ -248,12 +275,12 @@ class AuthService {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.message || 'Failed to link platform');
+        throw new Error(data.error || data.message || 'Failed to link platform');
       }
 
       // Update user with linked platforms
       if (this.user) {
-        this.user.linkedPlatforms = data.linkedPlatforms || [];
+        this.user.linkedPlatforms = data.linkedPlatforms || data.accounts || [];
         this.store.set('user', this.user);
       }
 
@@ -261,7 +288,7 @@ class AuthService {
 
       return {
         success: true,
-        platforms: data.linkedPlatforms || []
+        platforms: this.user?.linkedPlatforms || []
       };
     } catch (error) {
       console.error('Platform link error:', error);
@@ -273,7 +300,7 @@ class AuthService {
   }
 
   // ──────────────────────────────────────────────
-  // UNLINK PLATFORM ACCOUNT
+  // UNLINK PLATFORM ACCOUNT (via API Gateway)
   // ──────────────────────────────────────────────
 
   async unlinkPlatform(platform) {
@@ -282,7 +309,7 @@ class AuthService {
     }
 
     try {
-      const response = await fetch(`${API_ENDPOINT}/auth/unlink-platform`, {
+      const response = await fetch(`${API_ENDPOINT}/unlink-platform`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.tokens.accessToken}`,
@@ -294,12 +321,12 @@ class AuthService {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.message || 'Failed to unlink platform');
+        throw new Error(data.error || data.message || 'Failed to unlink platform');
       }
 
       // Update user
       if (this.user) {
-        this.user.linkedPlatforms = data.linkedPlatforms || [];
+        this.user.linkedPlatforms = data.linkedPlatforms || data.accounts || [];
         this.store.set('user', this.user);
       }
 
@@ -307,7 +334,7 @@ class AuthService {
 
       return {
         success: true,
-        platforms: data.linkedPlatforms || []
+        platforms: this.user?.linkedPlatforms || []
       };
     } catch (error) {
       console.error('Platform unlink error:', error);
