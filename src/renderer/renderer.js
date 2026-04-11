@@ -383,6 +383,189 @@ function initializeEventListeners() {
   document.querySelectorAll('.link-btn').forEach(btn => {
     btn.addEventListener('click', () => linkPlatformAccount(btn.dataset.platform));
   });
+
+  // Video overlay
+  initializeOverlayListeners();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// VIDEO OVERLAY
+// ════════════════════════════════════════════════════════════════════════════
+
+const overlay = {
+  video: null,
+  controls: null,
+  filePath: null,
+  playing: false
+};
+
+function initializeOverlayListeners() {
+  overlay.video = document.getElementById('videoOverlay');
+  overlay.controls = document.getElementById('overlayControls');
+
+  // Settings panel — choose video file
+  const selectBtn = document.getElementById('selectOverlayBtn');
+  const clearBtn = document.getElementById('clearOverlayBtn');
+  const fileInfo = document.getElementById('overlayFileInfo');
+  const fileName = document.getElementById('overlayFileName');
+  const advanced = document.getElementById('overlayAdvanced');
+
+  // Settings panel controls (synced with hover controls)
+  const opacitySetting = document.getElementById('overlayOpacitySetting');
+  const opacityValue = document.getElementById('overlayOpacityValue');
+  const sizeSetting = document.getElementById('overlaySizeSetting');
+  const positionSetting = document.getElementById('overlayPositionSetting');
+  const mutedCheckbox = document.getElementById('overlayMuted');
+  const playBtn = document.getElementById('overlayPlayBtn');
+  const pauseBtn = document.getElementById('overlayPauseBtn');
+
+  // Hover controls on preview
+  const hoverPlayPause = document.getElementById('overlayPlayPause');
+  const hoverOpacity = document.getElementById('overlayOpacity');
+  const hoverOpacityLabel = document.getElementById('overlayOpacityLabel');
+  const hoverSize = document.getElementById('overlaySize');
+  const hoverPosition = document.getElementById('overlayPosition');
+  const hoverRemove = document.getElementById('overlayRemove');
+
+  // Select video file
+  if (selectBtn) {
+    selectBtn.addEventListener('click', async () => {
+      const filePath = await window.apex.dialog.selectFile([
+        { name: 'Video Files', extensions: ['mp4', 'webm', 'mkv', 'avi', 'mov', 'ogv'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]);
+      if (!filePath) return;
+
+      overlay.filePath = filePath;
+      const name = filePath.split(/[\\/]/).pop();
+      fileName.textContent = name;
+      fileInfo.classList.remove('hidden');
+      advanced.classList.remove('hidden');
+
+      // Load the video
+      overlay.video.src = 'file://' + filePath;
+      overlay.video.classList.add('active');
+      overlay.controls.classList.remove('hidden');
+      overlay.video.play().then(() => {
+        overlay.playing = true;
+        if (hoverPlayPause) hoverPlayPause.textContent = '⏸';
+      }).catch(() => {});
+    });
+  }
+
+  // Clear overlay
+  function removeOverlay() {
+    overlay.video.pause();
+    overlay.video.removeAttribute('src');
+    overlay.video.load();
+    overlay.video.classList.remove('active');
+    overlay.video.className = 'video-overlay';
+    overlay.video.style.opacity = '';
+    overlay.controls.classList.add('hidden');
+    overlay.filePath = null;
+    overlay.playing = false;
+    fileInfo.classList.add('hidden');
+    advanced.classList.add('hidden');
+    if (opacitySetting) { opacitySetting.value = 100; opacityValue.textContent = '100%'; }
+    if (hoverOpacity) { hoverOpacity.value = 100; hoverOpacityLabel.textContent = '100%'; }
+    if (sizeSetting) sizeSetting.value = 'full';
+    if (positionSetting) positionSetting.value = 'center';
+    if (hoverSize) hoverSize.value = 'full';
+    if (hoverPosition) hoverPosition.value = 'center';
+  }
+
+  if (clearBtn) clearBtn.addEventListener('click', removeOverlay);
+  if (hoverRemove) hoverRemove.addEventListener('click', removeOverlay);
+
+  // Apply size class
+  function applyOverlaySize(size) {
+    overlay.video.classList.remove('size-75', 'size-50', 'size-25', 'size-pip');
+    if (size !== 'full') overlay.video.classList.add('size-' + size);
+    // When not full, apply position
+    applyOverlayPosition(positionSetting ? positionSetting.value : 'center');
+  }
+
+  // Apply position class
+  function applyOverlayPosition(pos) {
+    overlay.video.classList.remove('pos-center', 'pos-top-left', 'pos-top-right', 'pos-bottom-left', 'pos-bottom-right');
+    const currentSize = sizeSetting ? sizeSetting.value : 'full';
+    if (currentSize !== 'full') {
+      overlay.video.classList.add('pos-' + pos);
+    }
+  }
+
+  // Opacity handler (sync both controls)
+  function setOpacity(val) {
+    overlay.video.style.opacity = val / 100;
+    if (opacitySetting) opacitySetting.value = val;
+    if (opacityValue) opacityValue.textContent = val + '%';
+    if (hoverOpacity) hoverOpacity.value = val;
+    if (hoverOpacityLabel) hoverOpacityLabel.textContent = val + '%';
+  }
+
+  if (opacitySetting) opacitySetting.addEventListener('input', (e) => setOpacity(e.target.value));
+  if (hoverOpacity) hoverOpacity.addEventListener('input', (e) => setOpacity(e.target.value));
+
+  // Size handler (sync both)
+  function setSize(val) {
+    if (sizeSetting) sizeSetting.value = val;
+    if (hoverSize) hoverSize.value = val;
+    applyOverlaySize(val);
+  }
+
+  if (sizeSetting) sizeSetting.addEventListener('change', (e) => setSize(e.target.value));
+  if (hoverSize) hoverSize.addEventListener('change', (e) => setSize(e.target.value));
+
+  // Position handler (sync both)
+  function setPosition(val) {
+    if (positionSetting) positionSetting.value = val;
+    if (hoverPosition) hoverPosition.value = val;
+    applyOverlayPosition(val);
+  }
+
+  if (positionSetting) positionSetting.addEventListener('change', (e) => setPosition(e.target.value));
+  if (hoverPosition) hoverPosition.addEventListener('change', (e) => setPosition(e.target.value));
+
+  // Muted toggle
+  if (mutedCheckbox) {
+    mutedCheckbox.addEventListener('change', () => {
+      overlay.video.muted = mutedCheckbox.checked;
+    });
+  }
+
+  // Play / Pause (settings panel)
+  if (playBtn) {
+    playBtn.addEventListener('click', () => {
+      if (overlay.filePath) {
+        overlay.video.play();
+        overlay.playing = true;
+        if (hoverPlayPause) hoverPlayPause.textContent = '⏸';
+      }
+    });
+  }
+
+  if (pauseBtn) {
+    pauseBtn.addEventListener('click', () => {
+      overlay.video.pause();
+      overlay.playing = false;
+      if (hoverPlayPause) hoverPlayPause.textContent = '▶';
+    });
+  }
+
+  // Hover play/pause toggle
+  if (hoverPlayPause) {
+    hoverPlayPause.addEventListener('click', () => {
+      if (overlay.playing) {
+        overlay.video.pause();
+        overlay.playing = false;
+        hoverPlayPause.textContent = '▶';
+      } else {
+        overlay.video.play();
+        overlay.playing = true;
+        hoverPlayPause.textContent = '⏸';
+      }
+    });
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

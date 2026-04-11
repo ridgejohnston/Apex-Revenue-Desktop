@@ -164,6 +164,33 @@
               <p class="placeholder-hint">Initialize OBS to display preview</p>
             </div>
           </div>
+
+          <!-- Video Overlay (loops on top of stream preview) -->
+          <video id="videoOverlay" class="video-overlay" loop muted playsinline></video>
+
+          <!-- Overlay Controls (visible on hover) -->
+          <div id="overlayControls" class="overlay-controls hidden">
+            <div class="overlay-controls-bar">
+              <button id="overlayPlayPause" class="overlay-ctrl-btn" title="Play / Pause">⏸</button>
+              <input id="overlayOpacity" type="range" min="0" max="100" value="100" title="Opacity">
+              <span id="overlayOpacityLabel" class="overlay-opacity-label">100%</span>
+              <select id="overlaySize" title="Overlay size">
+                <option value="full">Full Screen</option>
+                <option value="75">75%</option>
+                <option value="50">50%</option>
+                <option value="25">25%</option>
+                <option value="pip">PiP Corner</option>
+              </select>
+              <select id="overlayPosition" title="Position">
+                <option value="center">Center</option>
+                <option value="top-left">Top Left</option>
+                <option value="top-right">Top Right</option>
+                <option value="bottom-left">Bottom Left</option>
+                <option value="bottom-right">Bottom Right</option>
+              </select>
+              <button id="overlayRemove" class="overlay-ctrl-btn danger" title="Remove Overlay">✕</button>
+            </div>
+          </div>
         </div>
 
         <!-- Stream Controls -->
@@ -179,6 +206,7 @@
         <div class="settings-tabs">
           <button class="settings-tab active" data-tab="stream">Stream</button>
           <button class="settings-tab" data-tab="sources">Sources</button>
+          <button class="settings-tab" data-tab="overlay">Overlay</button>
           <button class="settings-tab" data-tab="output">Output</button>
         </div>
 
@@ -213,6 +241,57 @@
               <p class="placeholder-text">No sources configured</p>
             </div>
             <button id="addSourceBtn" class="add-btn">+ Add Source</button>
+          </div>
+
+          <!-- Overlay Tab -->
+          <div class="settings-section" id="overlaySettings">
+            <div class="setting-group">
+              <label>Video Overlay</label>
+              <p class="setting-hint">Upload a video to loop as an overlay on top of your stream preview.</p>
+            </div>
+            <div class="setting-group">
+              <button id="selectOverlayBtn" class="add-btn">Choose Video File</button>
+              <div id="overlayFileInfo" class="overlay-file-info hidden">
+                <span id="overlayFileName" class="overlay-file-name"></span>
+                <button id="clearOverlayBtn" class="overlay-clear-btn" title="Remove">✕</button>
+              </div>
+            </div>
+            <div id="overlayAdvanced" class="overlay-advanced hidden">
+              <div class="setting-group">
+                <label for="overlayOpacitySetting">Opacity</label>
+                <input type="range" id="overlayOpacitySetting" min="0" max="100" value="100">
+                <span id="overlayOpacityValue">100%</span>
+              </div>
+              <div class="setting-group">
+                <label for="overlaySizeSetting">Size</label>
+                <select id="overlaySizeSetting">
+                  <option value="full">Full Screen</option>
+                  <option value="75">75%</option>
+                  <option value="50">50%</option>
+                  <option value="25">25%</option>
+                  <option value="pip">PiP Corner</option>
+                </select>
+              </div>
+              <div class="setting-group">
+                <label for="overlayPositionSetting">Position</label>
+                <select id="overlayPositionSetting">
+                  <option value="center">Center</option>
+                  <option value="top-left">Top Left</option>
+                  <option value="top-right">Top Right</option>
+                  <option value="bottom-left">Bottom Left</option>
+                  <option value="bottom-right">Bottom Right</option>
+                </select>
+              </div>
+              <div class="setting-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="overlayMuted" checked> Muted
+                </label>
+              </div>
+              <div class="overlay-controls-row">
+                <button id="overlayPlayBtn" class="control-btn secondary">Play</button>
+                <button id="overlayPauseBtn" class="control-btn secondary">Pause</button>
+              </div>
+            </div>
           </div>
 
           <!-- Output Tab -->

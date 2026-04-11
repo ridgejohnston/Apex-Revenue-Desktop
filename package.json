@@ -1,6 +1,6 @@
 {
   "name": "apex-revenue-desktop",
-  "version": "2.0.6",
+  "version": "2.0.7",
   "description": "Apex Revenue — Livestream Management Platform. Professional streaming with OBS integration, creator intelligence, real-time analytics, fan tracking, and monetization prompts.",
   "main": "src/main/main.js",
   "scripts": {

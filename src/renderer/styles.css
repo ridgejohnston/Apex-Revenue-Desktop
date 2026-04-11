@@ -1274,3 +1274,174 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+/* ═══════════════════════════════════════════
+   Video Overlay
+   ═══════════════════════════════════════════ */
+
+.video-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  z-index: 10;
+  pointer-events: none;
+  display: none;
+}
+
+.video-overlay.active {
+  display: block;
+}
+
+/* Size variants */
+.video-overlay.size-75 { width: 75%; height: 75%; }
+.video-overlay.size-50 { width: 50%; height: 50%; }
+.video-overlay.size-25 { width: 25%; height: 25%; }
+.video-overlay.size-pip { width: 30%; height: 30%; }
+
+/* Position variants */
+.video-overlay.pos-center { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+.video-overlay.pos-top-left { top: 8px; left: 8px; transform: none; }
+.video-overlay.pos-top-right { top: 8px; right: 8px; left: auto; transform: none; }
+.video-overlay.pos-bottom-left { top: auto; bottom: 8px; left: 8px; transform: none; }
+.video-overlay.pos-bottom-right { top: auto; bottom: 8px; right: 8px; left: auto; transform: none; }
+
+/* Overlay hover controls */
+.overlay-controls {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: linear-gradient(transparent, rgba(0,0,0,0.8));
+  padding: 24px 12px 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.preview-container:hover .overlay-controls:not(.hidden) {
+  opacity: 1;
+}
+
+.overlay-controls-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.overlay-ctrl-btn {
+  background: rgba(255,255,255,0.15);
+  border: none;
+  color: #fff;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+.overlay-ctrl-btn:hover { background: rgba(255,255,255,0.3); }
+.overlay-ctrl-btn.danger:hover { background: var(--danger); }
+
+.overlay-controls select {
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.2);
+  color: #fff;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.overlay-controls input[type="range"] {
+  width: 70px;
+  accent-color: var(--accent);
+}
+
+.overlay-opacity-label {
+  font-size: 11px;
+  color: #aaa;
+  min-width: 32px;
+}
+
+/* Overlay settings panel */
+.setting-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.overlay-file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  margin-top: 8px;
+}
+
+.overlay-file-name {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overlay-clear-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.overlay-clear-btn:hover {
+  color: var(--danger);
+  background: rgba(231, 76, 60, 0.15);
+}
+
+.overlay-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.overlay-controls-row {
+  display: flex;
+  gap: 8px;
+}
+
+.overlay-controls-row .control-btn {
+  flex: 1;
+  padding: 6px;
+  font-size: 12px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  accent-color: var(--accent);
+}
