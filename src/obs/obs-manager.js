@@ -88,6 +88,12 @@ class OBSManager {
     this.recording = false;
     this.signalCallback = null;
     this.previewDisplayId = null;
+
+    // Streaming pipeline objects (the correct obs-studio-node API)
+    this._streamOutput = null;      // SimpleStreaming or AdvancedStreaming
+    this._streamService = null;     // ServiceFactory RTMP service
+    this._videoEncoder = null;      // VideoEncoderFactory encoder
+    this._audioEncoder = null;      // AudioEncoderFactory encoder
   }
 
   // ─────────────────────────────────────────────
@@ -489,6 +495,7 @@ class OBSManager {
 
   /**
    * Configure the streaming encoder settings.
+   * Creates actual VideoEncoder and AudioEncoder objects via the Factory APIs.
    *
    * @param {Object} settings
    * @param {string} settings.encoder - Encoder type: 'x264', 'nvenc', 'qsv' (default: 'x264')
@@ -517,33 +524,55 @@ class OBSManager {
 
     const encoderId = encoderMap[encoder] || 'obs_x264';
 
-    // Use Simple output mode — Advanced mode parameter names vary by obs-studio-node version
-    setSetting('Output', 'Mode', 'Simple');
-    setSetting('Output', 'StreamEncoder', encoderId);
-    setSetting('Output', 'VBitrate', bitrate);
-    setSetting('Output', 'ABitrate', String(audioBitrate));
-    setSetting('Output', 'Preset', preset);
-    setSetting('Output', 'rate_control', rateControl);
+    // ── Create actual encoder objects via Factory API ──────────────
+    // This is the correct obs-studio-node approach (not the settings API)
 
-    // Keyframe interval — Chaturbate requires exactly 2 seconds
-    setSetting('Output', 'Keyint', 2);
-    setSetting('Output', 'keyint_sec', 2);
+    // Release previous encoders if they exist
+    if (this._videoEncoder) {
+      try { this._videoEncoder.release(); } catch (e) { /* ignore */ }
+    }
+    if (this._audioEncoder) {
+      try { this._audioEncoder.release(); } catch (e) { /* ignore */ }
+    }
 
-    // Also try setting keyframe via Video category (some osn versions)
-    setSetting('Video', 'keyint_sec', 2);
-
-    // Dump Output settings for debugging
+    // Create video encoder with Chaturbate-compatible settings
     try {
-      const outputData = osn.NodeObs.OBS_settings_getSettings('Output').data;
-      console.log('[OBS Manager] ═══ Output settings after encoder config ═══');
-      for (const sub of outputData || []) {
-        console.log(`  [Subcategory: "${sub.nameSubCategory}"]`);
-        for (const param of sub.parameters) {
-          console.log(`    ${param.name} = ${JSON.stringify(param.currentValue)}`);
-        }
-      }
+      this._videoEncoder = osn.VideoEncoderFactory.create(encoderId, 'apex-video-encoder', {
+        rate_control: rateControl,
+        bitrate: bitrate,
+        keyint_sec: 2,       // Chaturbate requires 2-second keyframe interval
+        preset: preset,
+        profile: 'main',     // H.264 Main profile for broad compatibility
+        tune: 'zerolatency'  // Low-latency for live streaming
+      });
+      console.log(`[OBS Manager] VideoEncoder created: ${encoderId} @ ${bitrate}kbps, keyframe: 2s`);
     } catch (e) {
-      console.warn('[OBS Manager] Could not dump Output settings:', e.message);
+      console.error('[OBS Manager] VideoEncoderFactory.create failed:', e.message);
+      // Fallback: try with minimal settings
+      try {
+        this._videoEncoder = osn.VideoEncoderFactory.create(encoderId, 'apex-video-encoder');
+        console.log(`[OBS Manager] VideoEncoder created with defaults: ${encoderId}`);
+      } catch (e2) {
+        console.error('[OBS Manager] VideoEncoder fallback also failed:', e2.message);
+      }
+    }
+
+    // Create audio encoder (AAC)
+    try {
+      this._audioEncoder = osn.AudioEncoderFactory.create('ffmpeg_aac', 'apex-audio-encoder');
+      console.log(`[OBS Manager] AudioEncoder created: ffmpeg_aac @ ${audioBitrate}kbps`);
+    } catch (e) {
+      console.error('[OBS Manager] AudioEncoderFactory.create failed:', e.message);
+    }
+
+    // Also set via legacy settings API as backup
+    try {
+      setSetting('Output', 'Mode', 'Simple');
+      setSetting('Output', 'StreamEncoder', encoderId);
+      setSetting('Output', 'VBitrate', bitrate);
+      setSetting('Output', 'ABitrate', String(audioBitrate));
+    } catch (e) {
+      console.warn('[OBS Manager] Legacy settings fallback error:', e.message);
     }
 
     console.log(`[OBS Manager] Stream encoder configured: ${encoder} @ ${bitrate}kbps, keyframe: 2s`);
@@ -586,7 +615,11 @@ class OBSManager {
   // ─────────────────────────────────────────────
 
   /**
-   * Configure the RTMP streaming service.
+   * Configure the RTMP streaming service using ServiceFactory API.
+   * This is the CORRECT obs-studio-node approach — creating a service object
+   * rather than writing to the settings API.
+   *
+   * For rtmp_custom, settings use: { url: 'rtmp://...', key: '...' }
    *
    * @param {Object} settings
    * @param {string} settings.server - RTMP server URL
@@ -604,86 +637,64 @@ class OBSManager {
       throw new Error('RTMP server URL and stream key are required');
     }
 
-    // ── APPROACH 1: Use OBS Settings API ────────────────────────────
-    // Dump ALL Stream parameters so we can see what names OBS actually uses
-    try {
-      const streamData = osn.NodeObs.OBS_settings_getSettings('Stream').data;
-      console.log('[OBS Manager] ═══ ALL Stream settings parameters ═══');
-      for (const sub of streamData || []) {
-        console.log(`  [Subcategory: "${sub.nameSubCategory}"]`);
-        for (const param of sub.parameters) {
-          console.log(`    ${param.name} = ${JSON.stringify(param.currentValue)} (type: ${param.type}, values: ${JSON.stringify(param.values || []).substring(0, 200)})`);
-        }
-      }
-    } catch (e) {
-      console.warn('[OBS Manager] Could not read Stream settings:', e.message);
+    // Destroy previous service if it exists
+    if (this._streamService) {
+      try { osn.ServiceFactory.destroy(this._streamService); } catch (e) { /* ignore */ }
+      this._streamService = null;
     }
 
-    // Try every known parameter name variant for stream type
-    setSetting('Stream', 'streamType', 'rtmp_custom');
-    setSetting('Stream', 'StreamType', 'rtmp_custom');
-    setSetting('Stream', 'service', 'rtmp_custom');
-    setSetting('Stream', 'type', 'rtmp_custom');
+    // ── PRIMARY: ServiceFactory API (the correct approach) ──────────
+    // obs-studio-node requires creating a Service object via ServiceFactory,
+    // then wiring it to a SimpleStreaming output. The settings API alone
+    // does NOT configure the actual streaming pipeline.
+    //
+    // IMPORTANT: rtmp_custom uses 'url' (not 'server') for the RTMP URL
+    console.log(`[OBS Manager] Creating RTMP service: ${server} (key length: ${key.length})`);
 
-    // Set RTMP server and key
-    setSetting('Stream', 'server', server);
-    setSetting('Stream', 'key', key);
-    setSetting('Stream', 'url', server);      // Alternative param name
-    setSetting('Stream', 'stream_key', key);  // Alternative param name
-
-    // ── APPROACH 2: Use ServiceFactory API (obs-studio-node native) ──
     try {
-      if (osn.ServiceFactory) {
-        console.log('[OBS Manager] Using ServiceFactory API for RTMP...');
+      // rtmp_custom uses { url, key } — NOT { server, key }
+      this._streamService = osn.ServiceFactory.create('rtmp_custom', 'apex-rtmp-service', {
+        url: server,
+        key: key
+      });
+      console.log('[OBS Manager] ServiceFactory: rtmp_custom service created');
 
-        // Try to create/update the streaming service directly
-        const serviceSettings = {
-          server: server,
-          key: key
-        };
+      // Verify the service settings were applied
+      if (this._streamService.settings) {
+        console.log('[OBS Manager] Service settings:', JSON.stringify(this._streamService.settings));
+      }
+    } catch (e1) {
+      console.warn('[OBS Manager] ServiceFactory.create(rtmp_custom) failed:', e1.message);
 
-        let service;
+      // Fallback 1: create with empty settings then update
+      try {
+        this._streamService = osn.ServiceFactory.create('rtmp_custom', 'apex-rtmp-service', {});
+        this._streamService.update({ url: server, key: key });
+        console.log('[OBS Manager] ServiceFactory: created + updated rtmp_custom service');
+      } catch (e2) {
+        console.warn('[OBS Manager] ServiceFactory create+update failed:', e2.message);
+
+        // Fallback 2: use legacySettings
         try {
-          // Try creating rtmp_custom service
-          service = osn.ServiceFactory.create('rtmp_custom', 'apex-stream-service', serviceSettings);
-          console.log('[OBS Manager] ServiceFactory created rtmp_custom service');
-        } catch (e1) {
-          console.warn('[OBS Manager] ServiceFactory.create failed:', e1.message);
-          try {
-            // Fallback: try legacySettings approach
-            service = osn.ServiceFactory.create('rtmp_common', 'apex-stream-service', serviceSettings);
-            console.log('[OBS Manager] ServiceFactory created rtmp_common service');
-          } catch (e2) {
-            console.warn('[OBS Manager] ServiceFactory fallback also failed:', e2.message);
+          this._streamService = osn.ServiceFactory.legacySettings;
+          if (this._streamService) {
+            this._streamService.update({ url: server, key: key });
+            console.log('[OBS Manager] Using ServiceFactory.legacySettings');
           }
+        } catch (e3) {
+          console.warn('[OBS Manager] legacySettings failed:', e3.message);
         }
-
-        if (service) {
-          // If obs-studio-node has a way to set the active service
-          if (typeof osn.NodeObs.OBS_service_setService === 'function') {
-            osn.NodeObs.OBS_service_setService(service);
-            console.log('[OBS Manager] Service set via OBS_service_setService');
-          }
-          this._streamService = service;
-        }
-      } else {
-        console.log('[OBS Manager] ServiceFactory not available, using settings API only');
       }
-    } catch (e) {
-      console.warn('[OBS Manager] ServiceFactory approach failed:', e.message);
     }
 
-    // Verify what OBS ended up with
+    // ── BACKUP: Also write to settings API for legacy compatibility ──
     try {
-      const afterStream = osn.NodeObs.OBS_settings_getSettings('Stream').data;
-      console.log('[OBS Manager] ═══ Stream settings AFTER configure ═══');
-      for (const sub of afterStream || []) {
-        for (const param of sub.parameters) {
-          console.log(`    ${param.name} = ${JSON.stringify(param.currentValue)}`);
-        }
-      }
+      setSetting('Stream', 'streamType', 'rtmp_custom');
+      setSetting('Stream', 'server', server);
+      setSetting('Stream', 'key', key);
+      setSetting('Stream', 'url', server);
     } catch (e) {
-      console.warn('[OBS Manager] Could not verify Stream settings:', e.message);
+      // Non-fatal — the ServiceFactory approach is primary
     }
 
     console.log(`[OBS Manager] Stream service configured: ${server} (key length: ${key.length})`);
@@ -695,6 +706,11 @@ class OBSManager {
 
   /**
    * Start streaming to the configured RTMP server.
+   *
+   * Uses the correct obs-studio-node pipeline:
+   *   SimpleStreamingFactory.create() -> wire service + encoders -> stream.start()
+   *
+   * Falls back to legacy OBS_service_startStreaming() if Factory API unavailable.
    */
   startStreaming() {
     this._ensureInitialized();
@@ -704,9 +720,113 @@ class OBSManager {
       return;
     }
 
-    osn.NodeObs.OBS_service_startStreaming();
-    this.streaming = true;
-    console.log('[OBS Manager] Streaming started');
+    if (!this._streamService) {
+      throw new Error('Stream service not configured. Call configureStreamService() first.');
+    }
+
+    // ── PRIMARY: SimpleStreamingFactory pipeline ──────────────────────
+    // This is how Streamlabs Desktop does it:
+    //   1. Create SimpleStreaming output
+    //   2. Wire service, video encoder, audio encoder
+    //   3. Set video context and signal handler
+    //   4. Call stream.start()
+    try {
+      if (osn.SimpleStreamingFactory) {
+        console.log('[OBS Manager] Starting stream via SimpleStreamingFactory...');
+
+        // Destroy previous stream output if exists
+        if (this._streamOutput) {
+          try { osn.SimpleStreamingFactory.destroy(this._streamOutput); } catch (e) { /* ignore */ }
+        }
+
+        // Create the streaming output
+        this._streamOutput = osn.SimpleStreamingFactory.create();
+        console.log('[OBS Manager] SimpleStreaming output created');
+
+        // Wire the RTMP service
+        this._streamOutput.service = this._streamService;
+        console.log('[OBS Manager] Service wired to stream output');
+
+        // Wire the video encoder
+        if (this._videoEncoder) {
+          this._streamOutput.videoEncoder = this._videoEncoder;
+          console.log('[OBS Manager] Video encoder wired to stream output');
+        } else {
+          console.warn('[OBS Manager] No video encoder — creating default obs_x264');
+          this._videoEncoder = osn.VideoEncoderFactory.create('obs_x264', 'apex-video-encoder', {
+            rate_control: 'CBR',
+            bitrate: 2500,
+            keyint_sec: 2
+          });
+          this._streamOutput.videoEncoder = this._videoEncoder;
+        }
+
+        // Wire the audio encoder
+        if (this._audioEncoder) {
+          this._streamOutput.audioEncoder = this._audioEncoder;
+          console.log('[OBS Manager] Audio encoder wired to stream output');
+        } else {
+          console.warn('[OBS Manager] No audio encoder — creating default ffmpeg_aac');
+          this._audioEncoder = osn.AudioEncoderFactory.create('ffmpeg_aac', 'apex-audio-encoder');
+          this._streamOutput.audioEncoder = this._audioEncoder;
+        }
+
+        // Set video context (required)
+        if (osn.VideoFactory && osn.VideoFactory.videoContext) {
+          this._streamOutput.video = osn.VideoFactory.videoContext;
+          console.log('[OBS Manager] Video context set from VideoFactory');
+        } else if (typeof osn.NodeObs.OBS_content_getDefaultVideoContext === 'function') {
+          this._streamOutput.video = osn.NodeObs.OBS_content_getDefaultVideoContext();
+          console.log('[OBS Manager] Video context set from default');
+        }
+
+        // Set up optional components
+        try {
+          if (osn.ReconnectFactory) {
+            this._streamOutput.reconnect = osn.ReconnectFactory.create();
+          }
+        } catch (e) { /* optional */ }
+
+        try {
+          if (osn.NetworkFactory) {
+            this._streamOutput.network = osn.NetworkFactory.create();
+          }
+        } catch (e) { /* optional */ }
+
+        // Signal handler for stream state changes
+        this._streamOutput.signalHandler = (signal) => {
+          console.log(`[OBS Manager] Stream signal: ${JSON.stringify(signal)}`);
+          if (signal.type === 'streaming' || signal.signal === 'stop') {
+            if (signal.signal === 'stop') {
+              this.streaming = false;
+            }
+          }
+          if (this.signalCallback) {
+            this.signalCallback(signal);
+          }
+        };
+
+        // START THE STREAM
+        this._streamOutput.start();
+        this.streaming = true;
+        console.log('[OBS Manager] ✓ Streaming started via SimpleStreamingFactory');
+        return;
+      }
+    } catch (e) {
+      console.error('[OBS Manager] SimpleStreamingFactory approach failed:', e.message);
+      console.error('[OBS Manager] Stack:', e.stack);
+    }
+
+    // ── FALLBACK: Legacy OBS_service_startStreaming ──────────────────
+    console.log('[OBS Manager] Falling back to legacy OBS_service_startStreaming...');
+    try {
+      osn.NodeObs.OBS_service_startStreaming();
+      this.streaming = true;
+      console.log('[OBS Manager] Streaming started via legacy API');
+    } catch (e) {
+      console.error('[OBS Manager] Legacy startStreaming also failed:', e.message);
+      throw e;
+    }
   }
 
   /**
@@ -720,7 +840,21 @@ class OBSManager {
       return;
     }
 
-    osn.NodeObs.OBS_service_stopStreaming();
+    // Stop via the correct pipeline
+    if (this._streamOutput) {
+      try {
+        this._streamOutput.stop();
+        console.log('[OBS Manager] Stream stopped via SimpleStreaming');
+      } catch (e) {
+        console.warn('[OBS Manager] SimpleStreaming stop failed:', e.message);
+        // Fallback to legacy
+        try { osn.NodeObs.OBS_service_stopStreaming(); } catch (e2) { /* ignore */ }
+      }
+    } else {
+      // Legacy fallback
+      osn.NodeObs.OBS_service_stopStreaming();
+    }
+
     this.streaming = false;
     console.log('[OBS Manager] Streaming stopped');
   }
@@ -858,6 +992,24 @@ class OBSManager {
     if (this.scene) {
       this.scene.release();
       this.scene = null;
+    }
+
+    // Release streaming pipeline objects
+    if (this._streamOutput) {
+      try { osn.SimpleStreamingFactory.destroy(this._streamOutput); } catch (e) { /* ignore */ }
+      this._streamOutput = null;
+    }
+    if (this._streamService) {
+      try { osn.ServiceFactory.destroy(this._streamService); } catch (e) { /* ignore */ }
+      this._streamService = null;
+    }
+    if (this._videoEncoder) {
+      try { this._videoEncoder.release(); } catch (e) { /* ignore */ }
+      this._videoEncoder = null;
+    }
+    if (this._audioEncoder) {
+      try { this._audioEncoder.release(); } catch (e) { /* ignore */ }
+      this._audioEncoder = null;
     }
 
     // Shutdown OBS
