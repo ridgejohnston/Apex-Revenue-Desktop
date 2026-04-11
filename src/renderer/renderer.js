@@ -400,6 +400,11 @@ function initializeEventListeners() {
     btn.addEventListener('click', () => linkPlatformAccount(btn.dataset.platform));
   });
 
+  // Sources — Add Source button
+  if (dom.addSourceBtn) {
+    dom.addSourceBtn.addEventListener('click', showAddSourceMenu);
+  }
+
   // Video overlay
   initializeOverlayListeners();
 }
@@ -586,6 +591,143 @@ function initializeOverlayListeners() {
 
 // ════════════════════════════════════════════════════════════════════════════
 // OBS FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
+// SOURCE MANAGEMENT
+// ════════════════════════════════════════════════════════════════════════════
+
+function showAddSourceMenu() {
+  if (!state.obsInitialized) {
+    showAlert('Initialize OBS first before adding sources', 'error');
+    return;
+  }
+
+  // Remove existing dropdown if open
+  const existing = document.querySelector('.source-dropdown');
+  if (existing) { existing.remove(); return; }
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'source-dropdown';
+  dropdown.innerHTML = `
+    <button class="source-option" data-type="webcam">Webcam</button>
+    <button class="source-option" data-type="display">Screen Capture</button>
+    <button class="source-option" data-type="audio-input">Microphone</button>
+    <button class="source-option" data-type="audio-output">Desktop Audio</button>
+  `;
+
+  dropdown.querySelectorAll('.source-option').forEach(opt => {
+    opt.addEventListener('click', () => {
+      dropdown.remove();
+      addSourceByType(opt.dataset.type);
+    });
+  });
+
+  dom.addSourceBtn.parentElement.appendChild(dropdown);
+
+  // Close on click outside
+  setTimeout(() => {
+    document.addEventListener('click', function closeDropdown(e) {
+      if (!dropdown.contains(e.target) && e.target !== dom.addSourceBtn) {
+        dropdown.remove();
+        document.removeEventListener('click', closeDropdown);
+      }
+    });
+  }, 10);
+}
+
+async function addSourceByType(type) {
+  try {
+    if (type === 'webcam') {
+      const devices = await window.apex.obs.getWebcamDevices();
+      if (!devices || devices.length === 0) {
+        showAlert('No webcam devices found', 'error');
+        return;
+      }
+      // Use first device or let user pick if multiple
+      const device = devices[0];
+      const name = 'webcam-' + Date.now();
+      await window.apex.obs.addWebcam(name, { deviceId: device.id });
+      state.sources.push({ name, type: 'Webcam', label: device.name || 'Webcam', visible: true });
+      showAlert('Webcam added: ' + (device.name || 'Default'), 'success');
+
+    } else if (type === 'display') {
+      const name = 'display-' + Date.now();
+      await window.apex.obs.addDisplay(name, { monitor: 0 });
+      state.sources.push({ name, type: 'Display', label: 'Screen Capture', visible: true });
+      showAlert('Screen capture added', 'success');
+
+    } else if (type === 'audio-input') {
+      const devices = await window.apex.obs.getAudioInputDevices();
+      if (!devices || devices.length === 0) {
+        showAlert('No microphone devices found', 'error');
+        return;
+      }
+      const device = devices[0];
+      const name = 'mic-' + Date.now();
+      await window.apex.obs.addAudio(name, { type: 'microphone', deviceId: device.id });
+      state.sources.push({ name, type: 'Microphone', label: device.name || 'Microphone', visible: true });
+      showAlert('Microphone added: ' + (device.name || 'Default'), 'success');
+
+    } else if (type === 'audio-output') {
+      const name = 'desktop-audio-' + Date.now();
+      await window.apex.obs.addAudio(name, { type: 'desktop', deviceId: 'default' });
+      state.sources.push({ name, type: 'Desktop Audio', label: 'Desktop Audio', visible: true });
+      showAlert('Desktop audio added', 'success');
+    }
+
+    renderSourcesList();
+  } catch (err) {
+    console.error('[Sources] Add source error:', err);
+    showAlert('Failed to add source: ' + (err.message || err), 'error');
+  }
+}
+
+function renderSourcesList() {
+  if (!dom.sourcesList) return;
+
+  if (state.sources.length === 0) {
+    dom.sourcesList.innerHTML = '<p class="placeholder-text">No sources configured</p>';
+    return;
+  }
+
+  dom.sourcesList.innerHTML = state.sources.map((src, i) => `
+    <div class="source-item" data-index="${i}">
+      <span class="source-icon">${src.type === 'Webcam' ? '📷' : src.type === 'Display' ? '🖥' : src.type === 'Microphone' ? '🎤' : '🔊'}</span>
+      <span class="source-name">${src.label}</span>
+      <span class="source-type">${src.type}</span>
+      <div class="source-actions">
+        <button class="source-toggle ${src.visible ? 'active' : ''}" data-name="${src.name}" title="Toggle visibility">
+          ${src.visible ? '👁' : '👁‍🗨'}
+        </button>
+        <button class="source-remove" data-name="${src.name}" title="Remove">✕</button>
+      </div>
+    </div>
+  `).join('');
+
+  // Wire toggle and remove buttons
+  dom.sourcesList.querySelectorAll('.source-toggle').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const src = state.sources.find(s => s.name === btn.dataset.name);
+      if (src) {
+        src.visible = !src.visible;
+        await window.apex.obs.setSourceVisible(src.name, src.visible);
+        renderSourcesList();
+      }
+    });
+  });
+
+  dom.sourcesList.querySelectorAll('.source-remove').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.name;
+      await window.apex.obs.removeSource(name);
+      state.sources = state.sources.filter(s => s.name !== name);
+      renderSourcesList();
+      showAlert('Source removed', 'success');
+    });
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// OBS CONTROLS
 // ════════════════════════════════════════════════════════════════════════════
 
 async function initializeOBS() {

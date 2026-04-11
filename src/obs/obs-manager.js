@@ -94,6 +94,11 @@ class OBSManager {
     this._streamService = null;     // ServiceFactory RTMP service
     this._videoEncoder = null;      // VideoEncoderFactory encoder
     this._audioEncoder = null;      // AudioEncoderFactory encoder
+
+    // Store RTMP config for legacy fallback
+    this._rtmpServer = null;
+    this._rtmpKey = null;
+    this._streamConfigured = false;
   }
 
   // ─────────────────────────────────────────────
@@ -637,6 +642,11 @@ class OBSManager {
       throw new Error('RTMP server URL and stream key are required');
     }
 
+    // Always store the RTMP config so legacy fallback can use it
+    this._rtmpServer = server;
+    this._rtmpKey = key;
+    this._streamConfigured = true;
+
     // Destroy previous service if it exists
     if (this._streamService) {
       try { osn.ServiceFactory.destroy(this._streamService); } catch (e) { /* ignore */ }
@@ -720,7 +730,7 @@ class OBSManager {
       return;
     }
 
-    if (!this._streamService) {
+    if (!this._streamConfigured) {
       throw new Error('Stream service not configured. Call configureStreamService() first.');
     }
 
@@ -731,7 +741,7 @@ class OBSManager {
     //   3. Set video context and signal handler
     //   4. Call stream.start()
     try {
-      if (osn.SimpleStreamingFactory) {
+      if (osn.SimpleStreamingFactory && this._streamService) {
         console.log('[OBS Manager] Starting stream via SimpleStreamingFactory...');
 
         // Destroy previous stream output if exists
@@ -819,7 +829,21 @@ class OBSManager {
 
     // ── FALLBACK: Legacy OBS_service_startStreaming ──────────────────
     console.log('[OBS Manager] Falling back to legacy OBS_service_startStreaming...');
+    console.log(`[OBS Manager] Legacy RTMP: ${this._rtmpServer} (key length: ${this._rtmpKey?.length})`);
     try {
+      // Ensure legacy settings API has the RTMP config
+      try {
+        setSetting('Stream', 'streamType', 'rtmp_custom');
+        setSetting('Stream', 'StreamType', 'rtmp_custom');
+        setSetting('Stream', 'service', 'rtmp_custom');
+        setSetting('Stream', 'type', 'rtmp_custom');
+        setSetting('Stream', 'server', this._rtmpServer);
+        setSetting('Stream', 'key', this._rtmpKey);
+        setSetting('Stream', 'url', this._rtmpServer);
+      } catch (settingsErr) {
+        console.warn('[OBS Manager] Legacy settings write error:', settingsErr.message);
+      }
+
       osn.NodeObs.OBS_service_startStreaming();
       this.streaming = true;
       console.log('[OBS Manager] Streaming started via legacy API');
