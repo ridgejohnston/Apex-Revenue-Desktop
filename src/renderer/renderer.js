@@ -587,11 +587,13 @@ async function initializeOBS() {
       updateStatus('Ready', 'ready');
       loadDevices();
     } else {
-      showAlert('Failed to initialize OBS: ' + result.error, 'error');
+      showAlert('Failed to initialize OBS: ' + (result.error || 'Unknown error'), 'error');
+      dom.initOBSBtn.textContent = 'Initialize OBS';
+      dom.initOBSBtn.disabled = false;
     }
   } catch (error) {
     console.error('OBS init error:', error);
-    showAlert('Error initializing OBS', 'error');
+    showAlert('Error initializing OBS: ' + (error.message || error), 'error');
     dom.initOBSBtn.textContent = 'Initialize OBS';
     dom.initOBSBtn.disabled = false;
   }

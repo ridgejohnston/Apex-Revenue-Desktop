@@ -133,10 +133,10 @@ async function initializeOBS() {
 
     obsInitialized = true;
     console.log('[Main] OBS initialized successfully');
-    return true;
+    return { success: true };
   } catch (err) {
     console.error('[Main] Failed to initialize OBS:', err);
-    return false;
+    return { success: false, error: err.message || String(err) };
   }
 }
 
