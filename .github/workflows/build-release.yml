@@ -47,11 +47,28 @@ jobs:
           dir assets\icon.png
         shell: cmd
 
-      - name: Build Windows installer (unsigned)
+      - name: Install Azure Trusted Signing SDK
+        if: env.AZURE_TENANT_ID != ''
+        shell: powershell
+        run: |
+          dotnet tool install --global Azure.CodeSigning.Dlib --prerelease
+          Write-Host "Azure Trusted Signing SDK installed"
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+      - name: Build Windows installer
         run: npx electron-builder --win --config electron-builder.config.js
         shell: cmd
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Azure Trusted Signing credentials (when configured)
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGN_ENDPOINT: ${{ secrets.AZURE_SIGN_ENDPOINT }}
+          AZURE_CERT_PROFILE_NAME: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
+          # Disable auto-discovery when Azure signing is not configured
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: List build output

@@ -56,9 +56,20 @@ module.exports = {
     ],
     icon: iconPath,
     artifactName: 'ApexRevenueDesktop-Setup-${version}.${ext}',
-    // Code signing disabled — self-signed certs make SmartScreen worse.
-    // Use a CA-issued cert (e.g. SSL.com, Sectigo) when ready for public distribution.
-    signDlls: false,
+    publisherName: 'Ridge Johnston',
+    // Azure Trusted Signing (Microsoft Artifact Signing) — $10/mo
+    // Signing is activated when AZURE_TENANT_ID is set in CI env.
+    // When not set, CSC_IDENTITY_AUTO_DISCOVERY=false skips signing.
+    ...(process.env.AZURE_TENANT_ID ? {
+      azureSignOptions: {
+        publisherName: 'Ridge Johnston',
+        endpoint: process.env.AZURE_SIGN_ENDPOINT || 'https://eus.codesigning.azure.net/',
+        certificateProfileName: process.env.AZURE_CERT_PROFILE_NAME || 'apex-revenue',
+        codeSigningAccountName: process.env.AZURE_CODE_SIGNING_ACCOUNT || 'apex-revenue-signing'
+      }
+    } : {
+      signDlls: false
+    }),
   },
 
   nsis: {
