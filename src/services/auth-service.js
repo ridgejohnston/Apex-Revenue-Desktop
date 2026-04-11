@@ -266,7 +266,7 @@ class AuthService {
       const response = await fetch(`${API_ENDPOINT}/link-platform`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${this.tokens.accessToken}`,
+          'Authorization': this.tokens.accessToken,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ platform, username })
@@ -312,7 +312,7 @@ class AuthService {
       const response = await fetch(`${API_ENDPOINT}/unlink-platform`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${this.tokens.accessToken}`,
+          'Authorization': this.tokens.accessToken,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ platform })
