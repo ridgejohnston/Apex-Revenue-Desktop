@@ -1,70 +1,96 @@
-// ── Apex Revenue Desktop — earnings-tracker.js (Electron adaptation) ─────────
-// Tracks session earnings, persists via electronAPI.store, syncs to API.
-// Uses electronAPI.store instead of chrome.storage.local.
+/**
+ * Apex Revenue — Session Earnings Tracker
+ */
 
-var APEX_EARNINGS_KEY     = 'apexCurrentSessionEarnings';
-var APEX_EARNINGS_QUEUE   = 'apexEarningsSyncQueue';
-var APEX_EARNINGS_HISTORY = 'apexLocalEarningsCache';
-
-var earningsSession = {
-  platform: 'chaturbate', username: '', sessionStart: null, lastUpdate: null,
-  totalTokens: 0, totalTips: 0, uniqueTippers: 0, peakViewers: 0,
-  avgViewers: 0, viewerSamples: [], convRate: 0, tokensPerHr: 0,
-  avgTipSize: 0, largestTip: 0, whaleCount: 0, topTippers: [],
-  hourlyBreakdown: [], _hourBuckets: {}, _started: false,
-};
-
-function earningsStartSession(platform, username) {
-  Object.assign(earningsSession, {
-    platform: platform || 'chaturbate', username: username || '',
-    sessionStart: new Date().toISOString(), lastUpdate: Date.now(),
-    totalTokens: 0, totalTips: 0, uniqueTippers: 0, peakViewers: 0,
-    avgViewers: 0, viewerSamples: [], convRate: 0, tokensPerHr: 0,
-    avgTipSize: 0, largestTip: 0, whaleCount: 0, topTippers: [],
-    hourlyBreakdown: [], _hourBuckets: {}, _started: true,
-  });
-  earningsSaveLocal();
-}
-
-function earningsProcessUpdate(data) {
-  if (!earningsSession._started) earningsStartSession(earningsSession.platform, data.username || '');
-  if (data.username && !earningsSession.username) earningsSession.username = data.username;
-  earningsSession.lastUpdate = Date.now();
-  earningsSession.totalTokens = data.totalTips || 0;
-  earningsSession.tokensPerHr  = data.tokensPerHour || 0;
-  earningsSession.convRate      = parseFloat(data.convRate) || 0;
-
-  var viewers = data.viewers || 0;
-  if (viewers > earningsSession.peakViewers) earningsSession.peakViewers = viewers;
-  earningsSession.viewerSamples.push(viewers);
-  if (earningsSession.viewerSamples.length > 0) {
-    earningsSession.avgViewers = Math.round(
-      earningsSession.viewerSamples.reduce(function(a,b){return a+b;},0) / earningsSession.viewerSamples.length
-    );
+class EarningsTracker {
+  constructor() {
+    this.reset();
   }
 
-  var fans = data.fans || [];
-  earningsSession.uniqueTippers = fans.filter(function(f){return f.tips>0;}).length;
-  earningsSession.totalTips     = (data.tipEvents || []).length;
-  var amounts = (data.tipEvents || []).map(function(e){return e.amount;});
-  if (amounts.length) {
-    earningsSession.avgTipSize = Math.round(amounts.reduce(function(a,b){return a+b;},0)/amounts.length);
-    earningsSession.largestTip = Math.max.apply(null, amounts);
+  reset() {
+    this.platform = null;
+    this.startTime = null;
+    this.totalTokens = 0;
+    this.tipEvents = [];
+    this.uniqueTippers = new Set();
+    this.peakViewers = 0;
+    this.viewerSamples = [];
+    this.hourlyBreakdown = {};
+    this.largestTip = 0;
+    this.whales = new Map();
   }
-  earningsSession.whaleCount = (data.whales || []).filter(function(w){return w.present;}).length;
-  earningsSession.topTippers = fans.filter(function(f){return f.tips>0;}).sort(function(a,b){return b.tips-a.tips;}).slice(0,10);
-  earningsSaveLocal();
+
+  start(platform) {
+    this.reset();
+    this.platform = platform;
+    this.startTime = Date.now();
+  }
+
+  addTip(username, amount, timestamp = Date.now()) {
+    this.totalTokens += amount;
+    this.uniqueTippers.add(username);
+    this.tipEvents.push({ username, amount, timestamp });
+    if (amount > this.largestTip) this.largestTip = amount;
+
+    const existing = this.whales.get(username) || 0;
+    this.whales.set(username, existing + amount);
+
+    const hour = new Date(timestamp).getHours();
+    this.hourlyBreakdown[hour] = (this.hourlyBreakdown[hour] || 0) + amount;
+  }
+
+  updateViewers(count) {
+    if (count > this.peakViewers) this.peakViewers = count;
+    this.viewerSamples.push(count);
+  }
+
+  getTokensPerHour() {
+    if (!this.startTime) return 0;
+    const hours = (Date.now() - this.startTime) / 3600000;
+    return hours > 0 ? Math.round(this.totalTokens / hours) : 0;
+  }
+
+  getAverageViewers() {
+    if (!this.viewerSamples.length) return 0;
+    return Math.round(this.viewerSamples.reduce((a, b) => a + b, 0) / this.viewerSamples.length);
+  }
+
+  getAverageTip() {
+    if (!this.tipEvents.length) return 0;
+    return Math.round(this.totalTokens / this.tipEvents.length);
+  }
+
+  getConversionRate(currentViewers) {
+    if (!currentViewers) return 0;
+    return Math.round((this.uniqueTippers.size / currentViewers) * 100 * 10) / 10;
+  }
+
+  getTopWhales(limit = 10) {
+    return [...this.whales.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([username, total]) => ({ username, total }));
+  }
+
+  getSnapshot(currentViewers = 0) {
+    return {
+      platform: this.platform,
+      startTime: this.startTime,
+      elapsed: this.startTime ? Date.now() - this.startTime : 0,
+      totalTokens: this.totalTokens,
+      tokensPerHour: this.getTokensPerHour(),
+      viewers: currentViewers,
+      peakViewers: this.peakViewers,
+      averageViewers: this.getAverageViewers(),
+      uniqueTippers: this.uniqueTippers.size,
+      averageTip: this.getAverageTip(),
+      largestTip: this.largestTip,
+      conversionRate: this.getConversionRate(currentViewers),
+      whales: this.getTopWhales(),
+      recentTips: this.tipEvents.slice(-20).reverse(),
+      hourlyBreakdown: { ...this.hourlyBreakdown },
+    };
+  }
 }
 
-async function earningsSaveLocal() {
-  if (window.electronAPI) {
-    await window.electronAPI.store.set(APEX_EARNINGS_KEY, earningsSession);
-  }
-}
-
-async function earningsGetHistory() {
-  if (window.electronAPI) {
-    return await window.electronAPI.store.get(APEX_EARNINGS_HISTORY) || {};
-  }
-  return {};
-}
+module.exports = EarningsTracker;

@@ -1,10 +1,8 @@
 node_modules/
 dist/
-.cache/
+!renderer/dist/
+config/aws-defaults.json
 *.log
 .DS_Store
 Thumbs.db
-*.swp
-.env
-installer/ApexRevenue-Setup-1.0.0.exe
-config/aws-defaults.json
+ffmpeg/*.exe

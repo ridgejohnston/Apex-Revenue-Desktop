@@ -1,78 +1,101 @@
-// ═══════════════════════════════════════════════════════════════════════════════
-// APEX REVENUE DESKTOP — Main Window Preload v3.0
-// AWS credentials are auto-loaded at boot — no setup IPC needed here.
-// ═══════════════════════════════════════════════════════════════════════════════
+/**
+ * Apex Revenue — Preload (Main Renderer)
+ * Context-isolated bridge between Electron main process and React UI
+ */
 
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
-
-  // ── Store ──────────────────────────────────────────────────────────────────
+  // ─── Store ───────────────────────────────────────────
   store: {
-    get:    k   => ipcRenderer.invoke('store:get', k),
-    set:    (k,v) => ipcRenderer.invoke('store:set', k, v),
-    getAll: ()  => ipcRenderer.invoke('store:getAll'),
+    get: (key) => ipcRenderer.invoke('store:get', key),
+    set: (key, value) => ipcRenderer.invoke('store:set', key, value),
   },
 
-  // ── Window controls ────────────────────────────────────────────────────────
+  // ─── Window Controls ─────────────────────────────────
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),
     maximize: () => ipcRenderer.send('window:maximize'),
-    close:    () => ipcRenderer.send('window:close'),
-    quit:     () => ipcRenderer.send('window:quit'),
+    close: () => ipcRenderer.send('window:close'),
   },
 
-  // ── Shell ──────────────────────────────────────────────────────────────────
-  openExternal: url => ipcRenderer.send('shell:open', url),
+  // ─── Scenes ──────────────────────────────────────────
+  scenes: {
+    getAll: () => ipcRenderer.invoke('scenes:get-all'),
+    getActive: () => ipcRenderer.invoke('scenes:get-active'),
+    create: (name) => ipcRenderer.invoke('scenes:create', name),
+    remove: (id) => ipcRenderer.invoke('scenes:delete', id),
+    setActive: (id) => ipcRenderer.invoke('scenes:set-active', id),
+    rename: (id, name) => ipcRenderer.invoke('scenes:rename', id, name),
+    duplicate: (id) => ipcRenderer.invoke('scenes:duplicate', id),
+    onUpdated: (cb) => ipcRenderer.on('scenes:updated', (_, data) => cb(data)),
+  },
 
-  // ── Browser navigation (drives the BrowserView) ───────────────────────────
-  navigate:      url => ipcRenderer.send('cam:navigate', url),
-  camBack:       ()  => ipcRenderer.send('cam:back'),
-  camForward:    ()  => ipcRenderer.send('cam:forward'),
-  camReload:     ()  => ipcRenderer.send('cam:reload'),
-  camCurrentUrl: ()  => ipcRenderer.invoke('cam:currentUrl'),
+  // ─── Sources ─────────────────────────────────────────
+  sources: {
+    add: (sceneId, config) => ipcRenderer.invoke('sources:add', sceneId, config),
+    remove: (sceneId, sourceId) => ipcRenderer.invoke('sources:remove', sceneId, sourceId),
+    update: (sceneId, sourceId, props) => ipcRenderer.invoke('sources:update', sceneId, sourceId, props),
+    reorder: (sceneId, sourceIds) => ipcRenderer.invoke('sources:reorder', sceneId, sourceIds),
+    toggleVisible: (sceneId, sourceId) => ipcRenderer.invoke('sources:toggle-visible', sceneId, sourceId),
+    toggleLock: (sceneId, sourceId) => ipcRenderer.invoke('sources:toggle-lock', sceneId, sourceId),
+    getScreens: () => ipcRenderer.invoke('sources:get-screens'),
+    getWindows: () => ipcRenderer.invoke('sources:get-windows'),
+  },
 
-  // ── App events ─────────────────────────────────────────────────────────────
-  setUsername: u => ipcRenderer.send('app:set-username', u),
-  sessionEnd:  () => ipcRenderer.send('app:session-end'),
+  // ─── Audio Mixer ─────────────────────────────────────
+  audio: {
+    getDevices: () => ipcRenderer.invoke('audio:get-devices'),
+    setVolume: (id, vol) => ipcRenderer.invoke('audio:set-volume', id, vol),
+    setMuted: (id, muted) => ipcRenderer.invoke('audio:set-muted', id, muted),
+    getLevels: () => ipcRenderer.invoke('audio:get-levels'),
+  },
 
-  // ── AWS service calls (auto-configured, always available) ──────────────────
+  // ─── Stream Engine ───────────────────────────────────
+  stream: {
+    start: (config) => ipcRenderer.invoke('stream:start', config),
+    stop: () => ipcRenderer.invoke('stream:stop'),
+    getStatus: () => ipcRenderer.invoke('stream:get-status'),
+    onStatus: (cb) => ipcRenderer.on('stream:status', (_, data) => cb(data)),
+  },
+
+  record: {
+    start: (config) => ipcRenderer.invoke('record:start', config),
+    stop: () => ipcRenderer.invoke('record:stop'),
+  },
+
+  virtualCam: {
+    start: () => ipcRenderer.invoke('virtual-cam:start'),
+    stop: () => ipcRenderer.invoke('virtual-cam:stop'),
+  },
+
+  // ─── Cam Site / BrowserView ──────────────────────────
+  cam: {
+    navigate: (url) => ipcRenderer.send('cam:navigate', url),
+    back: () => ipcRenderer.send('cam:back'),
+    forward: () => ipcRenderer.send('cam:forward'),
+    reload: () => ipcRenderer.send('cam:reload'),
+    onPlatformDetected: (cb) => ipcRenderer.on('cam:platform-detected', (_, p) => cb(p)),
+  },
+
+  // ─── AWS Services ────────────────────────────────────
   aws: {
-    s3Backup:      data   => ipcRenderer.invoke('aws:s3-backup', data),
-    bedrockPrompt: (data, trigger) => ipcRenderer.invoke('aws:bedrock-prompt', { sessionData: data, trigger }),
-    pollySpeakText: text  => ipcRenderer.invoke('aws:polly-speak', text),
+    signIn: (email, password) => ipcRenderer.invoke('aws:sign-in', email, password),
+    signOut: () => ipcRenderer.invoke('aws:sign-out'),
+    getSession: () => ipcRenderer.invoke('aws:get-session'),
+    bedrockPrompt: (trigger, ctx) => ipcRenderer.invoke('aws:bedrock-prompt', trigger, ctx),
+    pollySpeak: (text) => ipcRenderer.invoke('aws:polly-speak', text),
+    s3Backup: () => ipcRenderer.invoke('aws:s3-backup'),
+    onAiPrompt: (cb) => ipcRenderer.on('aws:ai-prompt', (_, data) => cb(data)),
+    onPollyAudio: (cb) => ipcRenderer.on('aws:polly-audio', (_, data) => cb(data)),
+    onBackupDone: (cb) => ipcRenderer.on('aws:backup-done', (_, data) => cb(data)),
   },
 
-  // ── Auto-updater ───────────────────────────────────────────────────────────
-  updater: {
-    checkNow:      ()  => ipcRenderer.invoke('update:check'),
-    getStatus:     ()  => ipcRenderer.invoke('update:status'),
-    installNow:    ()  => ipcRenderer.send('update:install'),
-    setBannerHeight: h => ipcRenderer.send('update:banner-height', h),
-  },
+  // ─── Live Data ───────────────────────────────────────
+  onLiveUpdate: (cb) => ipcRenderer.on('live-update', (_, data) => cb(data)),
 
-  // ── Inbound events ─────────────────────────────────────────────────────────
-  onLiveUpdate:       cb => ipcRenderer.on('live-update',        (_, d) => cb(d)),
-  onPlatformDetected: cb => ipcRenderer.on('platform-detected',  (_, p) => cb(p)),
-  onUrlChanged:       cb => ipcRenderer.on('cam:url-changed',    (_, u) => cb(u)),
-  onTitleChanged:     cb => ipcRenderer.on('cam:title-changed',  (_, t) => cb(t)),
-  onAiPrompt:         cb => ipcRenderer.on('aws:ai-prompt',      (_, d) => cb(d)),
-  onPollyAudio:       cb => ipcRenderer.on('aws:polly-audio',    (_, d) => cb(d)),
-  onBackupDone:       cb => ipcRenderer.on('aws:backup-done',    (_, d) => cb(d)),
-  onAwsStatus:        cb => ipcRenderer.on('aws:status',         (_, d) => cb(d)),
-
-  // ── Update event listeners ─────────────────────────────────────────────────
-  onUpdateChecking:   cb => ipcRenderer.on('update:checking',    ()     => cb()),
-  onUpdateAvailable:  cb => ipcRenderer.on('update:available',   (_, d) => cb(d)),
-  onUpdateProgress:   cb => ipcRenderer.on('update:progress',    (_, d) => cb(d)),
-  onUpdateReady:      cb => ipcRenderer.on('update:ready',       (_, d) => cb(d)),
-  onUpdateNotAvail:   cb => ipcRenderer.on('update:not-available',(_, d)=> cb(d)),
-  onUpdateError:      cb => ipcRenderer.on('update:error',       (_, d) => cb(d)),
-
-  // App asset (app.asar) hot-update events
-  onAppUpdateDownloading: cb => ipcRenderer.on('app-update:downloading', (_, d) => cb(d)),
-  onAppUpdateProgress:    cb => ipcRenderer.on('app-update:progress',    (_, d) => cb(d)),
-  onAppUpdateReady:       cb => ipcRenderer.on('app-update:ready',       (_, d) => cb(d)),
-  onAppUpdateError:       cb => ipcRenderer.on('app-update:error',       (_, d) => cb(d)),
-  removeAllListeners: ch => ipcRenderer.removeAllListeners(ch),
+  // ─── App Info ────────────────────────────────────────
+  getVersion: () => require('../shared/apex-config').VERSION,
+  getPlatforms: () => require('../shared/apex-config').DEFAULT_PLATFORMS,
+  getWhaleTiers: () => require('../shared/apex-config').WHALE_TIERS,
 });

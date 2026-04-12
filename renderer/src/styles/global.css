@@ -1,0 +1,181 @@
+/* ─── Apex Revenue v2 — Global Styles ─────────────────────────── */
+
+:root {
+  /* Core palette */
+  --bg-primary:     #0a0a0f;
+  --bg-secondary:   #12121a;
+  --bg-tertiary:    #1a1a26;
+  --bg-elevated:    #22223a;
+  --bg-hover:       #2a2a44;
+  --bg-active:      #33335a;
+
+  /* Accent */
+  --accent:         #7c5cfc;
+  --accent-hover:   #9b80ff;
+  --accent-dim:     rgba(124, 92, 252, 0.15);
+
+  /* Status */
+  --live-red:       #ff4757;
+  --live-red-dim:   rgba(255, 71, 87, 0.15);
+  --success:        #2ed573;
+  --success-dim:    rgba(46, 213, 115, 0.15);
+  --warning:        #ffa502;
+  --warning-dim:    rgba(255, 165, 2, 0.15);
+
+  /* Text */
+  --text-primary:   #e8e8f0;
+  --text-secondary: #8888a8;
+  --text-dim:       #55556a;
+
+  /* Borders */
+  --border:         #2a2a3a;
+  --border-light:   #3a3a50;
+
+  /* Sizing */
+  --titlebar-h:     36px;
+  --sidebar-w:      200px;
+  --panel-w:        320px;
+  --controls-h:     260px;
+  --toolbar-h:      36px;
+
+  /* Transitions */
+  --ease:           cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; overflow: hidden; }
+
+body {
+  font-family: -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  font-size: 12px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ─── Scrollbars ─────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg-hover); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--bg-active); }
+
+/* ─── Drag Region (Titlebar) ─────────────────────────────── */
+.drag-region { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* ─── Utility ────────────────────────────────────────────── */
+.flex { display: flex; }
+.flex-col { display: flex; flex-direction: column; }
+.flex-1 { flex: 1; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.gap-1 { gap: 4px; }
+.gap-2 { gap: 8px; }
+.gap-3 { gap: 12px; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ─── Buttons ────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 4px; padding: 4px 10px; border: none; border-radius: 4px;
+  font-size: 11px; font-weight: 500; cursor: pointer;
+  transition: all 150ms var(--ease);
+  background: var(--bg-elevated); color: var(--text-primary);
+}
+.btn:hover { background: var(--bg-hover); }
+.btn:active { background: var(--bg-active); }
+.btn-accent { background: var(--accent); color: #fff; }
+.btn-accent:hover { background: var(--accent-hover); }
+.btn-danger { background: var(--live-red); color: #fff; }
+.btn-danger:hover { background: #ff6b81; }
+.btn-sm { padding: 2px 6px; font-size: 10px; }
+.btn-icon { padding: 4px; width: 24px; height: 24px; }
+
+/* ─── Input ──────────────────────────────────────────────── */
+.input {
+  padding: 4px 8px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg-secondary);
+  color: var(--text-primary); font-size: 11px; outline: none;
+  transition: border-color 150ms var(--ease);
+}
+.input:focus { border-color: var(--accent); }
+
+/* ─── Tooltip ────────────────────────────────────────────── */
+[data-tooltip] { position: relative; }
+[data-tooltip]:hover::after {
+  content: attr(data-tooltip); position: absolute; bottom: 100%;
+  left: 50%; transform: translateX(-50%); padding: 3px 6px;
+  background: #000; color: #fff; font-size: 10px; border-radius: 3px;
+  white-space: nowrap; z-index: 1000; pointer-events: none;
+}
+
+/* ─── Audio Meter ────────────────────────────────────────── */
+.audio-meter {
+  width: 100%; height: 4px; background: var(--bg-tertiary);
+  border-radius: 2px; overflow: hidden;
+}
+.audio-meter-fill {
+  height: 100%; border-radius: 2px;
+  transition: width 50ms linear;
+  background: linear-gradient(90deg, var(--success) 0%, var(--success) 70%, var(--warning) 85%, var(--live-red) 100%);
+}
+
+/* ─── Volume Slider ──────────────────────────────────────── */
+.volume-slider {
+  -webkit-appearance: none; width: 100%; height: 3px;
+  background: var(--bg-tertiary); border-radius: 2px; outline: none;
+}
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 10px; height: 10px;
+  border-radius: 50%; background: var(--accent); cursor: pointer;
+}
+
+/* ─── Status Badge ───────────────────────────────────────── */
+.badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px; border-radius: 3px; font-size: 9px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.badge-live { background: var(--live-red-dim); color: var(--live-red); }
+.badge-success { background: var(--success-dim); color: var(--success); }
+.badge-accent { background: var(--accent-dim); color: var(--accent); }
+.badge-warning { background: var(--warning-dim); color: var(--warning); }
+.badge-live::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--live-red); animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ─── Modal ──────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+  display: flex; align-items: center; justify-content: center; z-index: 999;
+}
+.modal {
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  border-radius: 8px; padding: 20px; min-width: 300px; max-width: 500px;
+}
+.modal-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+
+/* ─── List ───────────────────────────────────────────────── */
+.list-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-radius: 3px; cursor: pointer;
+  transition: background 100ms var(--ease);
+}
+.list-item:hover { background: var(--bg-hover); }
+.list-item.active { background: var(--bg-active); }
+.list-item .name { flex: 1; font-size: 11px; }
+
+/* ─── Section Headers ────────────────────────────────────── */
+.section-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.8px;
+  color: var(--text-secondary); border-bottom: 1px solid var(--border);
+}
