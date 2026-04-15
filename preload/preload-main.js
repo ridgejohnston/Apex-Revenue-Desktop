@@ -94,6 +94,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ─── Live Data ───────────────────────────────────────
   onLiveUpdate: (cb) => ipcRenderer.on('live-update', (_, data) => cb(data)),
 
+  // ─── Auto-Updater ────────────────────────────────────
+  updates: {
+    check: () => ipcRenderer.invoke('updates:check'),
+    install: () => ipcRenderer.send('updates:install'),
+    onStatus: (cb) => ipcRenderer.on('updates:status', (_, data) => cb(data)),
+  },
+
   // ─── App Info ────────────────────────────────────────
   getVersion: () => require('../shared/apex-config').VERSION,
   getPlatforms: () => require('../shared/apex-config').DEFAULT_PLATFORMS,

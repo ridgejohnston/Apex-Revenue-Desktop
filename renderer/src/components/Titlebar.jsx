@@ -1,6 +1,53 @@
 import React from 'react';
 
-export default function Titlebar({ user, streamStatus, platform, onAuthClick, onSettingsClick, onSignOut, onS3Backup }) {
+export default function Titlebar({ user, streamStatus, platform, updateStatus, onAuthClick, onSettingsClick, onSignOut, onS3Backup }) {
+
+  function renderUpdateBadge() {
+    if (!updateStatus) return null;
+
+    if (updateStatus.state === 'available') {
+      return (
+        <span style={{
+          fontSize: 9, padding: '2px 6px', borderRadius: 3,
+          background: 'rgba(59, 130, 246, 0.2)', color: '#60a5fa',
+          border: '1px solid rgba(59, 130, 246, 0.4)',
+        }}>
+          v{updateStatus.version} available ↓
+        </span>
+      );
+    }
+
+    if (updateStatus.state === 'downloading') {
+      return (
+        <span style={{
+          fontSize: 9, padding: '2px 6px', borderRadius: 3,
+          background: 'rgba(234, 179, 8, 0.2)', color: '#fbbf24',
+          border: '1px solid rgba(234, 179, 8, 0.4)',
+        }}>
+          Downloading {updateStatus.percent}%
+        </span>
+      );
+    }
+
+    if (updateStatus.state === 'ready') {
+      return (
+        <button
+          onClick={() => window.electronAPI.updates.install()}
+          style={{
+            fontSize: 9, padding: '2px 8px', borderRadius: 3, cursor: 'pointer',
+            background: 'rgba(34, 197, 94, 0.2)', color: '#4ade80',
+            border: '1px solid rgba(34, 197, 94, 0.5)',
+          }}
+          title={`v${updateStatus.version} downloaded — click to restart and install`}
+        >
+          ↻ Restart & Update
+        </button>
+      );
+    }
+
+    return null;
+  }
+
   return (
     <div
       className="drag-region flex items-center justify-between"
@@ -15,7 +62,7 @@ export default function Titlebar({ user, streamStatus, platform, onAuthClick, on
         <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: 1, color: 'var(--accent)' }}>
           ⚡ APEX REVENUE
         </span>
-        <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>v2.0</span>
+        <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>v3.0</span>
 
         {streamStatus.streaming ? (
           <span className="badge badge-live">LIVE</span>
@@ -28,6 +75,8 @@ export default function Titlebar({ user, streamStatus, platform, onAuthClick, on
         {platform && (
           <span className="badge badge-accent">{platform.toUpperCase()}</span>
         )}
+
+        {renderUpdateBadge()}
       </div>
 
       {/* Center: Browser Controls (for cam site view) */}
@@ -66,7 +115,7 @@ export default function Titlebar({ user, streamStatus, platform, onAuthClick, on
           <button
             className="btn btn-icon"
             onClick={() => window.electronAPI.window.close()}
-            style={{ borderRadius: 0, fontSize: 14, ':hover': { background: 'var(--live-red)' } }}
+            style={{ borderRadius: 0, fontSize: 14 }}
           >✕</button>
         </div>
       </div>

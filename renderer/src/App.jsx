@@ -24,6 +24,7 @@ export default function App() {
   const [showAddSource, setShowAddSource] = useState(false);
   const [activeTab, setActiveTab] = useState('obs'); // 'obs' | 'live' | 'fans'
   const [sidebarMode, setSidebarMode] = useState('scenes'); // 'scenes' | 'platforms'
+  const [updateStatus, setUpdateStatus] = useState(null);
   const audioRef = useRef(null);
 
   // ─── Initialize ────────────────────────────────────────
@@ -60,6 +61,8 @@ export default function App() {
         audioRef.current.play().catch(() => {});
       }
     });
+
+    api.updates.onStatus((status) => setUpdateStatus(status));
   }, []);
 
   // ─── Scene Actions ─────────────────────────────────────
@@ -154,6 +157,7 @@ export default function App() {
         user={user}
         streamStatus={streamStatus}
         platform={platform}
+        updateStatus={updateStatus}
         onAuthClick={() => setShowAuth(true)}
         onSettingsClick={() => setShowSettings(true)}
         onSignOut={handleSignOut}

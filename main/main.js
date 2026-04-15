@@ -372,9 +372,68 @@ app.whenReady().then(async () => {
 
   startHeartbeat();
 
-  // Auto-updater
-  autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-  setInterval(() => autoUpdater.checkForUpdatesAndNotify().catch(() => {}), 4 * 3600000);
+  // ─── Auto-Updater ────────────────────────────────────
+  setupAutoUpdater();
+  autoUpdater.checkForUpdates().catch(() => {});
+  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 3600000);
+});
+
+// ─── Auto-Updater Setup ─────────────────────────────────
+let updateReady = false;
+
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => {
+    mainWindow?.webContents.send('updates:status', { state: 'checking' });
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    mainWindow?.webContents.send('updates:status', {
+      state: 'available',
+      version: info.version,
+    });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    mainWindow?.webContents.send('updates:status', { state: 'up-to-date' });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    mainWindow?.webContents.send('updates:status', {
+      state: 'downloading',
+      percent: Math.round(progress.percent),
+      bytesPerSecond: progress.bytesPerSecond,
+    });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    updateReady = true;
+    mainWindow?.webContents.send('updates:status', {
+      state: 'ready',
+      version: info.version,
+    });
+  });
+
+  autoUpdater.on('error', (err) => {
+    mainWindow?.webContents.send('updates:status', {
+      state: 'error',
+      message: err.message,
+    });
+  });
+}
+
+// ─── IPC: Manual update check + install ─────────────────
+ipcMain.handle('updates:check', () => {
+  return autoUpdater.checkForUpdates().catch((e) => ({ error: e.message }));
+});
+
+ipcMain.on('updates:install', () => {
+  if (updateReady) {
+    isQuitting = true;
+    autoUpdater.quitAndInstall(false, true);
+  }
 });
 
 app.on('activate', () => {
