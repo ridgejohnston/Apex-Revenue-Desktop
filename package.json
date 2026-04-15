@@ -1,6 +1,6 @@
 {
   "name": "apex-revenue-desktop",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Apex Revenue Desktop — Creator Intelligence Engine + OBS Streaming Platform",
   "main": "main/main.js",
   "author": "Ridge Johnston",
@@ -81,12 +81,21 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icons/icon.ico",
-      "artifactName": "ApexRevenue-Setup-${version}.exe",
+      "artifactName": "ApexRevenue-${version}-${arch}.exe",
       "sign": null,
       "signingHashAlgorithms": null
+    },
+    "portable": {
+      "artifactName": "ApexRevenue-${version}-Portable.exe"
     },
     "nsis": {
       "oneClick": false,
