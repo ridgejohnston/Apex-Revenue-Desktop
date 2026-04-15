@@ -41,6 +41,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     toggleLock: (sceneId, sourceId) => ipcRenderer.invoke('sources:toggle-lock', sceneId, sourceId),
     getScreens: () => ipcRenderer.invoke('sources:get-screens'),
     getWindows: () => ipcRenderer.invoke('sources:get-windows'),
+    getDshowDevices: () => ipcRenderer.invoke('sources:get-dshow-devices'),
+  },
+
+  // ─── FFmpeg ───────────────────────────────────────────
+  ffmpeg: {
+    check: () => ipcRenderer.invoke('ffmpeg:check'),
+    install: () => ipcRenderer.invoke('ffmpeg:install'),
+    onProgress: (cb) => ipcRenderer.on('ffmpeg:progress', (_, data) => cb(data)),
+    onInstalled: (cb) => ipcRenderer.on('ffmpeg:installed', (_, data) => cb(data)),
   },
 
   // ─── Audio Mixer ─────────────────────────────────────

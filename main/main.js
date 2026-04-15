@@ -10,6 +10,7 @@ const awsServices = require('./aws-services');
 const streamEngine = require('./stream-engine');
 const sceneManager = require('./scene-manager');
 const audioMixer = require('./audio-mixer');
+const ffmpegInstaller = require('./ffmpeg-installer');
 const { autoUpdater } = require('electron-updater');
 const EarningsTracker = require('../shared/earnings-tracker');
 const { VERSION } = require('../shared/apex-config');
@@ -370,6 +371,13 @@ app.whenReady().then(async () => {
   try { await awsServices.init(store); }
   catch (e) { console.error('AWS init error:', e); }
 
+  // Check FFmpeg availability and notify renderer
+  const ffmpegPath = ffmpegInstaller.findFFmpegPath();
+  if (ffmpegPath) {
+    streamEngine.ffmpegPath = ffmpegPath;
+  }
+  // Renderer will receive ffmpeg status via 'ffmpeg:check' IPC on load
+
   startHeartbeat();
 
   // ─── Auto-Updater ────────────────────────────────────
@@ -434,6 +442,77 @@ ipcMain.on('updates:install', () => {
     isQuitting = true;
     autoUpdater.quitAndInstall(false, true);
   }
+});
+
+// ─── IPC: FFmpeg ─────────────────────────────────────────
+ipcMain.handle('ffmpeg:check', () => {
+  const ffmpegPath = ffmpegInstaller.findFFmpegPath();
+  return { installed: !!ffmpegPath, path: ffmpegPath };
+});
+
+ipcMain.handle('ffmpeg:install', async () => {
+  try {
+    const exePath = await ffmpegInstaller.downloadAndInstallFFmpeg((progress) => {
+      mainWindow?.webContents.send('ffmpeg:progress', progress);
+    });
+    mainWindow?.webContents.send('ffmpeg:installed', { success: true, path: exePath });
+    // Reload stream engine path now that FFmpeg is available
+    streamEngine.ffmpegPath = exePath;
+    return { success: true, path: exePath };
+  } catch (err) {
+    mainWindow?.webContents.send('ffmpeg:installed', { success: false, error: err.message });
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── IPC: Audio device listing (dshow) ───────────────────
+ipcMain.handle('sources:get-dshow-devices', async () => {
+  const { spawn } = require('child_process');
+  const ffmpegPath = ffmpegInstaller.findFFmpegPath() || 'ffmpeg';
+
+  return new Promise((resolve) => {
+    const devices = { audio: [], video: [] };
+
+    const proc = spawn(ffmpegPath, [
+      '-list_devices', 'true',
+      '-f', 'dshow',
+      '-i', 'dummy',
+    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+
+    let output = '';
+    proc.stderr.on('data', (d) => { output += d.toString(); });
+
+    proc.on('close', () => {
+      // Parse dshow device list from FFmpeg stderr output
+      const lines = output.split('\n');
+      let currentType = null;
+
+      for (const line of lines) {
+        if (line.includes('DirectShow audio devices')) { currentType = 'audio'; continue; }
+        if (line.includes('DirectShow video devices')) { currentType = 'video'; continue; }
+
+        const match = line.match(/"([^"]+)"\s*\(([^)]+)\)/);
+        if (match && currentType) {
+          devices[currentType].push({ name: match[1], type: match[2] });
+        } else {
+          // Alternative parse: lines like  "Microphone (Realtek Audio)"
+          const alt = line.match(/dshow.*?"([^"]+)"/);
+          if (alt && currentType) {
+            devices[currentType].push({ name: alt[1] });
+          }
+        }
+      }
+
+      resolve(devices);
+    });
+
+    proc.on('error', () => resolve({ audio: [], video: [] }));
+
+    // FFmpeg exits with error code for this command — that's expected
+    setTimeout(() => {
+      try { proc.kill(); } catch {}
+    }, 5000);
+  });
 });
 
 app.on('activate', () => {

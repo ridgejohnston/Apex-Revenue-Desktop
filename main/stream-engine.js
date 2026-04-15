@@ -8,25 +8,10 @@ const { EventEmitter } = require('events');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { app } = require('electron');
+const { findFFmpegPath } = require('./ffmpeg-installer');
 
 function findFFmpeg() {
-  // Check bundled FFmpeg in extraResources
-  const bundled = path.join(process.resourcesPath || '', 'ffmpeg', 'ffmpeg.exe');
-  if (fs.existsSync(bundled)) return bundled;
-
-  // Check common install paths on Windows
-  const paths = [
-    'C:\\ffmpeg\\bin\\ffmpeg.exe',
-    'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
-    path.join(app.getPath('userData'), 'ffmpeg', 'ffmpeg.exe'),
-  ];
-  for (const p of paths) {
-    if (fs.existsSync(p)) return p;
-  }
-
-  // Fall back to PATH
-  return 'ffmpeg';
+  return findFFmpegPath() || 'ffmpeg';
 }
 
 class StreamEngine extends EventEmitter {
@@ -71,9 +56,10 @@ class StreamEngine extends EventEmitter {
       '-video_size', `${resolution.width}x${resolution.height}`,
       '-i', 'desktop',
 
-      // Audio input: default audio device
-      '-f', 'dshow',
-      '-i', 'audio=virtual-audio-capturer',
+      // Audio input: use configured device, or skip audio if none set
+      ...(settings.audioDevice
+        ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
+        : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),
 
       // Video encoding
       '-c:v', videoEncoder,
@@ -161,8 +147,9 @@ class StreamEngine extends EventEmitter {
       '-framerate', String(fps),
       '-video_size', `${resolution.width}x${resolution.height}`,
       '-i', 'desktop',
-      '-f', 'dshow',
-      '-i', 'audio=virtual-audio-capturer',
+      ...(settings.audioDevice
+        ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
+        : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),
       '-c:v', videoEncoder,
       '-preset', preset,
       '-crf', '18',

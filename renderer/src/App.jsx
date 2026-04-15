@@ -67,6 +67,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('obs'); // 'obs' | 'live' | 'fans'
   const [sidebarMode, setSidebarMode] = useState('scenes'); // 'scenes' | 'platforms'
   const [updateStatus, setUpdateStatus] = useState(null);
+  const [ffmpegStatus, setFfmpegStatus] = useState(null); // null | { installed, path }
+  const [ffmpegInstalling, setFfmpegInstalling] = useState(false);
+  const [ffmpegProgress, setFfmpegProgress] = useState(0);
   const audioRef = useRef(null);
 
   // ─── Initialize ────────────────────────────────────────
@@ -85,7 +88,21 @@ export default function App() {
       // Get stream status
       const status = await api.stream.getStatus();
       setStreamStatus(status);
+
+      // Check FFmpeg
+      const ffmpeg = await api.ffmpeg.check();
+      setFfmpegStatus(ffmpeg);
     })();
+
+    // FFmpeg events
+    api.ffmpeg.onProgress((p) => setFfmpegProgress(p.percent || 0));
+    api.ffmpeg.onInstalled((result) => {
+      setFfmpegInstalling(false);
+      setFfmpegProgress(0);
+      if (result.success) {
+        setFfmpegStatus({ installed: true, path: result.path });
+      }
+    });
 
     // Event listeners
     api.scenes.onUpdated((data) => {
@@ -148,18 +165,33 @@ export default function App() {
 
   // ─── Stream / Record ──────────────────────────────────
   const handleStartStream = useCallback(async () => {
-    try { await api.stream.start(); }
+    if (ffmpegStatus && !ffmpegStatus.installed) {
+      alert('FFmpeg is required for streaming. Please install it using the banner at the top.');
+      return;
+    }
+    try {
+      // Pass current obsSettings so stream-engine gets the config
+      const settings = await api.store.get('obsSettings');
+      await api.stream.start(settings);
+    }
     catch (e) { console.error('Stream start error:', e); }
-  }, []);
+  }, [ffmpegStatus]);
 
   const handleStopStream = useCallback(async () => {
     await api.stream.stop();
   }, []);
 
   const handleStartRecord = useCallback(async () => {
-    try { await api.record.start(); }
+    if (ffmpegStatus && !ffmpegStatus.installed) {
+      alert('FFmpeg is required for recording. Please install it using the banner at the top.');
+      return;
+    }
+    try {
+      const settings = await api.store.get('obsSettings');
+      await api.record.start(settings);
+    }
     catch (e) { console.error('Record start error:', e); }
-  }, []);
+  }, [ffmpegStatus]);
 
   const handleStopRecord = useCallback(async () => {
     await api.record.stop();
@@ -169,6 +201,13 @@ export default function App() {
     if (streamStatus.virtualCam) await api.virtualCam.stop();
     else await api.virtualCam.start();
   }, [streamStatus.virtualCam]);
+
+  // ─── FFmpeg Install ───────────────────────────────────
+  const handleInstallFFmpeg = useCallback(async () => {
+    setFfmpegInstalling(true);
+    setFfmpegProgress(0);
+    await api.ffmpeg.install();
+  }, []);
 
   // ─── Auth ─────────────────────────────────────────────
   const handleSignIn = useCallback(async (email, password) => {
@@ -193,6 +232,44 @@ export default function App() {
     <div className="flex-col" style={{ width: '100%', height: '100%' }}>
       {/* Hidden audio player for Polly */}
       <audio ref={audioRef} style={{ display: 'none' }} />
+
+      {/* FFmpeg Install Banner */}
+      {ffmpegStatus && !ffmpegStatus.installed && (
+        <div style={{
+          background: '#1e1b4b', borderBottom: '1px solid #4f46e5',
+          padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 10,
+          fontSize: 11, color: '#c7d2fe', flexShrink: 0,
+        }}>
+          <span style={{ fontSize: 14 }}>⚠️</span>
+          <span style={{ flex: 1 }}>
+            <strong style={{ color: '#fff' }}>FFmpeg not installed</strong> — required for streaming &amp; recording.
+          </span>
+          {ffmpegInstalling ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{
+                width: 120, height: 6, background: '#312e81', borderRadius: 3, overflow: 'hidden',
+              }}>
+                <div style={{
+                  width: `${ffmpegProgress}%`, height: '100%',
+                  background: '#6366f1', transition: 'width 0.3s',
+                }} />
+              </div>
+              <span style={{ color: '#a5b4fc', fontSize: 10 }}>{ffmpegProgress}%</span>
+            </div>
+          ) : (
+            <button
+              onClick={handleInstallFFmpeg}
+              style={{
+                padding: '4px 12px', background: '#6366f1', color: '#fff',
+                border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11,
+                fontWeight: 600,
+              }}
+            >
+              Install FFmpeg
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Titlebar */}
       <Titlebar

@@ -85,9 +85,23 @@ export default function RightPanel({
 // ─── OBS Properties Sub-panel ───────────────────────────
 function OBSProperties() {
   const [settings, setSettings] = useState(null);
+  const [audioInputs, setAudioInputs] = useState([]);
+  const [dshowAudio, setDshowAudio] = useState([]);
 
   useEffect(() => {
     window.electronAPI.store.get('obsSettings').then(setSettings);
+
+    // Get browser-level audio input devices
+    if (navigator.mediaDevices?.enumerateDevices) {
+      navigator.mediaDevices.enumerateDevices().then((devices) => {
+        setAudioInputs(devices.filter((d) => d.kind === 'audioinput'));
+      }).catch(() => {});
+    }
+
+    // Get dshow device names from FFmpeg (used for actual streaming)
+    window.electronAPI.sources.getDshowDevices().then((devs) => {
+      if (devs?.audio?.length) setDshowAudio(devs.audio);
+    }).catch(() => {});
   }, []);
 
   if (!settings) return <div style={{ padding: 12, color: 'var(--text-dim)', fontSize: 11 }}>Loading...</div>;
@@ -191,6 +205,36 @@ function OBSProperties() {
       {/* Audio */}
       <div>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>AUDIO</div>
+
+        <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>Audio Device</label>
+        {dshowAudio.length > 0 ? (
+          <select
+            className="input" style={{ width: '100%', marginBottom: 4 }}
+            value={settings.audioDevice || ''}
+            onChange={(e) => update('audioDevice', e.target.value)}
+          >
+            <option value="">None (silent audio)</option>
+            {dshowAudio.map((d) => (
+              <option key={d.name} value={d.name}>{d.name}</option>
+            ))}
+          </select>
+        ) : audioInputs.length > 0 ? (
+          <select
+            className="input" style={{ width: '100%', marginBottom: 4 }}
+            value={settings.audioDevice || ''}
+            onChange={(e) => update('audioDevice', e.target.value)}
+          >
+            <option value="">None (silent audio)</option>
+            {audioInputs.map((d) => (
+              <option key={d.deviceId} value={d.label}>{d.label || 'Microphone'}</option>
+            ))}
+          </select>
+        ) : (
+          <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 4 }}>
+            No audio devices detected
+          </div>
+        )}
+
         <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>Audio Bitrate (kbps)</label>
         <select
           className="input" style={{ width: '100%' }}

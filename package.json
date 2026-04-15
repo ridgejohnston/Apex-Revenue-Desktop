@@ -103,7 +103,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Apex Revenue",
-      "differentialPackage": false
+      "differentialPackage": false,
+      "include": "build-resources/installer.nsh"
     },
     "publish": [
       {
