@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 
 const SOURCE_TYPE_ICONS = {
   webcam: '📷', screen_capture: '🖥️', window_capture: '🪟', game_capture: '🎮',
@@ -18,7 +18,7 @@ export default function Sidebar({
   const [editName, setEditName] = useState('');
   const [collapsedCategories, setCollapsedCategories] = useState({});
 
-  const platforms = window.electronAPI.getPlatforms();
+  const platforms = useMemo(() => window.electronAPI?.getPlatforms() ?? {}, []);
 
   const toggleCategory = (cat) => {
     setCollapsedCategories((prev) => ({ ...prev, [cat]: !prev[cat] }));

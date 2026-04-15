@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 
 export default function RightPanel({
   activeTab, liveData, streamStatus, platform, user,
@@ -24,7 +24,7 @@ export default function RightPanel({
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
-  const whaleTiers = window.electronAPI.getWhaleTiers();
+  const whaleTiers = useMemo(() => window.electronAPI?.getWhaleTiers() ?? [], []);
 
   return (
     <div

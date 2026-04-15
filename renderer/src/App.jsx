@@ -10,6 +10,48 @@ import AddSourceModal from './components/AddSourceModal';
 
 const api = window.electronAPI;
 
+// ─── Error Boundary ────────────────────────────────────────
+export class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          height: '100vh', background: '#0a0a0f', color: '#e0e0e0', padding: 32, fontFamily: 'monospace',
+        }}>
+          <div style={{ fontSize: 32, marginBottom: 16 }}>⚡</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: '#f87171', marginBottom: 8 }}>Apex Revenue encountered an error</div>
+          <div style={{
+            fontSize: 11, color: '#9ca3af', background: '#1a1a2e', padding: 16, borderRadius: 6,
+            maxWidth: 600, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+          }}>
+            {this.state.error?.message}
+            {'\n\n'}
+            {this.state.error?.stack}
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              marginTop: 20, padding: '8px 20px', background: '#6366f1', color: '#fff',
+              border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12,
+            }}
+          >
+            Reload App
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   // ─── App State ─────────────────────────────────────────
   const [scenes, setScenes] = useState([]);
