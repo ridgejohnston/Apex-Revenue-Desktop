@@ -545,12 +545,12 @@ function AIPanel({ user, onAuthClick, liveData, aiPrompt, onDismissPrompt }) {
   };
 
   const TRIGGERS = [
-    { key: 'deadAir',      label: 'Dead Air',       icon: '😶' },
-    { key: 'whaleTip',     label: 'Whale Tip',       icon: '🐋' },
-    { key: 'hvReturnee',   label: 'HV Returnee',     icon: '🔁' },
-    { key: 'lowTippers',   label: 'Low Energy',      icon: '📉' },
-    { key: 'goalClose',    label: 'Goal Close',      icon: '🎯' },
-    { key: 'anchor',       label: 'Anchor Fan',      icon: '⚓' },
+    { key: 'deadAir',    label: 'Dead Air',    icon: '😶', desc: 'Silence on stream — prompt viewers to tip or interact' },
+    { key: 'whaleTip',   label: 'Whale Tip',   icon: '🐋', desc: 'Big tipper just tipped — acknowledge and reward them' },
+    { key: 'hvReturnee', label: 'HV Returnee', icon: '🔁', desc: 'High-value fan returned — welcome them back personally' },
+    { key: 'lowTippers', label: 'Low Energy',  icon: '📉', desc: 'Tip rate dropping — re-engage the room with a push' },
+    { key: 'goalClose',  label: 'Goal Close',  icon: '🎯', desc: 'Near the tip goal — rally viewers to push you over' },
+    { key: 'anchor',     label: 'Anchor Fan',  icon: '⚓', desc: 'Top fan present — spotlight them to drive more tips' },
   ];
 
   if (!user) {
@@ -595,16 +595,25 @@ function AIPanel({ user, onAuthClick, liveData, aiPrompt, onDismissPrompt }) {
       <div>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>FIRE TRIGGER</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-          {TRIGGERS.map(({ key, label, icon }) => (
+          {TRIGGERS.map(({ key, label, icon, desc }) => (
             <button
               key={key}
               className="btn btn-sm"
               onClick={() => fire(key)}
               disabled={!!firing}
-              style={{ fontSize: 10, justifyContent: 'flex-start', gap: 5, opacity: firing && firing !== key ? 0.5 : 1 }}
+              style={{
+                fontSize: 10, flexDirection: 'column', alignItems: 'flex-start',
+                gap: 2, padding: '6px 8px', height: 'auto',
+                opacity: firing && firing !== key ? 0.5 : 1,
+              }}
             >
-              <span>{icon}</span>
-              {firing === key ? '...' : label}
+              <span style={{ display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}>
+                <span>{icon}</span>
+                {firing === key ? '...' : label}
+              </span>
+              <span style={{ fontSize: 8, color: 'var(--text-dim)', fontWeight: 400, lineHeight: 1.4, textAlign: 'left', whiteSpace: 'normal' }}>
+                {desc}
+              </span>
             </button>
           ))}
         </div>
