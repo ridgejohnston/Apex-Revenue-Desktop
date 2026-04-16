@@ -8,7 +8,7 @@ module.exports = {
 
   // Cognito
   COGNITO_USER_POOL_ID: 'us-east-1_EjYUEgmKm',
-  COGNITO_CLIENT_ID: '5t0a3hr1kl2rvs2sksmcukv0gk',
+  COGNITO_CLIENT_ID: '5f93lsurdb1lmcg8egasdcab2j',
 
   // API Gateway
   API_ENDPOINT: 'https://7g6qsxoos3.execute-api.us-east-1.amazonaws.com/prod',
