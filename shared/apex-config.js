@@ -5,7 +5,7 @@
 module.exports = {
   APP_NAME: 'Apex Revenue',
   EXTENSION_ID: 'desktop',
-  VERSION: '3.0.4',
+  VERSION: '3.0.5',
   DEFAULT_PLATFORMS: {
     'Live Cams': [
       { name: 'Chaturbate',  url: 'https://chaturbate.com/',       tracked: true,  icon: '🔥' },

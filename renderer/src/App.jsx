@@ -64,7 +64,7 @@ export default function App() {
   const [showAuth, setShowAuth] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAddSource, setShowAddSource] = useState(false);
-  const [activeTab, setActiveTab] = useState('obs'); // 'obs' | 'live' | 'fans'
+  const [activeTab, setActiveTab] = useState('obs'); // 'obs' | 'live' | 'fans' | 'ai'
   const [sidebarMode, setSidebarMode] = useState('scenes'); // 'scenes' | 'platforms'
   const [updateStatus, setUpdateStatus] = useState(null);
   const [ffmpegStatus, setFfmpegStatus] = useState(null); // null | { installed, path }

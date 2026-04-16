@@ -39,12 +39,13 @@ export default function RightPanel({
       {/* Panel Header */}
       <div className="section-header">
         <span>
-          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : '👥 Fan Leaderboard'}
+          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : '🤖 AI Prompt Engine'}
         </span>
       </div>
 
       <div className="flex-col flex-1" style={{ overflow: 'auto', padding: 8 }}>
         {activeTab === 'obs' && <OBSProperties />}
+        {activeTab === 'ai' && <AIPanel user={user} onAuthClick={onAuthClick} liveData={liveData} aiPrompt={aiPrompt} onDismissPrompt={onDismissPrompt} />}
         {activeTab === 'live' && (
           <LivePanel
             liveData={liveData}
@@ -501,4 +502,158 @@ function getTier(total, tiers) {
   if (total >= tiers.TIER_2.min) return tiers.TIER_2;
   if (total >= tiers.TIER_3.min) return tiers.TIER_3;
   return tiers.TIER_4;
+}
+
+// ─── AI Prompt Engine Panel ──────────────────────────────
+function AIPanel({ user, onAuthClick, liveData, aiPrompt, onDismissPrompt }) {
+  const [history, setHistory] = useState([]);
+  const [firing, setFiring] = useState(null);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [promptMode, setPromptMode] = useState('bedrock');
+
+  useEffect(() => {
+    window.electronAPI.store.get('awsVoiceEnabled').then((v) => setVoiceEnabled(v ?? true));
+    window.electronAPI.store.get('awsPromptMode').then((m) => setPromptMode(m ?? 'bedrock'));
+  }, []);
+
+  // Add incoming prompts to history
+  useEffect(() => {
+    if (aiPrompt?.prompt) {
+      setHistory((prev) => [
+        { trigger: aiPrompt.trigger, prompt: aiPrompt.prompt, ts: Date.now() },
+        ...prev.slice(0, 19),
+      ]);
+    }
+  }, [aiPrompt]);
+
+  const fire = async (trigger) => {
+    setFiring(trigger);
+    const ctx = liveData ? {
+      viewers: liveData.viewers,
+      tipsToday: liveData.tipsToday,
+      topFan: liveData.fans?.[0]?.username,
+    } : {};
+    try {
+      await window.electronAPI.aws.bedrockPrompt(trigger, ctx);
+    } catch {}
+    setFiring(null);
+  };
+
+  const toggleVoice = (val) => {
+    setVoiceEnabled(val);
+    window.electronAPI.store.set('awsVoiceEnabled', val);
+  };
+
+  const TRIGGERS = [
+    { key: 'deadAir',      label: 'Dead Air',       icon: '😶' },
+    { key: 'whaleTip',     label: 'Whale Tip',       icon: '🐋' },
+    { key: 'hvReturnee',   label: 'HV Returnee',     icon: '🔁' },
+    { key: 'lowTippers',   label: 'Low Energy',      icon: '📉' },
+    { key: 'goalClose',    label: 'Goal Close',      icon: '🎯' },
+    { key: 'anchor',       label: 'Anchor Fan',      icon: '⚓' },
+  ];
+
+  if (!user) {
+    return (
+      <div style={{ padding: 16, textAlign: 'center' }}>
+        <div style={{ fontSize: 24, marginBottom: 8 }}>🔒</div>
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>Sign in to use AI prompts</div>
+        <button className="btn btn-accent" onClick={onAuthClick}>Sign In</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-col gap-3">
+
+      {/* Current prompt */}
+      <div>
+        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>CURRENT PROMPT</div>
+        {aiPrompt?.prompt ? (
+          <div style={{
+            background: 'var(--bg-tertiary)', border: '1px solid var(--accent)', borderRadius: 6,
+            padding: '8px 10px', fontSize: 11, color: 'var(--text-primary)', lineHeight: 1.5,
+            position: 'relative',
+          }}>
+            <span style={{ fontSize: 9, color: 'var(--accent)', fontWeight: 600, display: 'block', marginBottom: 4, textTransform: 'uppercase' }}>
+              {aiPrompt.trigger}
+            </span>
+            {aiPrompt.prompt}
+            <button
+              onClick={onDismissPrompt}
+              style={{ position: 'absolute', top: 4, right: 6, background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 12 }}
+            >✕</button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '6px 0' }}>
+            No active prompt — fire a trigger below.
+          </div>
+        )}
+      </div>
+
+      {/* Manual triggers */}
+      <div>
+        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>FIRE TRIGGER</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+          {TRIGGERS.map(({ key, label, icon }) => (
+            <button
+              key={key}
+              className="btn btn-sm"
+              onClick={() => fire(key)}
+              disabled={!!firing}
+              style={{ fontSize: 10, justifyContent: 'flex-start', gap: 5, opacity: firing && firing !== key ? 0.5 : 1 }}
+            >
+              <span>{icon}</span>
+              {firing === key ? '...' : label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Settings */}
+      <div>
+        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>SETTINGS</div>
+        <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Polly Voice Read-Aloud</span>
+          <button
+            className={`btn btn-sm ${voiceEnabled ? 'btn-accent' : ''}`}
+            style={{ fontSize: 9, padding: '2px 8px' }}
+            onClick={() => toggleVoice(!voiceEnabled)}
+          >
+            {voiceEnabled ? 'ON' : 'OFF'}
+          </button>
+        </div>
+        <div>
+          <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>Prompt Engine</label>
+          <select
+            className="input" style={{ width: '100%', fontSize: 10 }}
+            value={promptMode}
+            onChange={(e) => { setPromptMode(e.target.value); window.electronAPI.store.set('awsPromptMode', e.target.value); }}
+          >
+            <option value="bedrock">AWS Bedrock (Claude Haiku)</option>
+            <option value="local">Rule-based (offline)</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Prompt history */}
+      {history.length > 0 && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>HISTORY</div>
+          <div className="flex-col" style={{ gap: 4, maxHeight: 180, overflow: 'auto' }}>
+            {history.map((h) => (
+              <div key={h.ts} style={{
+                background: 'var(--bg-tertiary)', borderRadius: 4, padding: '5px 8px',
+                fontSize: 10, color: 'var(--text-secondary)', lineHeight: 1.5,
+                borderLeft: '2px solid var(--accent)',
+              }}>
+                <span style={{ fontSize: 8, color: 'var(--accent)', fontWeight: 600, textTransform: 'uppercase', marginRight: 4 }}>{h.trigger}</span>
+                {h.prompt}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
