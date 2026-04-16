@@ -142,16 +142,94 @@ export default function App() {
   }, []);
 
   // ─── Source Actions ────────────────────────────────────
+  const sourceStreamsRef = useRef({});   // sourceId → MediaStream (live, not React state)
+  const [sourceStreams, setSourceStreams] = useState({}); // mirrors ref for re-renders
+
+  // Start live capture for a source immediately after it is added
+  const activateSource = useCallback(async (source) => {
+    const { id, type, properties } = source;
+    let stream = null;
+    try {
+      if (type === 'webcam') {
+        const constraints = {
+          video: properties.deviceId
+            ? { deviceId: { exact: properties.deviceId }, width: 1920, height: 1080 }
+            : { width: 1920, height: 1080 },
+          audio: false,
+        };
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      } else if (type === 'screen_capture' || type === 'window_capture' || type === 'game_capture') {
+        // Electron: use desktopCapturer source id via chromeMediaSource constraint
+        const chromeSourceId = properties.sourceId
+          ? await api.sources.getDesktopStreamId(properties.sourceId)
+          : null;
+
+        if (chromeSourceId) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              mandatory: {
+                chromeMediaSource: 'desktop',
+                chromeMediaSourceId: chromeSourceId,
+              },
+            },
+          });
+        } else {
+          // Fallback: let the user pick via getDisplayMedia
+          stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        }
+
+      } else if (type === 'audio_input') {
+        const constraints = {
+          audio: properties.deviceId
+            ? { deviceId: { exact: properties.deviceId } }
+            : true,
+          video: false,
+        };
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      } else if (type === 'audio_output') {
+        // Audio output monitoring — capture desktop audio via getDisplayMedia
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: false, audio: true });
+      }
+    } catch (err) {
+      console.warn(`[Apex] activateSource(${type}) failed:`, err.message);
+    }
+
+    if (stream) {
+      sourceStreamsRef.current[id] = stream;
+      setSourceStreams((prev) => ({ ...prev, [id]: stream }));
+    }
+  }, []);
+
+  // Stop capture and release device when a source is removed
+  const deactivateSource = useCallback((sourceId) => {
+    const stream = sourceStreamsRef.current[sourceId];
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      delete sourceStreamsRef.current[sourceId];
+      setSourceStreams((prev) => {
+        const next = { ...prev };
+        delete next[sourceId];
+        return next;
+      });
+    }
+  }, []);
+
   const handleAddSource = useCallback(async (sourceConfig) => {
     if (!activeSceneId) return;
-    await api.sources.add(activeSceneId, sourceConfig);
+    const source = await api.sources.add(activeSceneId, sourceConfig);
     setShowAddSource(false);
-  }, [activeSceneId]);
+    // Auto-activate immediately after adding
+    if (source) activateSource(source);
+  }, [activeSceneId, activateSource]);
 
   const handleRemoveSource = useCallback(async (sourceId) => {
     if (!activeSceneId) return;
+    deactivateSource(sourceId);
     await api.sources.remove(activeSceneId, sourceId);
-  }, [activeSceneId]);
+  }, [activeSceneId, deactivateSource]);
 
   const handleToggleSourceVisible = useCallback(async (sourceId) => {
     if (!activeSceneId) return;
@@ -308,6 +386,7 @@ export default function App() {
           <PreviewCanvas
             scene={activeScene}
             streamStatus={streamStatus}
+            sourceStreams={sourceStreams}
           />
           <ControlsDock
             streamStatus={streamStatus}

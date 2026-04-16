@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getScreens: () => ipcRenderer.invoke('sources:get-screens'),
     getWindows: () => ipcRenderer.invoke('sources:get-windows'),
     getDshowDevices: () => ipcRenderer.invoke('sources:get-dshow-devices'),
+    getDesktopStreamId: (sourceId) => ipcRenderer.invoke('sources:get-desktop-stream-id', sourceId),
   },
 
   // ─── FFmpeg ───────────────────────────────────────────

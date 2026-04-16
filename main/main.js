@@ -173,6 +173,14 @@ ipcMain.handle('sources:get-windows', async () => {
   }));
 });
 
+// Returns the chromeMediaSourceId for a given desktopCapturer source id.
+// The renderer needs this to call getUserMedia with desktop capture constraints.
+ipcMain.handle('sources:get-desktop-stream-id', async (_, sourceId) => {
+  const all = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+  const match = all.find((s) => s.id === sourceId);
+  return match ? match.id : null;
+});
+
 // ─── Scene Management IPC ───────────────────────────────
 ipcMain.handle('scenes:get-all', () => sceneManager.getAll());
 ipcMain.handle('scenes:get-active', () => sceneManager.getActive());
@@ -344,6 +352,18 @@ function startHeartbeat() {
 
 // ─── App Lifecycle ──────────────────────────────────────
 app.whenReady().then(async () => {
+  // Auto-approve media permissions (camera, mic, screen) in the renderer.
+  // Without this, getUserMedia calls silently fail — the browser prompt
+  // never appears in a frameless Electron window.
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const allowed = ['media', 'display-capture', 'mediaKeySystem', 'geolocation'];
+    callback(allowed.includes(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
+    const allowed = ['media', 'display-capture', 'mediaKeySystem'];
+    return allowed.includes(permission);
+  });
+
   createMainWindow();
   createCamView();
   createTray();
