@@ -41,14 +41,14 @@ export default function ControlsDock({
     >
       {/* Tab Bar */}
       <div className="flex items-center" style={{ height: 28, borderBottom: '1px solid var(--border)', padding: '0 4px' }}>
-        {['obs', 'live', 'fans', 'ai'].map((tab) => (
+        {['obs', 'live', 'fans', 'ai', 'sync'].map((tab) => (
           <button
             key={tab}
             className={`btn btn-sm ${activeTab === tab ? 'btn-accent' : ''}`}
             style={{ borderRadius: 0, fontSize: 10, textTransform: 'uppercase' }}
             onClick={() => onTabChange(tab)}
           >
-            {tab === 'obs' ? '🎬 OBS' : tab === 'live' ? '📊 Live' : tab === 'fans' ? '👥 Fans' : '🤖 AI'}
+            {tab === 'obs' ? '🎬 OBS' : tab === 'live' ? '📊 Live' : tab === 'fans' ? '👥 Fans' : tab === 'ai' ? '🤖 AI' : '🔗 Sync'}
           </button>
         ))}
         <div className="flex-1" />

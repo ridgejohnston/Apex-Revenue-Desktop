@@ -39,13 +39,14 @@ export default function RightPanel({
       {/* Panel Header */}
       <div className="section-header">
         <span>
-          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : '🤖 AI Prompt Engine'}
+          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI Prompt Engine' : '🔗 Toy Sync'}
         </span>
       </div>
 
       <div className="flex-col flex-1" style={{ overflow: 'auto', padding: 8 }}>
         {activeTab === 'obs' && <OBSProperties />}
         {activeTab === 'ai' && <AIPanel user={user} onAuthClick={onAuthClick} liveData={liveData} aiPrompt={aiPrompt} onDismissPrompt={onDismissPrompt} />}
+        {activeTab === 'sync' && <SyncPanel />}
         {activeTab === 'live' && (
           <LivePanel
             liveData={liveData}
@@ -662,6 +663,265 @@ function AIPanel({ user, onAuthClick, liveData, aiPrompt, onDismissPrompt }) {
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Toy Sync Panel ──────────────────────────────────────
+const PLATFORMS = [
+  {
+    id: 'lovense',
+    name: 'Lovense',
+    icon: '💜',
+    desc: 'Connect via Lovense Connect app (local API)',
+    docsUrl: 'https://developer.lovense.com/',
+    fields: [{ key: 'apiToken', label: 'Lovense API Token', type: 'password', placeholder: 'From Lovense Connect → Settings' }],
+  },
+  {
+    id: 'buttplug',
+    name: 'Buttplug.io / Intiface',
+    icon: '🔌',
+    desc: 'Connect via Intiface Central websocket bridge',
+    docsUrl: 'https://intiface.com/',
+    fields: [{ key: 'wsUrl', label: 'Intiface Websocket URL', type: 'text', placeholder: 'ws://localhost:12345' }],
+  },
+  {
+    id: 'ohmibod',
+    name: 'OhMiBod',
+    icon: '🎵',
+    desc: 'Connect via OhMiBod Network API key',
+    docsUrl: 'https://www.ohmibod.com/network/',
+    fields: [{ key: 'apiKey', label: 'OhMiBod Network API Key', type: 'password', placeholder: 'From OhMiBod Network dashboard' }],
+  },
+  {
+    id: 'kiiroo',
+    name: 'Kiiroo / FeelConnect',
+    icon: '⚡',
+    desc: 'Connect via Kiiroo FeelConnect websocket',
+    docsUrl: 'https://kiiroo.com/',
+    fields: [{ key: 'wsUrl', label: 'FeelConnect Websocket URL', type: 'text', placeholder: 'ws://localhost:6969' }],
+  },
+];
+
+const TIP_LEVELS = [
+  { label: 'Low',    tokens: 10,  intensity: 20,  duration: 3,  color: '#60a5fa' },
+  { label: 'Medium', tokens: 25,  intensity: 50,  duration: 5,  color: '#a78bfa' },
+  { label: 'High',   tokens: 50,  intensity: 75,  duration: 8,  color: '#f59e0b' },
+  { label: 'Whale',  tokens: 100, intensity: 100, duration: 15, color: '#ef4444' },
+];
+
+function SyncPanel() {
+  const [connections, setConnections] = useState({}); // platformId → { enabled, fields, status }
+  const [tipLevels, setTipLevels] = useState(TIP_LEVELS);
+  const [syncEnabled, setSyncEnabled] = useState(false);
+  const [testPlatform, setTestPlatform] = useState(null);
+  const [expandedPlatform, setExpandedPlatform] = useState(null);
+
+  useEffect(() => {
+    window.electronAPI.store.get('toySyncConfig').then((cfg) => {
+      if (cfg) {
+        setConnections(cfg.connections || {});
+        setTipLevels(cfg.tipLevels || TIP_LEVELS);
+        setSyncEnabled(cfg.enabled || false);
+      }
+    });
+  }, []);
+
+  const save = (newConns, newLevels, newEnabled) => {
+    const cfg = {
+      connections: newConns ?? connections,
+      tipLevels: newLevels ?? tipLevels,
+      enabled: newEnabled ?? syncEnabled,
+    };
+    window.electronAPI.store.set('toySyncConfig', cfg);
+  };
+
+  const togglePlatform = (id, enabled) => {
+    const updated = { ...connections, [id]: { ...(connections[id] || {}), enabled } };
+    setConnections(updated);
+    save(updated, null, null);
+  };
+
+  const setField = (id, key, val) => {
+    const updated = { ...connections, [id]: { ...(connections[id] || {}), [key]: val } };
+    setConnections(updated);
+    save(updated, null, null);
+  };
+
+  const testVibrate = (id) => {
+    setTestPlatform(id);
+    setTimeout(() => setTestPlatform(null), 2000);
+    // Emit a PS_CMD-compatible test signal for connected toy bridges
+    const cmd = JSON.stringify({ action: 'vibrate', intensity: 50, duration: 2, source: id });
+    console.log(`[PS_CMD]${cmd}`);
+  };
+
+  const updateTipLevel = (idx, key, val) => {
+    const updated = tipLevels.map((l, i) => i === idx ? { ...l, [key]: val } : l);
+    setTipLevels(updated);
+    save(null, updated, null);
+  };
+
+  const anyEnabled = Object.values(connections).some((c) => c.enabled);
+
+  return (
+    <div className="flex-col gap-3">
+
+      {/* Master toggle */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '8px 10px', background: syncEnabled ? 'rgba(139,92,246,0.12)' : 'var(--bg-tertiary)',
+        border: `1px solid ${syncEnabled ? 'rgba(139,92,246,0.4)' : 'var(--border)'}`,
+        borderRadius: 8,
+      }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: syncEnabled ? '#a78bfa' : 'var(--text-secondary)' }}>
+            Tip-to-Toy Sync {syncEnabled ? '● ACTIVE' : '○ OFF'}
+          </div>
+          <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 2 }}>
+            Automatically vibrate connected toys on incoming tips
+          </div>
+        </div>
+        <button
+          className={`btn btn-sm ${syncEnabled ? 'btn-accent' : ''}`}
+          style={{ fontSize: 9, padding: '3px 10px', background: syncEnabled ? '#7c3aed' : undefined }}
+          onClick={() => { setSyncEnabled(!syncEnabled); save(null, null, !syncEnabled); }}
+        >
+          {syncEnabled ? 'ON' : 'OFF'}
+        </button>
+      </div>
+
+      {/* Platform connections */}
+      <div>
+        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>PLATFORMS</div>
+        <div className="flex-col" style={{ gap: 4 }}>
+          {PLATFORMS.map((p) => {
+            const conn = connections[p.id] || {};
+            const isExpanded = expandedPlatform === p.id;
+            const isTesting = testPlatform === p.id;
+
+            return (
+              <div key={p.id} style={{
+                background: 'var(--bg-tertiary)', borderRadius: 7,
+                border: `1px solid ${conn.enabled ? 'rgba(139,92,246,0.35)' : 'var(--border)'}`,
+                overflow: 'hidden',
+              }}>
+                {/* Platform header row */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px' }}>
+                  <span style={{ fontSize: 14 }}>{p.icon}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                    <div style={{ fontSize: 8, color: 'var(--text-dim)', marginTop: 1 }}>{p.desc}</div>
+                  </div>
+                  {conn.enabled && (
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => testVibrate(p.id)}
+                      style={{ fontSize: 8, padding: '2px 6px', color: isTesting ? '#4ade80' : undefined }}
+                      title="Send a test vibrate signal"
+                    >
+                      {isTesting ? '✓' : '⚡ Test'}
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setExpandedPlatform(isExpanded ? null : p.id)}
+                    style={{ fontSize: 9, padding: '2px 6px' }}
+                  >
+                    {isExpanded ? '▲' : '▼'}
+                  </button>
+                  <button
+                    className={`btn btn-sm ${conn.enabled ? 'btn-accent' : ''}`}
+                    style={{ fontSize: 9, padding: '2px 8px', background: conn.enabled ? '#7c3aed' : undefined }}
+                    onClick={() => togglePlatform(p.id, !conn.enabled)}
+                  >
+                    {conn.enabled ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+
+                {/* Expanded config */}
+                {isExpanded && (
+                  <div style={{ padding: '0 10px 10px', borderTop: '1px solid var(--border)' }}>
+                    {p.fields.map(({ key, label, type, placeholder }) => (
+                      <div key={key} style={{ marginTop: 8 }}>
+                        <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>{label}</label>
+                        <input
+                          className="input"
+                          type={type}
+                          style={{ width: '100%', marginTop: 2 }}
+                          placeholder={placeholder}
+                          value={conn[key] || ''}
+                          onChange={(e) => setField(p.id, key, e.target.value)}
+                        />
+                      </div>
+                    ))}
+                    <a
+                      href={p.docsUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ fontSize: 8, color: 'var(--accent)', textDecoration: 'none', display: 'block', marginTop: 6 }}
+                    >
+                      ↗ Setup docs
+                    </a>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Tip level mapping */}
+      <div>
+        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>TIP → VIBRATION MAPPING</div>
+        <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 8 }}>
+          Set intensity (0–100) and duration (seconds) per tip tier.
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+          {tipLevels.map((level, idx) => (
+            <div key={level.label} style={{
+              background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+              borderLeft: `3px solid ${level.color}`, borderRadius: 6, padding: '6px 8px',
+            }}>
+              <div style={{ fontSize: 10, fontWeight: 600, color: level.color, marginBottom: 5 }}>
+                {level.label} <span style={{ fontWeight: 400, color: 'var(--text-dim)' }}>≥{level.tokens}tk</span>
+              </div>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 3 }}>
+                <label style={{ fontSize: 8, color: 'var(--text-dim)', width: 52 }}>Intensity</label>
+                <input
+                  className="input" type="number" min={0} max={100}
+                  style={{ flex: 1, padding: '1px 4px', fontSize: 10 }}
+                  value={level.intensity}
+                  onChange={(e) => updateTipLevel(idx, 'intensity', Math.min(100, Math.max(0, parseInt(e.target.value) || 0)))}
+                />
+                <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>%</span>
+              </div>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <label style={{ fontSize: 8, color: 'var(--text-dim)', width: 52 }}>Duration</label>
+                <input
+                  className="input" type="number" min={1} max={60}
+                  style={{ flex: 1, padding: '1px 4px', fontSize: 10 }}
+                  value={level.duration}
+                  onChange={(e) => updateTipLevel(idx, 'duration', Math.min(60, Math.max(1, parseInt(e.target.value) || 1)))}
+                />
+                <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>s</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Status */}
+      {syncEnabled && !anyEnabled && (
+        <div style={{ fontSize: 9, color: '#fbbf24', padding: '6px 10px', background: 'rgba(251,191,36,0.08)', borderRadius: 6, border: '1px solid rgba(251,191,36,0.2)' }}>
+          ⚠ Sync is ON but no platforms are enabled. Toggle at least one platform above.
+        </div>
+      )}
+      {syncEnabled && anyEnabled && (
+        <div style={{ fontSize: 9, color: '#4ade80', padding: '6px 10px', background: 'rgba(74,222,128,0.08)', borderRadius: 6, border: '1px solid rgba(74,222,128,0.2)' }}>
+          ✓ Sync active — incoming tips will trigger connected toys automatically.
         </div>
       )}
     </div>

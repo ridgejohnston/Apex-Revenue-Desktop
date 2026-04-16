@@ -113,6 +113,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onStatus: (cb) => ipcRenderer.on('updates:status', (_, data) => cb(data)),
   },
 
+  // ─── Toy Sync ────────────────────────────────────────
+  sync: {
+    getState:           ()              => ipcRenderer.invoke('sync:get-state'),
+    lovenseConnect:     (token)         => ipcRenderer.invoke('sync:lovense-connect', token),
+    lovenseDisconnect:  ()              => ipcRenderer.invoke('sync:lovense-disconnect'),
+    buttplugConnect:    (wsUrl)         => ipcRenderer.invoke('sync:buttplug-connect', wsUrl),
+    buttplugDisconnect: ()              => ipcRenderer.invoke('sync:buttplug-disconnect'),
+    vibrate:            (intensity, dur) => ipcRenderer.invoke('sync:vibrate', intensity, dur),
+    saveTipMap:         (tipMap)        => ipcRenderer.invoke('sync:save-tip-map', tipMap),
+    onState:            (cb)            => ipcRenderer.on('sync:state', (_, data) => cb(data)),
+  },
+
   // ─── App Info ────────────────────────────────────────
   getVersion: () => require('../shared/apex-config').VERSION,
   getPlatforms: () => require('../shared/apex-config').DEFAULT_PLATFORMS,

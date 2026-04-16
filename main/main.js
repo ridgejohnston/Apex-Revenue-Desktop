@@ -562,6 +562,233 @@ ipcMain.handle('sources:get-dshow-devices', async () => {
   });
 });
 
+// ─── Toy Sync Engine ────────────────────────────────────
+// Manages Lovense Connect API, Buttplug.io/Intiface WebSocket,
+// and tip-to-vibration mapping for all connected toys.
+
+const http  = require('http');
+const https = require('https');
+
+let toyState = {
+  lovense:  { connected: false, apiToken: '', toys: [], wsUrl: '' },
+  buttplug: { connected: false, wsUrl: 'ws://localhost:12345', toys: [], ws: null },
+  tipMap:   { enabled: true, tiers: [
+    { minTokens: 1,   intensity: 20, duration: 2 },
+    { minTokens: 10,  intensity: 40, duration: 4 },
+    { minTokens: 25,  intensity: 60, duration: 6 },
+    { minTokens: 50,  intensity: 80, duration: 8 },
+    { minTokens: 100, intensity: 100, duration: 10 },
+  ]},
+};
+
+// ── Lovense Connect HTTP helper ──────────────────────────
+function lovenseRequest(path, params = {}) {
+  return new Promise((resolve, reject) => {
+    const qs = new URLSearchParams({ token: toyState.lovense.apiToken, ...params }).toString();
+    const url = `https://api.lovense-api.com/api/lan${path}?${qs}`;
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(data); } });
+    }).on('error', reject);
+  });
+}
+
+// ── Buttplug WebSocket connect ───────────────────────────
+function connectButtplug(wsUrl) {
+  const { WebSocket } = require('ws');
+  if (toyState.buttplug.ws) {
+    try { toyState.buttplug.ws.close(); } catch {}
+    toyState.buttplug.ws = null;
+  }
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    const timeout = setTimeout(() => { ws.close(); reject(new Error('Timeout')); }, 6000);
+
+    ws.on('open', () => {
+      // Buttplug v3 handshake
+      ws.send(JSON.stringify([{ RequestServerInfo: { Id: 1, ClientName: 'Apex Revenue', MessageVersion: 3 } }]));
+    });
+
+    ws.on('message', (raw) => {
+      try {
+        const msgs = JSON.parse(raw.toString());
+        for (const msg of msgs) {
+          if (msg.ServerInfo) {
+            clearTimeout(timeout);
+            // Start scanning
+            ws.send(JSON.stringify([{ StartScanning: { Id: 2 } }]));
+            toyState.buttplug.ws = ws;
+            toyState.buttplug.connected = true;
+            resolve({ ok: true });
+          }
+          if (msg.DeviceAdded) {
+            const d = msg.DeviceAdded;
+            const existing = toyState.buttplug.toys.find((t) => t.DeviceIndex === d.DeviceIndex);
+            if (!existing) {
+              toyState.buttplug.toys.push({ DeviceIndex: d.DeviceIndex, DeviceName: d.DeviceName });
+              mainWindow?.webContents.send('sync:state', getSyncState());
+            }
+          }
+          if (msg.DeviceRemoved) {
+            toyState.buttplug.toys = toyState.buttplug.toys.filter((t) => t.DeviceIndex !== msg.DeviceRemoved.DeviceIndex);
+            mainWindow?.webContents.send('sync:state', getSyncState());
+          }
+        }
+      } catch {}
+    });
+
+    ws.on('error', (err) => { clearTimeout(timeout); reject(err); });
+    ws.on('close', () => {
+      toyState.buttplug.connected = false;
+      toyState.buttplug.toys = [];
+      toyState.buttplug.ws = null;
+      mainWindow?.webContents.send('sync:state', getSyncState());
+    });
+  });
+}
+
+function getSyncState() {
+  return {
+    lovense:  { connected: toyState.lovense.connected, toys: toyState.lovense.toys, apiToken: toyState.lovense.apiToken ? '••••••••' : '' },
+    buttplug: { connected: toyState.buttplug.connected, toys: toyState.buttplug.toys, wsUrl: toyState.buttplug.wsUrl },
+    tipMap:   toyState.tipMap,
+  };
+}
+
+// ── Vibrate all connected toys ───────────────────────────
+async function vibrateAll(intensity, durationSec) {
+  // Lovense
+  if (toyState.lovense.connected && toyState.lovense.apiToken) {
+    try {
+      await lovenseRequest('/command', {
+        command: 'Vibrate',
+        timeSec: durationSec,
+        loopRunningSec: 0,
+        loopPauseSec: 0,
+        toy: '',  // empty = all toys
+        apiVer: 1,
+        v: Math.round(intensity / 10),  // Lovense scale 0-20
+      });
+    } catch (e) { console.warn('[Sync] Lovense vibrate error:', e.message); }
+  }
+
+  // Buttplug
+  if (toyState.buttplug.connected && toyState.buttplug.ws && toyState.buttplug.toys.length) {
+    const strength = Math.min(intensity / 100, 1.0);
+    const cmds = toyState.buttplug.toys.map((toy, i) => ({
+      LinearCmd: {
+        Id: 100 + i,
+        DeviceIndex: toy.DeviceIndex,
+        Vectors: [{ Index: 0, Duration: durationSec * 1000, Position: strength }],
+      },
+    }));
+    // Use VibrateCmd for vibration toys
+    const vibCmds = toyState.buttplug.toys.map((toy, i) => ({
+      VibrateCmd: {
+        Id: 200 + i,
+        DeviceIndex: toy.DeviceIndex,
+        Speeds: [{ Index: 0, Speed: strength }],
+      },
+    }));
+    try {
+      toyState.buttplug.ws.send(JSON.stringify(vibCmds));
+      setTimeout(() => {
+        if (toyState.buttplug.ws) {
+          const stopCmds = toyState.buttplug.toys.map((toy, i) => ({
+            VibrateCmd: { Id: 300 + i, DeviceIndex: toy.DeviceIndex, Speeds: [{ Index: 0, Speed: 0 }] },
+          }));
+          toyState.buttplug.ws.send(JSON.stringify(stopCmds));
+        }
+      }, durationSec * 1000);
+    } catch (e) { console.warn('[Sync] Buttplug vibrate error:', e.message); }
+  }
+}
+
+// ── IPC: Sync handlers ───────────────────────────────────
+ipcMain.handle('sync:get-state', () => getSyncState());
+
+ipcMain.handle('sync:lovense-connect', async (_, apiToken) => {
+  toyState.lovense.apiToken = apiToken;
+  try {
+    const res = await lovenseRequest('/getToys');
+    if (res.code === 200 || res.result) {
+      toyState.lovense.connected = true;
+      toyState.lovense.toys = res.data ? Object.values(res.data) : [];
+      store.set('lovenseApiToken', apiToken);
+      mainWindow?.webContents.send('sync:state', getSyncState());
+      return { ok: true, toys: toyState.lovense.toys };
+    }
+    toyState.lovense.connected = false;
+    return { ok: false, error: res.message || 'Invalid token' };
+  } catch (e) {
+    toyState.lovense.connected = false;
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('sync:lovense-disconnect', () => {
+  toyState.lovense = { connected: false, apiToken: '', toys: [], wsUrl: '' };
+  store.set('lovenseApiToken', '');
+  mainWindow?.webContents.send('sync:state', getSyncState());
+  return { ok: true };
+});
+
+ipcMain.handle('sync:buttplug-connect', async (_, wsUrl) => {
+  toyState.buttplug.wsUrl = wsUrl || 'ws://localhost:12345';
+  try {
+    await connectButtplug(toyState.buttplug.wsUrl);
+    store.set('buttplugWsUrl', toyState.buttplug.wsUrl);
+    mainWindow?.webContents.send('sync:state', getSyncState());
+    return { ok: true };
+  } catch (e) {
+    toyState.buttplug.connected = false;
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('sync:buttplug-disconnect', () => {
+  if (toyState.buttplug.ws) {
+    try { toyState.buttplug.ws.close(); } catch {}
+    toyState.buttplug.ws = null;
+  }
+  toyState.buttplug.connected = false;
+  toyState.buttplug.toys = [];
+  mainWindow?.webContents.send('sync:state', getSyncState());
+  return { ok: true };
+});
+
+ipcMain.handle('sync:vibrate', async (_, intensity, durationSec) => {
+  await vibrateAll(intensity, durationSec);
+  return { ok: true };
+});
+
+ipcMain.handle('sync:save-tip-map', (_, tipMap) => {
+  toyState.tipMap = tipMap;
+  store.set('toyTipMap', tipMap);
+  return { ok: true };
+});
+
+// Auto-fire vibration on tips when enabled
+const _origOnLiveUpdate = ipcMain.listeners('cam:live-update')[0];
+ipcMain.on('cam:tip-vibrate', async (_, tipAmount) => {
+  if (!toyState.tipMap.enabled) return;
+  const tiers = [...toyState.tipMap.tiers].sort((a, b) => b.minTokens - a.minTokens);
+  const tier = tiers.find((t) => tipAmount >= t.minTokens);
+  if (tier) await vibrateAll(tier.intensity, tier.duration);
+});
+
+// Restore saved config
+app.whenReady().then(() => {}).on('ready-pre-init', () => {});
+(function restoreSyncConfig() {
+  const savedToken = store?.get?.('lovenseApiToken');
+  const savedWsUrl = store?.get?.('buttplugWsUrl');
+  const savedTipMap = store?.get?.('toyTipMap');
+  if (savedToken) toyState.lovense.apiToken = savedToken;
+  if (savedWsUrl) toyState.buttplug.wsUrl = savedWsUrl;
+  if (savedTipMap) toyState.tipMap = savedTipMap;
+})();
+
 app.on('activate', () => {
   if (!mainWindow) createMainWindow();
   else mainWindow.show();
