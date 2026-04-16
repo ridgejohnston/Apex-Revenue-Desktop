@@ -545,12 +545,13 @@ function AIPanel({ user, onAuthClick, liveData, aiPrompt, onDismissPrompt }) {
   };
 
   const TRIGGERS = [
-    { key: 'deadAir',    label: 'Dead Air',    icon: '😶', desc: 'Silence on stream — prompt viewers to tip or interact' },
-    { key: 'whaleTip',   label: 'Whale Tip',   icon: '🐋', desc: 'Big tipper just tipped — acknowledge and reward them' },
-    { key: 'hvReturnee', label: 'HV Returnee', icon: '🔁', desc: 'High-value fan returned — welcome them back personally' },
-    { key: 'lowTippers', label: 'Low Energy',  icon: '📉', desc: 'Tip rate dropping — re-engage the room with a push' },
-    { key: 'goalClose',  label: 'Goal Close',  icon: '🎯', desc: 'Near the tip goal — rally viewers to push you over' },
-    { key: 'anchor',     label: 'Anchor Fan',  icon: '⚓', desc: 'Top fan present — spotlight them to drive more tips' },
+    { key: 'deadAir',      label: 'Dead Air',          icon: '😶', desc: 'Silence on stream — prompt viewers to tip or interact' },
+    { key: 'whaleTip',     label: 'Whale Tip',          icon: '🐋', desc: 'Big tipper just tipped — acknowledge and reward them' },
+    { key: 'hvReturnee',   label: 'HV Returnee',        icon: '🔁', desc: 'High-value fan returned — welcome them back personally' },
+    { key: 'lowTippers',   label: 'Low Energy',         icon: '📉', desc: 'Tip rate dropping — re-engage the room with a push' },
+    { key: 'goalClose',    label: 'Goal Close',         icon: '🎯', desc: 'Near the tip goal — rally viewers to push you over' },
+    { key: 'anchor',       label: 'Anchor Fan',         icon: '⚓', desc: 'Top fan present — spotlight them to drive more tips' },
+    { key: 'tipAskPrice',  label: 'Token Tip Ask Price', icon: '💰', desc: 'Suggest the ideal token amount to ask for right now based on session stats' },
   ];
 
   if (!user) {
