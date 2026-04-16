@@ -16,7 +16,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),
     maximize: () => ipcRenderer.send('window:maximize'),
-    close: () => ipcRenderer.send('window:close'),
+    close:    () => ipcRenderer.send('window:close'),
+    exit:     () => ipcRenderer.send('window:exit'),
+    restart:  () => ipcRenderer.send('window:restart'),
   },
 
   // ─── Scenes ──────────────────────────────────────────

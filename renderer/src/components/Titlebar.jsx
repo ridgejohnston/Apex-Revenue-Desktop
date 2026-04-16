@@ -1,6 +1,42 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
 export default function Titlebar({ user, streamStatus, platform, updateStatus, onAuthClick, onSettingsClick, onSignOut, onS3Backup }) {
+  const [appMenuOpen, setAppMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+
+  // Close the menu when clicking outside
+  useEffect(() => {
+    if (!appMenuOpen) return;
+    const handler = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setAppMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [appMenuOpen]);
+
+  const APP_ACTIONS = [
+    {
+      label: 'Close to Tray',
+      icon: '▼',
+      desc: 'Hide the window — app keeps running in the system tray',
+      action: () => { setAppMenuOpen(false); window.electronAPI.window.close(); },
+      color: 'var(--text-secondary)',
+    },
+    {
+      label: 'Restart',
+      icon: '↺',
+      desc: 'Quit and relaunch Apex Revenue',
+      action: () => { setAppMenuOpen(false); window.electronAPI.window.restart(); },
+      color: '#fbbf24',
+    },
+    {
+      label: 'Exit',
+      icon: '✕',
+      desc: 'Fully quit Apex Revenue',
+      action: () => { setAppMenuOpen(false); window.electronAPI.window.exit(); },
+      color: 'var(--live-red, #e8001a)',
+    },
+  ];
 
   function renderUpdateBadge() {
     if (!updateStatus) return null;
@@ -100,8 +136,54 @@ export default function Titlebar({ user, streamStatus, platform, updateStatus, o
           <button className="btn btn-sm btn-accent" onClick={onAuthClick}>Sign In</button>
         )}
 
-        {/* Window controls */}
-        <div className="flex items-center" style={{ marginLeft: 8 }}>
+        {/* App Controls Tab */}
+        <div ref={menuRef} style={{ position: 'relative', marginLeft: 4 }}>
+          <button
+            className={`btn btn-sm ${appMenuOpen ? 'btn-accent' : ''}`}
+            onClick={() => setAppMenuOpen((o) => !o)}
+            style={{ fontSize: 10, gap: 4, paddingRight: 6 }}
+            title="App controls"
+          >
+            ⚡ App
+            <span style={{ fontSize: 8, opacity: 0.7 }}>{appMenuOpen ? '▲' : '▼'}</span>
+          </button>
+
+          {appMenuOpen && (
+            <div style={{
+              position: 'absolute', top: 'calc(100% + 4px)', right: 0,
+              background: 'var(--bg-card, #111)', border: '1px solid var(--border)',
+              borderRadius: 8, overflow: 'hidden', minWidth: 210,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.5)', zIndex: 9999,
+            }}>
+              <div style={{ padding: '6px 10px 4px', fontSize: 8, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 1 }}>
+                App Controls
+              </div>
+              {APP_ACTIONS.map(({ label, icon, desc, action, color }) => (
+                <button
+                  key={label}
+                  onClick={action}
+                  style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 10,
+                    width: '100%', padding: '8px 12px',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    textAlign: 'left', borderTop: '1px solid var(--border)',
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-elevated, #1a1a1a)'}
+                  onMouseLeave={(e) => e.currentTarget.style.background = 'none'}
+                >
+                  <span style={{ fontSize: 13, color, marginTop: 1, flexShrink: 0 }}>{icon}</span>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color }}>{label}</div>
+                    <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 1 }}>{desc}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Window chrome buttons */}
+        <div className="flex items-center" style={{ marginLeft: 4 }}>
           <button
             className="btn btn-icon"
             onClick={() => window.electronAPI.window.minimize()}
