@@ -391,7 +391,11 @@ let updateReady = false;
 
 function setupAutoUpdater() {
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Disable auto-install on quit — we handle install explicitly via IPC
+  // Having both autoInstallOnAppQuit=true AND calling quitAndInstall() causes a
+  // race: the before-quit handler fires a second quitAndInstall which kills the
+  // first relaunch attempt before it can spawn the new process.
+  autoUpdater.autoInstallOnAppQuit = false;
 
   autoUpdater.on('checking-for-update', () => {
     mainWindow?.webContents.send('updates:status', { state: 'checking' });
@@ -438,10 +442,31 @@ ipcMain.handle('updates:check', () => {
 });
 
 ipcMain.on('updates:install', () => {
-  if (updateReady) {
-    isQuitting = true;
-    autoUpdater.quitAndInstall(false, true);
+  if (!updateReady) return;
+
+  isQuitting = true;
+
+  // Detach the close handler so the window destroys immediately without
+  // being intercepted by the "hide to tray" logic.
+  if (mainWindow) {
+    mainWindow.removeAllListeners('close');
+    mainWindow.destroy();
   }
+
+  // Defer to next tick so the window is fully destroyed before we hand off.
+  // isSilent=true is required for zip-based updates — false causes electron-updater
+  // to wait for installer UI interaction that never arrives, then it just exits.
+  // isForceRunAfter=true spawns the new exe after extraction.
+  setImmediate(() => {
+    try {
+      autoUpdater.quitAndInstall(true, true);
+    } catch {
+      // Fallback: if quitAndInstall throws (e.g. zip write permission error),
+      // relaunch manually and exit so the user at least gets back in the app.
+      app.relaunch();
+      app.exit(0);
+    }
+  });
 });
 
 // ─── IPC: FFmpeg ─────────────────────────────────────────
