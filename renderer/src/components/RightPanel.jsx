@@ -87,6 +87,9 @@ function OBSProperties() {
   const [settings, setSettings] = useState(null);
   const [audioInputs, setAudioInputs] = useState([]);
   const [dshowAudio, setDshowAudio] = useState([]);
+  const [savedToast, setSavedToast] = useState(false);
+  const debounceRef = useRef(null);
+  const toastRef = useRef(null);
 
   useEffect(() => {
     window.electronAPI.store.get('obsSettings').then(setSettings);
@@ -102,30 +105,71 @@ function OBSProperties() {
     window.electronAPI.sources.getDshowDevices().then((devs) => {
       if (devs?.audio?.length) setDshowAudio(devs.audio);
     }).catch(() => {});
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (toastRef.current) clearTimeout(toastRef.current);
+    };
   }, []);
 
   if (!settings) return <div style={{ padding: 12, color: 'var(--text-dim)', fontSize: 11 }}>Loading...</div>;
 
+  // Persist to electron-store and flash the "Saved" indicator
+  const persist = (updated) => {
+    window.electronAPI.store.set('obsSettings', updated);
+    setSavedToast(true);
+    if (toastRef.current) clearTimeout(toastRef.current);
+    toastRef.current = setTimeout(() => setSavedToast(false), 1800);
+  };
+
+  // Immediate save — used by selects and toggles
   const update = (key, value) => {
     const updated = { ...settings, [key]: value };
     setSettings(updated);
-    window.electronAPI.store.set('obsSettings', updated);
+    persist(updated);
+  };
+
+  // Debounced save — used by text and number inputs to avoid saving mid-keystroke
+  const updateText = (key, value) => {
+    const updated = { ...settings, [key]: value };
+    setSettings(updated);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => persist(updated), 600);
   };
 
   return (
     <div className="flex-col gap-3">
+      {/* Auto-save indicator */}
+      <div style={{
+        height: 20, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+        paddingRight: 2, marginBottom: -4,
+      }}>
+        <span style={{
+          fontSize: 9, fontWeight: 500, letterSpacing: '0.5px',
+          color: 'var(--success, #2DD4A0)',
+          opacity: savedToast ? 1 : 0,
+          transition: 'opacity 0.25s ease',
+          display: 'flex', alignItems: 'center', gap: 4,
+        }}>
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+            <path d="M2 5l2 2 4-4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          SAVED
+        </span>
+      </div>
+
       {/* Output Settings */}
       <div>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>OUTPUT</div>
         <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>Stream URL</label>
         <input
           className="input" style={{ width: '100%', marginBottom: 6 }}
-          value={settings.streamUrl} onChange={(e) => update('streamUrl', e.target.value)}
+          value={settings.streamUrl} onChange={(e) => updateText('streamUrl', e.target.value)}
         />
         <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>Stream Key</label>
         <input
           className="input" style={{ width: '100%', marginBottom: 6 }}
-          type="password" value={settings.streamKey} onChange={(e) => update('streamKey', e.target.value)}
+          type="password" value={settings.streamKey} onChange={(e) => updateText('streamKey', e.target.value)}
         />
       </div>
 
@@ -167,7 +211,16 @@ function OBSProperties() {
             <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>Bitrate (kbps)</label>
             <input
               className="input" type="number" style={{ width: '100%' }}
-              value={settings.videoBitrate} onChange={(e) => update('videoBitrate', parseInt(e.target.value))}
+              value={settings.videoBitrate}
+              onChange={(e) => {
+                const v = parseInt(e.target.value);
+                if (!isNaN(v)) updateText('videoBitrate', v);
+                else setSettings((s) => ({ ...s, videoBitrate: e.target.value }));
+              }}
+              onBlur={(e) => {
+                const v = parseInt(e.target.value);
+                if (!isNaN(v)) updateText('videoBitrate', v);
+              }}
             />
           </div>
           <div className="flex-1">
@@ -254,7 +307,7 @@ function OBSProperties() {
         <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>Recording Path</label>
         <input
           className="input" style={{ width: '100%' }}
-          value={settings.outputPath} onChange={(e) => update('outputPath', e.target.value)}
+          value={settings.outputPath} onChange={(e) => updateText('outputPath', e.target.value)}
         />
       </div>
 
