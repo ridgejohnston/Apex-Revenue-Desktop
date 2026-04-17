@@ -5,6 +5,8 @@
 
 const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, desktopCapturer, session, screen } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const { spawn } = require('child_process');
 const Store = require('electron-store');
 const awsServices = require('./aws-services');
 const streamEngine = require('./stream-engine');
@@ -412,6 +414,7 @@ app.whenReady().then(async () => {
 
 // ─── Auto-Updater Setup ─────────────────────────────────
 let updateReady = false;
+let downloadedInstallerPath = null; // captured from update-downloaded event
 
 function setupAutoUpdater() {
   autoUpdater.autoDownload = true;
@@ -446,6 +449,8 @@ function setupAutoUpdater() {
 
   autoUpdater.on('update-downloaded', (info) => {
     updateReady = true;
+    // electron-updater provides the cached installer path in info.downloadedFile
+    downloadedInstallerPath = info.downloadedFile || null;
     mainWindow?.webContents.send('updates:status', {
       state: 'ready',
       version: info.version,
@@ -469,24 +474,45 @@ ipcMain.on('updates:install', () => {
   if (!updateReady) return;
 
   isQuitting = true;
-  isUpdating = true; // block window-all-closed from calling app.quit() prematurely
+  isUpdating = true; // prevent window-all-closed from calling app.quit() prematurely
 
-  // Remove hide-to-tray close listener, then destroy the window.
-  // isUpdating=true above prevents window-all-closed from killing the process
-  // before quitAndInstall can spawn the installer.
   if (mainWindow) {
     mainWindow.removeAllListeners('close');
     mainWindow.destroy();
   }
 
-  // Give Electron one tick to process the window destruction, then hand off.
-  // isSilent=true  → NSIS runs with /S (no wizard UI shown to user)
-  // isForceRunAfter=true → new exe is launched after extraction completes
   setImmediate(() => {
     try {
-      autoUpdater.quitAndInstall(true, true);
-    } catch {
-      // Fallback: installer couldn't run — at minimum get the user back in the app.
+      const installerPath = downloadedInstallerPath;
+
+      if (installerPath && fs.existsSync(installerPath)) {
+        // Use PowerShell to wait for THIS process to fully exit before launching
+        // the installer. quitAndInstall() spawns the installer then calls app.quit(),
+        // which means the installer starts while our process still has file locks —
+        // causing "Failed to uninstall old application files." By waiting for the
+        // PID to die first, the installer always finds files fully released.
+        const pid = process.pid;
+        const escaped = installerPath.replace(/'/g, "''");
+        const psCmd = [
+          `$proc = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
+          `if ($proc) { $proc.WaitForExit(15000) }`,
+          `Start-Process '${escaped}' -ArgumentList '/S' -Verb RunAs`,
+        ].join('; ');
+
+        spawn('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-WindowStyle', 'Hidden',
+          '-Command', psCmd,
+        ], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+
+        // Exit immediately — PowerShell watcher will launch installer once we're gone
+        app.exit(0);
+      } else {
+        // Fallback: no cached path — use electron-updater's built-in method
+        autoUpdater.quitAndInstall(true, true);
+      }
+    } catch (err) {
+      console.error('[Updater] Install failed:', err);
       isUpdating = false;
       app.relaunch();
       app.exit(0);
