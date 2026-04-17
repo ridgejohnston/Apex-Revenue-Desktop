@@ -10,11 +10,11 @@
   ; Use PowerShell to download and extract the FFmpeg bundle from S3
   nsExec::ExecToLog `powershell.exe -ExecutionPolicy Bypass -Command " \
     try { \
-      $zipDest = '$INSTDIR\ffmpeg\ffmpeg-bundle.zip'; \
+      $$zipDest = '$INSTDIR\ffmpeg\ffmpeg-bundle.zip'; \
       Invoke-WebRequest -Uri 'https://apex-revenue-downloads.s3.us-east-1.amazonaws.com/ffmpeg/ffmpeg-bundle.zip' \
-        -OutFile $zipDest -UseBasicParsing; \
-      Expand-Archive -LiteralPath $zipDest -DestinationPath '$INSTDIR\ffmpeg' -Force; \
-      Remove-Item $zipDest -Force; \
+        -OutFile $$zipDest -UseBasicParsing; \
+      Expand-Archive -LiteralPath $$zipDest -DestinationPath '$INSTDIR\ffmpeg' -Force; \
+      Remove-Item $$zipDest -Force; \
       exit 0 \
     } catch { \
       exit 1 \
