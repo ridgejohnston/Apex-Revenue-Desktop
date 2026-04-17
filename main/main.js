@@ -150,6 +150,7 @@ ipcMain.on('window:maximize', () => {
 ipcMain.on('window:close', () => mainWindow?.close());
 ipcMain.on('window:exit', () => { isQuitting = true; app.quit(); });
 ipcMain.on('window:restart', () => { isQuitting = true; app.relaunch(); app.exit(0); });
+ipcMain.handle('app:version', () => app.getVersion());
 
 // ─── Screen / Media Sources ─────────────────────────────
 ipcMain.handle('sources:get-screens', async () => {

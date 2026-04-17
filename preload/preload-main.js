@@ -127,7 +127,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // ─── App Info ────────────────────────────────────────
-  getVersion: () => require('../shared/apex-config').VERSION,
+  getVersion: () => ipcRenderer.invoke('app:version'),
   getPlatforms: () => require('../shared/apex-config').DEFAULT_PLATFORMS,
   getWhaleTiers: () => require('../shared/apex-config').WHALE_TIERS,
 });
