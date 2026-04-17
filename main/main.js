@@ -779,7 +779,6 @@ ipcMain.on('cam:tip-vibrate', async (_, tipAmount) => {
 });
 
 // Restore saved config
-app.whenReady().then(() => {}).on('ready-pre-init', () => {});
 (function restoreSyncConfig() {
   const savedToken = store?.get?.('lovenseApiToken');
   const savedWsUrl = store?.get?.('buttplugWsUrl');
