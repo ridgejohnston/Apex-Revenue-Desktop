@@ -50,6 +50,7 @@ const store = new Store({
 let mainWindow = null;
 let camView = null;
 let tray = null;
+let isUpdating = false; // prevent window-all-closed from quitting during update install
 const tracker = new EarningsTracker();
 let cwInterval = null;
 let isQuitting = false;
@@ -467,24 +468,25 @@ ipcMain.on('updates:install', () => {
   if (!updateReady) return;
 
   isQuitting = true;
+  isUpdating = true; // block window-all-closed from calling app.quit() prematurely
 
-  // Detach the close handler so the window destroys immediately without
-  // being intercepted by the "hide to tray" logic.
+  // Remove hide-to-tray close listener, then destroy the window.
+  // isUpdating=true above prevents window-all-closed from killing the process
+  // before quitAndInstall can spawn the installer.
   if (mainWindow) {
     mainWindow.removeAllListeners('close');
     mainWindow.destroy();
   }
 
-  // Defer to next tick so the window is fully destroyed before we hand off.
-  // isSilent=true is required for zip-based updates — false causes electron-updater
-  // to wait for installer UI interaction that never arrives, then it just exits.
-  // isForceRunAfter=true spawns the new exe after extraction.
+  // Give Electron one tick to process the window destruction, then hand off.
+  // isSilent=true  → NSIS runs with /S (no wizard UI shown to user)
+  // isForceRunAfter=true → new exe is launched after extraction completes
   setImmediate(() => {
     try {
       autoUpdater.quitAndInstall(true, true);
     } catch {
-      // Fallback: if quitAndInstall throws (e.g. zip write permission error),
-      // relaunch manually and exit so the user at least gets back in the app.
+      // Fallback: installer couldn't run — at minimum get the user back in the app.
+      isUpdating = false;
       app.relaunch();
       app.exit(0);
     }
@@ -930,5 +932,6 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // Don't quit during update install — quitAndInstall handles its own quit
+  if (process.platform !== 'darwin' && !isUpdating) app.quit();
 });

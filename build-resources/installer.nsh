@@ -1,9 +1,12 @@
 ; Apex Revenue — Custom NSIS Install Script
-; Downloads FFmpeg from AWS S3 during installation
+; Downloads FFmpeg from AWS S3 during installation (fresh install only)
 
 !macro customInstall
-  ; Create FFmpeg directory inside install dir
   CreateDirectory "$INSTDIR\ffmpeg"
+
+  ; Skip FFmpeg download on updates — it's already installed.
+  ; Only download on a fresh install (ffmpeg.exe not yet present).
+  IfFileExists "$INSTDIR\ffmpeg\ffmpeg.exe" ffmpeg_already_present
 
   DetailPrint "Downloading FFmpeg (required for streaming)..."
 
@@ -26,6 +29,13 @@
   ${Else}
     DetailPrint "FFmpeg installed successfully."
   ${EndIf}
+
+  Goto ffmpeg_done
+
+  ffmpeg_already_present:
+    DetailPrint "FFmpeg already installed — skipping download."
+
+  ffmpeg_done:
 !macroend
 
 !macro customUnInstall
