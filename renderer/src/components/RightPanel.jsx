@@ -317,7 +317,7 @@ function OBSProperties() {
       <div>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>QUICK PRESETS</div>
         {[
-          { name: 'Chaturbate', url: 'rtmp://live.chaturbate.com/live-origin' },
+          { name: 'Chaturbate', url: 'rtmp://global.live.mmcdn.com/live-origin' },
           { name: 'Stripchat', url: 'rtmp://rtmp.stripchat.com/live' },
           { name: 'CamSoda', url: 'rtmp://live.camsoda.com/live' },
           { name: 'BongaCams', url: 'rtmp://publish.bongacams.com/live' },

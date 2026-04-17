@@ -31,7 +31,7 @@ const store = new Store({
     obsSettings: {
       outputPath: app.getPath('videos'),
       streamKey: '',
-      streamUrl: 'rtmp://live.chaturbate.com/live-origin',
+      streamUrl: 'rtmp://global.live.mmcdn.com/live-origin',
       videoEncoder: 'libx264',
       videoBitrate: 2500,
       audioBitrate: 160,
