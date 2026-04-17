@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 
 export default function Titlebar({ user, streamStatus, platform, updateStatus, onAuthClick, onSettingsClick, onSignOut, onS3Backup }) {
   const [appMenuOpen, setAppMenuOpen] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const menuRef = useRef(null);
 
   // Close the menu when clicking outside
@@ -14,7 +15,45 @@ export default function Titlebar({ user, streamStatus, platform, updateStatus, o
     return () => document.removeEventListener('mousedown', handler);
   }, [appMenuOpen]);
 
+  // Reset checking state when an update status comes back
+  useEffect(() => {
+    if (updateStatus && updateStatus.state !== 'checking') {
+      setCheckingUpdate(false);
+    }
+  }, [updateStatus]);
+
+  const handleCheckUpdates = async () => {
+    setCheckingUpdate(true);
+    await window.electronAPI.updates.check();
+    // If nothing comes back within 6s, assume up-to-date
+    setTimeout(() => setCheckingUpdate(false), 6000);
+  };
+
+  // Build update action depending on current state
+  const updateAction = updateStatus?.state === 'ready'
+    ? {
+        label: `Restart & Update v${updateStatus.version}`,
+        icon: '↻',
+        desc: 'Install the downloaded update and relaunch',
+        action: () => { setAppMenuOpen(false); window.electronAPI.updates.install(); },
+        color: '#4ade80',
+      }
+    : {
+        label: checkingUpdate ? 'Checking...' : 'Check for Updates',
+        icon: checkingUpdate ? '⏳' : '↑',
+        desc: updateStatus?.state === 'up-to-date'
+          ? '✓ You\'re on the latest version'
+          : updateStatus?.state === 'downloading'
+            ? `Downloading update ${updateStatus.percent ?? 0}%…`
+            : 'Check for a new version of Apex Revenue',
+        action: checkingUpdate || updateStatus?.state === 'downloading'
+          ? () => {}
+          : () => { handleCheckUpdates(); },
+        color: updateStatus?.state === 'up-to-date' ? 'var(--success, #2DD4A0)' : '#60a5fa',
+      };
+
   const APP_ACTIONS = [
+    updateAction,
     {
       label: 'Close to Tray',
       icon: '▼',
