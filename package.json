@@ -6,6 +6,9 @@
   "author": "Ridge Johnston",
   "license": "UNLICENSED",
   "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "start": "concurrently \"webpack serve --config webpack.renderer.js\" \"wait-on http://localhost:9000 && electron .\"",
     "start:prod": "webpack --config webpack.renderer.js --mode production && electron .",
