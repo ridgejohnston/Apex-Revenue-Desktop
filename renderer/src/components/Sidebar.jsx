@@ -121,12 +121,31 @@ export default function Sidebar({
               <div key={source.id} className="list-item" style={{ gap: 4 }}>
                 <span style={{ fontSize: 12 }}>{SOURCE_TYPE_ICONS[source.type] || '📦'}</span>
                 <span className="name truncate" style={{ fontSize: 11 }}>{source.name}</span>
+
+                {/* ON / OFF toggle pill */}
                 <button
-                  className="btn btn-sm btn-icon"
                   onClick={() => onToggleSourceVisible(source.id)}
-                  style={{ opacity: source.visible ? 1 : 0.3, fontSize: 10 }}
-                  title={source.visible ? 'Hide' : 'Show'}
-                >👁️</button>
+                  title={source.visible ? 'Disable source' : 'Enable source'}
+                  style={{
+                    display: 'flex', alignItems: 'center',
+                    padding: '2px 6px', borderRadius: 10,
+                    fontSize: 9, fontWeight: 700, letterSpacing: '0.4px',
+                    cursor: 'pointer', border: 'none', flexShrink: 0,
+                    background: source.visible
+                      ? 'rgba(45,212,160,0.18)'
+                      : 'rgba(255,255,255,0.06)',
+                    color: source.visible
+                      ? 'var(--success, #2DD4A0)'
+                      : 'var(--text-dim, #555)',
+                    boxShadow: source.visible
+                      ? '0 0 0 1px rgba(45,212,160,0.35)'
+                      : '0 0 0 1px rgba(255,255,255,0.08)',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {source.visible ? 'ON' : 'OFF'}
+                </button>
+
                 <button
                   className="btn btn-sm btn-icon"
                   onClick={() => onToggleSourceLock(source.id)}

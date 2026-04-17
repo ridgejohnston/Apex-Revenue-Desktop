@@ -5,7 +5,7 @@
  */
 
 const { EventEmitter } = require('events');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { findFFmpegPath } = require('./ffmpeg-installer');
@@ -14,10 +14,16 @@ function findFFmpeg() {
   return findFFmpegPath() || 'ffmpeg';
 }
 
+// H.264 encoder preference order — first one found in the FFmpeg binary wins.
+// h264_mf is Windows Media Foundation (always available on Win10+), so it is
+// the guaranteed fallback when no other encoder is compiled in.
+const H264_ENCODER_CANDIDATES = ['libx264', 'h264_nvenc', 'h264_amf', 'h264_mf'];
+
 class StreamEngine extends EventEmitter {
   constructor() {
     super();
     this.ffmpegPath = findFFmpeg();
+    this._h264Encoder = null; // resolved lazily on first stream start
     this.streamProcess = null;
     this.recordProcess = null;
     this.virtualCamProcess = null;
@@ -36,14 +42,63 @@ class StreamEngine extends EventEmitter {
     this._recordInterval = null;
   }
 
+  // ─── Encoder Detection ────────────────────────────────
+  // Runs `ffmpeg -encoders` once and caches the best available H.264 encoder.
+  // Falls back through libx264 → h264_nvenc → h264_amf → h264_mf.
+  _detectH264Encoder() {
+    if (this._h264Encoder) return this._h264Encoder;
+    try {
+      const out = execFileSync(this.ffmpegPath, ['-encoders', '-v', 'quiet'], {
+        timeout: 8000,
+        windowsHide: true,
+      }).toString();
+      for (const enc of H264_ENCODER_CANDIDATES) {
+        if (out.includes(` ${enc} `)) {
+          console.log(`[StreamEngine] Using H.264 encoder: ${enc}`);
+          this._h264Encoder = enc;
+          return enc;
+        }
+      }
+    } catch (e) {
+      console.warn('[StreamEngine] Could not query encoders:', e.message);
+    }
+    // Last-resort fallback — h264_mf is built into every Windows 10+ FFmpeg
+    console.warn('[StreamEngine] Falling back to h264_mf encoder');
+    this._h264Encoder = 'h264_mf';
+    return 'h264_mf';
+  }
+
+  // Build the video encoding args for the detected encoder.
+  // -preset is libx264/nvenc-specific; h264_mf and h264_amf don't support it.
+  _videoEncodeArgs(encoder, videoBitrate, fps, resolution) {
+    const base = [
+      '-c:v', encoder,
+      '-b:v', `${videoBitrate}k`,
+      '-maxrate', `${videoBitrate}k`,
+      '-bufsize', `${videoBitrate * 2}k`,
+      '-pix_fmt', 'yuv420p',
+      '-g', String(fps * 2),
+    ];
+    // Scale to target resolution
+    const scaleArgs = ['-vf', `scale=${resolution.width}:${resolution.height}`];
+    // Preset only applies to libx264 and h264_nvenc
+    const presetArgs = (encoder === 'libx264' || encoder === 'h264_nvenc')
+      ? ['-preset', 'veryfast']
+      : [];
+    return [...scaleArgs, ...base, ...presetArgs];
+  }
+
   // ─── RTMP Streaming ───────────────────────────────────
   async startStream(settings) {
     if (this.streamProcess) throw new Error('Stream already running');
 
     const {
-      streamUrl, streamKey, videoEncoder, videoBitrate,
-      audioBitrate, resolution, fps, preset,
+      streamUrl, streamKey, videoBitrate,
+      audioBitrate, resolution, fps,
     } = settings;
+
+    // Detect best available H.264 encoder (cached after first call)
+    const encoder = this._detectH264Encoder();
 
     // Strip trailing slash so we never get double-slash in RTMP URL
     const baseUrl = (streamUrl || '').replace(/\/+$/, '');
@@ -57,10 +112,7 @@ class StreamEngine extends EventEmitter {
 
     // Build FFmpeg args for RTMP streaming
     const args = [
-      // Video input: GDI screen capture of full desktop
-      // Do NOT pass -video_size here — capture at native resolution,
-      // then scale to target at encoding time. Passing a mismatched
-      // -video_size causes an immediate fatal error on most machines.
+      // Video input: GDI screen capture of full desktop at native resolution
       '-f', 'gdigrab',
       '-framerate', String(fps),
       '-i', 'desktop',
@@ -70,15 +122,8 @@ class StreamEngine extends EventEmitter {
         ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
         : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),
 
-      // Video encoding — scale to target resolution here instead of on input
-      '-c:v', videoEncoder,
-      '-vf', `scale=${resolution.width}:${resolution.height}`,
-      '-preset', preset,
-      '-b:v', `${videoBitrate}k`,
-      '-maxrate', `${videoBitrate}k`,
-      '-bufsize', `${videoBitrate * 2}k`,
-      '-pix_fmt', 'yuv420p',
-      '-g', String(fps * 2), // Keyframe interval
+      // Video encoding with auto-detected encoder + per-encoder args
+      ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
 
       // Audio encoding
       '-c:a', 'aac',
@@ -170,13 +215,14 @@ class StreamEngine extends EventEmitter {
   async startRecording(settings) {
     if (this.recordProcess) throw new Error('Recording already running');
 
-    const { outputPath, videoEncoder, videoBitrate, audioBitrate, resolution, fps, preset } = settings;
+    const { outputPath, videoBitrate, audioBitrate, resolution, fps } = settings;
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = path.join(outputPath, `ApexRevenue_${timestamp}.mp4`);
 
     // Ensure output dir exists
     fs.mkdirSync(outputPath, { recursive: true });
 
+    const encoder = this._detectH264Encoder();
     const useAudio = settings.audioDevice && settings.audioDevice.trim() !== '';
 
     const args = [
@@ -186,14 +232,10 @@ class StreamEngine extends EventEmitter {
       ...(useAudio
         ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
         : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),
-      '-c:v', videoEncoder,
-      '-vf', `scale=${resolution.width}:${resolution.height}`,
-      '-preset', preset,
-      '-crf', '18',
-      '-b:v', `${videoBitrate}k`,
+      ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
+      ...(encoder === 'libx264' ? ['-crf', '18'] : []),
       '-c:a', 'aac',
       '-b:a', `${audioBitrate}k`,
-      '-pix_fmt', 'yuv420p',
       filename,
     ];
 
