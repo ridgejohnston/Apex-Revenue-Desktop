@@ -122,6 +122,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     buttplugDisconnect: ()              => ipcRenderer.invoke('sync:buttplug-disconnect'),
     vibrate:            (intensity, dur) => ipcRenderer.invoke('sync:vibrate', intensity, dur),
     saveTipMap:         (tipMap)        => ipcRenderer.invoke('sync:save-tip-map', tipMap),
+    firePattern:        (id, intensity) => ipcRenderer.invoke('sync:fire-pattern', id, intensity),
     onState:            (cb)            => ipcRenderer.on('sync:state', (_, data) => cb(data)),
   },
 

@@ -569,16 +569,58 @@ ipcMain.handle('sources:get-dshow-devices', async () => {
 const http  = require('http');
 const https = require('https');
 
+// ── Default vibration tier / pattern config ───────────────
+const DEFAULT_TIERS = [
+  { label: 'Tease',     minTokens: 1,   intensity: 15,  duration: 2  },
+  { label: 'Feel It',   minTokens: 10,  intensity: 35,  duration: 4  },
+  { label: 'Intense',   minTokens: 25,  intensity: 60,  duration: 6  },
+  { label: 'Wild',      minTokens: 50,  intensity: 80,  duration: 10 },
+  { label: 'MAX POWER', minTokens: 100, intensity: 100, duration: 15 },
+];
+
+// Step sequences for built-in patterns (intensity 0–100 relative, scaled at runtime)
+const PATTERN_STEPS = {
+  fireworks:      [
+    { i: 100, d: 0.25 }, { i: 0, d: 0.15 }, { i: 80, d: 0.25 }, { i: 0, d: 0.15 },
+    { i: 100, d: 0.4  }, { i: 0, d: 0.1  }, { i: 70, d: 0.2  }, { i: 100, d: 0.3 },
+    { i: 0,   d: 0.1  }, { i: 90, d: 0.2  }, { i: 0, d: 0.1  }, { i: 100, d: 0.5 },
+  ],
+  earthquake:     [
+    { i: 20, d: 0.5 }, { i: 40, d: 0.5 }, { i: 60, d: 0.5 }, { i: 80, d: 0.8 },
+    { i: 100, d: 2.0 }, { i: 100, d: 0.3 }, { i: 80, d: 0.5 }, { i: 60, d: 0.5 },
+    { i: 40, d: 0.3 }, { i: 20, d: 0.3 },
+  ],
+  wave:           [
+    { i: 10, d: 0.4 }, { i: 25, d: 0.4 }, { i: 45, d: 0.4 }, { i: 65, d: 0.4 },
+    { i: 85, d: 0.4 }, { i: 100, d: 0.8 }, { i: 85, d: 0.4 }, { i: 65, d: 0.4 },
+    { i: 45, d: 0.4 }, { i: 25, d: 0.4 }, { i: 10, d: 0.4 }, { i: 0, d: 0.3 },
+  ],
+  pulse:          [
+    { i: 80, d: 0.35 }, { i: 0, d: 0.35 }, { i: 80, d: 0.35 }, { i: 0, d: 0.35 },
+    { i: 80, d: 0.35 }, { i: 0, d: 0.35 }, { i: 80, d: 0.35 }, { i: 0, d: 0.35 },
+    { i: 80, d: 0.35 }, { i: 0, d: 0.35 },
+  ],
+  maxvibe:        [{ i: 100, d: 12 }],
+  stopthequiver:  [{ i: 0, d: 0.1 }],
+};
+
+const DEFAULT_PATTERNS = [
+  { id: 'fireworks',     label: 'Fireworks',       tokens: 50,  intensity: 100, enabled: true  },
+  { id: 'earthquake',    label: 'Earthquake',      tokens: 75,  intensity: 100, enabled: true  },
+  { id: 'wave',          label: 'Wave',            tokens: 25,  intensity: 80,  enabled: true  },
+  { id: 'pulse',         label: 'Pulse',           tokens: 15,  intensity: 75,  enabled: true  },
+  { id: 'maxvibe',       label: 'Maxvibe',         tokens: 100, intensity: 100, enabled: true  },
+  { id: 'stopthequiver', label: 'Stop The Quiver', tokens: 0,   intensity: 0,   enabled: false },
+];
+
 let toyState = {
   lovense:  { connected: false, apiToken: '', toys: [], wsUrl: '' },
   buttplug: { connected: false, wsUrl: 'ws://localhost:12345', toys: [], ws: null },
-  tipMap:   { enabled: true, tiers: [
-    { minTokens: 1,   intensity: 20, duration: 2 },
-    { minTokens: 10,  intensity: 40, duration: 4 },
-    { minTokens: 25,  intensity: 60, duration: 6 },
-    { minTokens: 50,  intensity: 80, duration: 8 },
-    { minTokens: 100, intensity: 100, duration: 10 },
-  ]},
+  tipMap:   {
+    enabled:  true,
+    tiers:    DEFAULT_TIERS,
+    patterns: DEFAULT_PATTERNS,
+  },
 };
 
 // ── Lovense Connect HTTP helper ──────────────────────────
@@ -705,6 +747,61 @@ async function vibrateAll(intensity, durationSec) {
   }
 }
 
+// ── Stop all toys immediately ────────────────────────────
+async function stopAll() {
+  // Lovense: vibrate intensity 0 for 0 seconds
+  if (toyState.lovense.connected && toyState.lovense.apiToken) {
+    try {
+      await lovenseRequest('/command', { command: 'Vibrate', timeSec: 0, toy: '', apiVer: 1, v: 0 });
+    } catch {}
+  }
+  // Buttplug: send speed 0 to all toys
+  if (toyState.buttplug.ws && toyState.buttplug.toys.length) {
+    try {
+      const cmds = toyState.buttplug.toys.map((toy, i) => ({
+        VibrateCmd: { Id: 900 + i, DeviceIndex: toy.DeviceIndex, Speeds: [{ Index: 0, Speed: 0 }] },
+      }));
+      toyState.buttplug.ws.send(JSON.stringify(cmds));
+    } catch {}
+  }
+}
+
+// ── Execute a named vibration pattern ────────────────────
+async function vibratePattern(patternId, intensityScale = 1.0) {
+  if (patternId === 'stopthequiver') { await stopAll(); return; }
+  const steps = PATTERN_STEPS[patternId];
+  if (!steps) return;
+
+  for (const step of steps) {
+    const scaled = Math.min(100, Math.round(step.i * intensityScale));
+    if (scaled > 0) {
+      // Send vibrate but don't use the built-in stop timer — we manage timing here
+      if (toyState.lovense.connected && toyState.lovense.apiToken) {
+        try {
+          await lovenseRequest('/command', {
+            command: 'Vibrate', timeSec: step.d + 0.1,
+            toy: '', apiVer: 1, v: Math.round(scaled / 5),  // Lovense 0-20
+          });
+        } catch {}
+      }
+      if (toyState.buttplug.ws && toyState.buttplug.toys.length) {
+        try {
+          const cmds = toyState.buttplug.toys.map((toy, i) => ({
+            VibrateCmd: { Id: 800 + i, DeviceIndex: toy.DeviceIndex, Speeds: [{ Index: 0, Speed: scaled / 100 }] },
+          }));
+          toyState.buttplug.ws.send(JSON.stringify(cmds));
+        } catch {}
+      }
+    } else {
+      await stopAll();
+    }
+    // Wait for step duration before next step
+    await new Promise((r) => setTimeout(r, Math.round(step.d * 1000)));
+  }
+  // Always stop cleanly at end
+  await stopAll();
+}
+
 // ── IPC: Sync handlers ───────────────────────────────────
 ipcMain.handle('sync:get-state', () => getSyncState());
 
@@ -764,8 +861,20 @@ ipcMain.handle('sync:vibrate', async (_, intensity, durationSec) => {
 });
 
 ipcMain.handle('sync:save-tip-map', (_, tipMap) => {
-  toyState.tipMap = tipMap;
-  store.set('toyTipMap', tipMap);
+  // Merge defaults for any missing fields
+  toyState.tipMap = {
+    enabled:  tipMap.enabled ?? toyState.tipMap.enabled,
+    tiers:    tipMap.tiers    || toyState.tipMap.tiers,
+    patterns: tipMap.patterns || toyState.tipMap.patterns,
+  };
+  store.set('toyTipMap', toyState.tipMap);
+  return { ok: true };
+});
+
+ipcMain.handle('sync:fire-pattern', async (_, patternId, intensityOverride) => {
+  const pattern = toyState.tipMap.patterns.find((p) => p.id === patternId);
+  const scale = (intensityOverride ?? (pattern?.intensity ?? 100)) / 100;
+  await vibratePattern(patternId, scale);
   return { ok: true };
 });
 
@@ -773,19 +882,40 @@ ipcMain.handle('sync:save-tip-map', (_, tipMap) => {
 const _origOnLiveUpdate = ipcMain.listeners('cam:live-update')[0];
 ipcMain.on('cam:tip-vibrate', async (_, tipAmount) => {
   if (!toyState.tipMap.enabled) return;
-  const tiers = [...toyState.tipMap.tiers].sort((a, b) => b.minTokens - a.minTokens);
+
+  // Check custom patterns first (exact token match takes priority)
+  const activePatterns = (toyState.tipMap.patterns || [])
+    .filter((p) => p.enabled && p.tokens > 0 && p.id !== 'stopthequiver');
+  const matchedPattern = activePatterns.find((p) => tipAmount === p.tokens)
+    || activePatterns
+        .filter((p) => tipAmount >= p.tokens)
+        .sort((a, b) => b.tokens - a.tokens)[0];
+
+  if (matchedPattern) {
+    await vibratePattern(matchedPattern.id, matchedPattern.intensity / 100);
+    return;
+  }
+
+  // Fall back to tier-based vibration
+  const tiers = [...(toyState.tipMap.tiers || [])].sort((a, b) => b.minTokens - a.minTokens);
   const tier = tiers.find((t) => tipAmount >= t.minTokens);
   if (tier) await vibrateAll(tier.intensity, tier.duration);
 });
 
 // Restore saved config
 (function restoreSyncConfig() {
-  const savedToken = store?.get?.('lovenseApiToken');
-  const savedWsUrl = store?.get?.('buttplugWsUrl');
+  const savedToken  = store?.get?.('lovenseApiToken');
+  const savedWsUrl  = store?.get?.('buttplugWsUrl');
   const savedTipMap = store?.get?.('toyTipMap');
-  if (savedToken) toyState.lovense.apiToken = savedToken;
-  if (savedWsUrl) toyState.buttplug.wsUrl = savedWsUrl;
-  if (savedTipMap) toyState.tipMap = savedTipMap;
+  if (savedToken)  toyState.lovense.apiToken  = savedToken;
+  if (savedWsUrl)  toyState.buttplug.wsUrl    = savedWsUrl;
+  if (savedTipMap) {
+    toyState.tipMap = {
+      enabled:  savedTipMap.enabled  ?? true,
+      tiers:    savedTipMap.tiers?.length    ? savedTipMap.tiers    : DEFAULT_TIERS,
+      patterns: savedTipMap.patterns?.length ? savedTipMap.patterns : DEFAULT_PATTERNS,
+    };
+  }
 })();
 
 app.on('activate', () => {

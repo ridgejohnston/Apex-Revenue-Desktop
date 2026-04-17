@@ -705,63 +705,109 @@ const PLATFORMS = [
   },
 ];
 
-const TIP_LEVELS = [
-  { label: 'Low',    tokens: 10,  intensity: 20,  duration: 3,  color: '#60a5fa' },
-  { label: 'Medium', tokens: 25,  intensity: 50,  duration: 5,  color: '#a78bfa' },
-  { label: 'High',   tokens: 50,  intensity: 75,  duration: 8,  color: '#f59e0b' },
-  { label: 'Whale',  tokens: 100, intensity: 100, duration: 15, color: '#ef4444' },
+// 5 renamed tiers with editable token thresholds
+const DEFAULT_TIP_TIERS = [
+  { label: 'Tease',     tokens: 1,   intensity: 15,  duration: 2,  color: '#38bdf8', icon: '😊' },
+  { label: 'Feel It',   tokens: 10,  intensity: 35,  duration: 4,  color: '#a78bfa', icon: '💜' },
+  { label: 'Intense',   tokens: 25,  intensity: 60,  duration: 6,  color: '#f59e0b', icon: '🔥' },
+  { label: 'Wild',      tokens: 50,  intensity: 80,  duration: 10, color: '#f97316', icon: '⚡' },
+  { label: 'MAX POWER', tokens: 100, intensity: 100, duration: 15, color: '#ef4444', icon: '🚀' },
+];
+
+// Named patterns — steps are defined in main.js; here we track token trigger + intensity scale
+const DEFAULT_PATTERNS = [
+  { id: 'fireworks',     label: 'Fireworks',       icon: '🎆', tokens: 50,  intensity: 100, enabled: true,  color: '#fbbf24' },
+  { id: 'earthquake',    label: 'Earthquake',      icon: '🌋', tokens: 75,  intensity: 100, enabled: true,  color: '#dc2626' },
+  { id: 'wave',          label: 'Wave',            icon: '🌊', tokens: 25,  intensity: 80,  enabled: true,  color: '#0ea5e9' },
+  { id: 'pulse',         label: 'Pulse',           icon: '💓', tokens: 15,  intensity: 75,  enabled: true,  color: '#ec4899' },
+  { id: 'maxvibe',       label: 'Maxvibe',         icon: '⚡', tokens: 100, intensity: 100, enabled: true,  color: '#ef4444' },
+  { id: 'stopthequiver', label: 'Stop The Quiver', icon: '✋', tokens: 0,   intensity: 0,   enabled: false, color: '#6b7280' },
 ];
 
 function SyncPanel() {
-  const [connections, setConnections] = useState({}); // platformId → { enabled, fields, status }
-  const [tipLevels, setTipLevels] = useState(TIP_LEVELS);
-  const [syncEnabled, setSyncEnabled] = useState(false);
+  const api = window.electronAPI;
+  const [connections, setConnections]   = useState({});
+  const [tiers, setTiers]               = useState(DEFAULT_TIP_TIERS);
+  const [patterns, setPatterns]         = useState(DEFAULT_PATTERNS);
+  const [syncEnabled, setSyncEnabled]   = useState(false);
   const [testPlatform, setTestPlatform] = useState(null);
+  const [firingPattern, setFiringPattern] = useState(null);
   const [expandedPlatform, setExpandedPlatform] = useState(null);
+  const [activeSection, setActiveSection] = useState('tiers'); // 'tiers' | 'patterns'
 
   useEffect(() => {
-    window.electronAPI.store.get('toySyncConfig').then((cfg) => {
+    api.store.get('toySyncConfig').then((cfg) => {
       if (cfg) {
         setConnections(cfg.connections || {});
-        setTipLevels(cfg.tipLevels || TIP_LEVELS);
+        setTiers(cfg.tiers?.length ? cfg.tiers : DEFAULT_TIP_TIERS);
+        setPatterns(cfg.patterns?.length ? cfg.patterns : DEFAULT_PATTERNS);
         setSyncEnabled(cfg.enabled || false);
       }
     });
   }, []);
 
-  const save = (newConns, newLevels, newEnabled) => {
-    const cfg = {
-      connections: newConns ?? connections,
-      tipLevels: newLevels ?? tipLevels,
-      enabled: newEnabled ?? syncEnabled,
-    };
-    window.electronAPI.store.set('toySyncConfig', cfg);
+  // Save full config to store + sync tiers/patterns to backend
+  const save = (opts = {}) => {
+    const newConns    = opts.connections ?? connections;
+    const newTiers    = opts.tiers       ?? tiers;
+    const newPatterns = opts.patterns    ?? patterns;
+    const newEnabled  = opts.enabled     ?? syncEnabled;
+
+    const cfg = { connections: newConns, tiers: newTiers, patterns: newPatterns, enabled: newEnabled };
+    api.store.set('toySyncConfig', cfg);
+
+    // Also push to backend tip-map so auto-fire works immediately
+    api.sync.saveTipMap({
+      enabled: newEnabled,
+      tiers: newTiers.map((t) => ({ label: t.label, minTokens: t.tokens, intensity: t.intensity, duration: t.duration })),
+      patterns: newPatterns.map((p) => ({ id: p.id, label: p.label, tokens: p.tokens, intensity: p.intensity, enabled: p.enabled })),
+    }).catch(() => {});
   };
 
   const togglePlatform = (id, enabled) => {
-    const updated = { ...connections, [id]: { ...(connections[id] || {}), enabled } };
-    setConnections(updated);
-    save(updated, null, null);
+    const c = { ...connections, [id]: { ...(connections[id] || {}), enabled } };
+    setConnections(c);
+    save({ connections: c });
   };
 
   const setField = (id, key, val) => {
-    const updated = { ...connections, [id]: { ...(connections[id] || {}), [key]: val } };
-    setConnections(updated);
-    save(updated, null, null);
+    const c = { ...connections, [id]: { ...(connections[id] || {}), [key]: val } };
+    setConnections(c);
+    save({ connections: c });
   };
 
   const testVibrate = (id) => {
     setTestPlatform(id);
-    setTimeout(() => setTestPlatform(null), 2000);
-    // Emit a PS_CMD-compatible test signal for connected toy bridges
-    const cmd = JSON.stringify({ action: 'vibrate', intensity: 50, duration: 2, source: id });
-    console.log(`[PS_CMD]${cmd}`);
+    setTimeout(() => setTestPlatform(null), 2500);
+    api.sync.vibrate(50, 2).catch(() => {});
   };
 
-  const updateTipLevel = (idx, key, val) => {
-    const updated = tipLevels.map((l, i) => i === idx ? { ...l, [key]: val } : l);
-    setTipLevels(updated);
-    save(null, updated, null);
+  // Tiers
+  const updateTier = (idx, field, raw) => {
+    const num = Math.max(0, parseInt(raw) || 0);
+    const clamped = field === 'tokens' ? num
+      : field === 'intensity' ? Math.min(100, num)
+      : Math.min(120, Math.max(1, num));
+    const updated = tiers.map((t, i) => i === idx ? { ...t, [field]: clamped } : t);
+    setTiers(updated);
+    save({ tiers: updated });
+  };
+
+  // Patterns
+  const updatePattern = (idx, field, raw) => {
+    let val = raw;
+    if (field === 'tokens')    val = Math.max(0, parseInt(raw) || 0);
+    if (field === 'intensity') val = Math.min(100, Math.max(0, parseInt(raw) || 0));
+    if (field === 'enabled')   val = raw; // boolean
+    const updated = patterns.map((p, i) => i === idx ? { ...p, [field]: val } : p);
+    setPatterns(updated);
+    save({ patterns: updated });
+  };
+
+  const firePattern = async (pattern, idx) => {
+    setFiringPattern(idx);
+    try { await api.sync.firePattern(pattern.id, pattern.intensity); } catch {}
+    setTimeout(() => setFiringPattern(null), 500);
   };
 
   const anyEnabled = Object.values(connections).some((c) => c.enabled);
@@ -769,10 +815,11 @@ function SyncPanel() {
   return (
     <div className="flex-col gap-3">
 
-      {/* Master toggle */}
+      {/* ── Master toggle ─────────────────────────────────── */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '8px 10px', background: syncEnabled ? 'rgba(139,92,246,0.12)' : 'var(--bg-tertiary)',
+        padding: '8px 10px',
+        background: syncEnabled ? 'rgba(139,92,246,0.12)' : 'var(--bg-tertiary)',
         border: `1px solid ${syncEnabled ? 'rgba(139,92,246,0.4)' : 'var(--border)'}`,
         borderRadius: 8,
       }}>
@@ -781,52 +828,46 @@ function SyncPanel() {
             Tip-to-Toy Sync {syncEnabled ? '● ACTIVE' : '○ OFF'}
           </div>
           <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 2 }}>
-            Automatically vibrate connected toys on incoming tips
+            Auto-vibrate connected toys on incoming tips
           </div>
         </div>
         <button
           className={`btn btn-sm ${syncEnabled ? 'btn-accent' : ''}`}
-          style={{ fontSize: 9, padding: '3px 10px', background: syncEnabled ? '#7c3aed' : undefined }}
-          onClick={() => { setSyncEnabled(!syncEnabled); save(null, null, !syncEnabled); }}
+          style={{ fontSize: 9, padding: '3px 12px', background: syncEnabled ? '#7c3aed' : undefined }}
+          onClick={() => { const e = !syncEnabled; setSyncEnabled(e); save({ enabled: e }); }}
         >
           {syncEnabled ? 'ON' : 'OFF'}
         </button>
       </div>
 
-      {/* Platform connections */}
+      {/* ── Platform connections ───────────────────────────── */}
       <div>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>PLATFORMS</div>
         <div className="flex-col" style={{ gap: 4 }}>
           {PLATFORMS.map((p) => {
-            const conn = connections[p.id] || {};
+            const conn       = connections[p.id] || {};
             const isExpanded = expandedPlatform === p.id;
-            const isTesting = testPlatform === p.id;
-
+            const isTesting  = testPlatform === p.id;
             return (
               <div key={p.id} style={{
-                background: 'var(--bg-tertiary)', borderRadius: 7,
+                background: 'var(--bg-tertiary)', borderRadius: 7, overflow: 'hidden',
                 border: `1px solid ${conn.enabled ? 'rgba(139,92,246,0.35)' : 'var(--border)'}`,
-                overflow: 'hidden',
               }}>
-                {/* Platform header row */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px' }}>
                   <span style={{ fontSize: 14 }}>{p.icon}</span>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                    <div style={{ fontSize: 11, fontWeight: 600 }}>{p.name}</div>
                     <div style={{ fontSize: 8, color: 'var(--text-dim)', marginTop: 1 }}>{p.desc}</div>
                   </div>
                   {conn.enabled && (
-                    <button
-                      className="btn btn-sm"
+                    <button className="btn btn-sm"
                       onClick={() => testVibrate(p.id)}
                       style={{ fontSize: 8, padding: '2px 6px', color: isTesting ? '#4ade80' : undefined }}
-                      title="Send a test vibrate signal"
                     >
                       {isTesting ? '✓' : '⚡ Test'}
                     </button>
                   )}
-                  <button
-                    className="btn btn-sm"
+                  <button className="btn btn-sm"
                     onClick={() => setExpandedPlatform(isExpanded ? null : p.id)}
                     style={{ fontSize: 9, padding: '2px 6px' }}
                   >
@@ -840,29 +881,18 @@ function SyncPanel() {
                     {conn.enabled ? 'ON' : 'OFF'}
                   </button>
                 </div>
-
-                {/* Expanded config */}
                 {isExpanded && (
                   <div style={{ padding: '0 10px 10px', borderTop: '1px solid var(--border)' }}>
                     {p.fields.map(({ key, label, type, placeholder }) => (
                       <div key={key} style={{ marginTop: 8 }}>
                         <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>{label}</label>
-                        <input
-                          className="input"
-                          type={type}
-                          style={{ width: '100%', marginTop: 2 }}
-                          placeholder={placeholder}
-                          value={conn[key] || ''}
-                          onChange={(e) => setField(p.id, key, e.target.value)}
-                        />
+                        <input className="input" type={type} style={{ width: '100%', marginTop: 2 }}
+                          placeholder={placeholder} value={conn[key] || ''}
+                          onChange={(e) => setField(p.id, key, e.target.value)} />
                       </div>
                     ))}
-                    <a
-                      href={p.docsUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ fontSize: 8, color: 'var(--accent)', textDecoration: 'none', display: 'block', marginTop: 6 }}
-                    >
+                    <a href={p.docsUrl} target="_blank" rel="noreferrer"
+                      style={{ fontSize: 8, color: 'var(--accent)', textDecoration: 'none', display: 'block', marginTop: 6 }}>
                       ↗ Setup docs
                     </a>
                   </div>
@@ -873,57 +903,188 @@ function SyncPanel() {
         </div>
       </div>
 
-      {/* Tip level mapping */}
-      <div>
-        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>TIP → VIBRATION MAPPING</div>
-        <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 8 }}>
-          Set intensity (0–100) and duration (seconds) per tip tier.
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-          {tipLevels.map((level, idx) => (
-            <div key={level.label} style={{
-              background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-              borderLeft: `3px solid ${level.color}`, borderRadius: 6, padding: '6px 8px',
-            }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: level.color, marginBottom: 5 }}>
-                {level.label} <span style={{ fontWeight: 400, color: 'var(--text-dim)' }}>≥{level.tokens}tk</span>
-              </div>
-              <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 3 }}>
-                <label style={{ fontSize: 8, color: 'var(--text-dim)', width: 52 }}>Intensity</label>
-                <input
-                  className="input" type="number" min={0} max={100}
-                  style={{ flex: 1, padding: '1px 4px', fontSize: 10 }}
-                  value={level.intensity}
-                  onChange={(e) => updateTipLevel(idx, 'intensity', Math.min(100, Math.max(0, parseInt(e.target.value) || 0)))}
-                />
-                <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>%</span>
-              </div>
-              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                <label style={{ fontSize: 8, color: 'var(--text-dim)', width: 52 }}>Duration</label>
-                <input
-                  className="input" type="number" min={1} max={60}
-                  style={{ flex: 1, padding: '1px 4px', fontSize: 10 }}
-                  value={level.duration}
-                  onChange={(e) => updateTipLevel(idx, 'duration', Math.min(60, Math.max(1, parseInt(e.target.value) || 1)))}
-                />
-                <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>s</span>
-              </div>
-            </div>
-          ))}
-        </div>
+      {/* ── Section tabs ──────────────────────────────────── */}
+      <div style={{ display: 'flex', gap: 4 }}>
+        {[['tiers', '🎚️ Tiers'], ['patterns', '🎛️ Patterns']].map(([key, label]) => (
+          <button key={key}
+            onClick={() => setActiveSection(key)}
+            style={{
+              flex: 1, padding: '5px 0', fontSize: 10, fontWeight: 600,
+              background: activeSection === key ? 'rgba(139,92,246,0.18)' : 'var(--bg-tertiary)',
+              border: `1px solid ${activeSection === key ? 'rgba(139,92,246,0.5)' : 'var(--border)'}`,
+              color: activeSection === key ? '#a78bfa' : 'var(--text-secondary)',
+              borderRadius: 6, cursor: 'pointer',
+            }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
-      {/* Status */}
+      {/* ── Tip Tiers ────────────────────────────────────── */}
+      {activeSection === 'tiers' && (
+        <div>
+          <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 8 }}>
+            Set token threshold, intensity (0–100%) and duration per tier. Tiers fire when a tip ≥ token amount and no pattern matches.
+          </div>
+          <div className="flex-col" style={{ gap: 5 }}>
+            {tiers.map((tier, idx) => (
+              <div key={tier.label} style={{
+                background: 'var(--bg-tertiary)',
+                border: `1px solid var(--border)`,
+                borderLeft: `3px solid ${tier.color}`,
+                borderRadius: 6, padding: '8px 10px',
+              }}>
+                {/* Tier header */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span style={{ fontSize: 13 }}>{tier.icon}</span>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: tier.color }}>{tier.label}</span>
+                  </div>
+                  {/* Intensity mini-bar */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <div style={{
+                      width: 50, height: 4, background: 'var(--bg-secondary)', borderRadius: 2, overflow: 'hidden',
+                    }}>
+                      <div style={{ width: `${tier.intensity}%`, height: '100%', background: tier.color, borderRadius: 2 }} />
+                    </div>
+                    <span style={{ fontSize: 9, color: tier.color, fontWeight: 600 }}>{tier.intensity}%</span>
+                  </div>
+                </div>
+
+                {/* 3-field row */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 5 }}>
+                  <TierField label="Tokens ≥" value={tier.tokens} min={0} max={9999}
+                    onChange={(v) => updateTier(idx, 'tokens', v)} suffix="tk" />
+                  <TierField label="Intensity" value={tier.intensity} min={0} max={100}
+                    onChange={(v) => updateTier(idx, 'intensity', v)} suffix="%" />
+                  <TierField label="Duration" value={tier.duration} min={1} max={120}
+                    onChange={(v) => updateTier(idx, 'duration', v)} suffix="s" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Custom Patterns ──────────────────────────────── */}
+      {activeSection === 'patterns' && (
+        <div>
+          <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 8 }}>
+            Patterns override tiers when a tip exactly matches the token amount. Set tokens to 0 to disable auto-fire (manual-only).
+          </div>
+          <div className="flex-col" style={{ gap: 5 }}>
+            {patterns.map((p, idx) => {
+              const isFiring = firingPattern === idx;
+              const isStop   = p.id === 'stopthequiver';
+              return (
+                <div key={p.id} style={{
+                  background: 'var(--bg-tertiary)',
+                  border: `1px solid ${p.enabled ? p.color + '55' : 'var(--border)'}`,
+                  borderLeft: `3px solid ${p.color}`,
+                  borderRadius: 6, padding: '8px 10px',
+                  opacity: p.enabled || isStop ? 1 : 0.55,
+                }}>
+                  {/* Pattern header */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 16 }}>{p.icon}</span>
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: p.color }}>{p.label}</div>
+                        <div style={{ fontSize: 8, color: 'var(--text-dim)', marginTop: 1 }}>
+                          {isStop ? 'Stops all vibration immediately' : 'Custom vibration sequence'}
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                      {/* Fire / Stop button */}
+                      <button
+                        onClick={() => firePattern(p, idx)}
+                        style={{
+                          padding: '3px 9px', fontSize: 9, fontWeight: 700, borderRadius: 4,
+                          background: isFiring ? p.color : 'transparent',
+                          border: `1px solid ${p.color}`,
+                          color: isFiring ? '#fff' : p.color,
+                          cursor: 'pointer', transition: 'all 0.15s',
+                        }}
+                      >
+                        {isStop ? '✋ Stop' : isFiring ? '●' : '▶ Fire'}
+                      </button>
+                      {/* Enable toggle (not for stop-the-quiver) */}
+                      {!isStop && (
+                        <button
+                          onClick={() => updatePattern(idx, 'enabled', !p.enabled)}
+                          style={{
+                            padding: '3px 7px', fontSize: 9, borderRadius: 4, cursor: 'pointer',
+                            background: p.enabled ? '#7c3aed' : 'transparent',
+                            border: `1px solid ${p.enabled ? '#7c3aed' : 'var(--border)'}`,
+                            color: p.enabled ? '#fff' : 'var(--text-dim)',
+                          }}
+                        >
+                          {p.enabled ? 'ON' : 'OFF'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Token + Intensity fields */}
+                  {!isStop && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+                      <TierField label="Trigger (exact tk)" value={p.tokens} min={0} max={9999}
+                        onChange={(v) => updatePattern(idx, 'tokens', v)} suffix="tk"
+                        dimLabel={p.tokens === 0 ? 'manual only' : undefined} />
+                      <TierField label="Intensity" value={p.intensity} min={0} max={100}
+                        onChange={(v) => updatePattern(idx, 'intensity', v)} suffix="%" />
+                    </div>
+                  )}
+
+                  {/* Intensity bar for non-stop patterns */}
+                  {!isStop && (
+                    <div style={{ marginTop: 6 }}>
+                      <div style={{ width: '100%', height: 3, background: 'var(--bg-secondary)', borderRadius: 2, overflow: 'hidden' }}>
+                        <div style={{ width: `${p.intensity}%`, height: '100%', background: p.color, borderRadius: 2, transition: 'width 0.2s' }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Status bar ───────────────────────────────────── */}
       {syncEnabled && !anyEnabled && (
         <div style={{ fontSize: 9, color: '#fbbf24', padding: '6px 10px', background: 'rgba(251,191,36,0.08)', borderRadius: 6, border: '1px solid rgba(251,191,36,0.2)' }}>
-          ⚠ Sync is ON but no platforms are enabled. Toggle at least one platform above.
+          ⚠ Sync is ON but no platforms are enabled above.
         </div>
       )}
       {syncEnabled && anyEnabled && (
         <div style={{ fontSize: 9, color: '#4ade80', padding: '6px 10px', background: 'rgba(74,222,128,0.08)', borderRadius: 6, border: '1px solid rgba(74,222,128,0.2)' }}>
-          ✓ Sync active — incoming tips will trigger connected toys automatically.
+          ✓ Sync active — incoming tips trigger connected toys automatically.
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Shared small number field for tier / pattern editing ──
+function TierField({ label, value, min, max, onChange, suffix, dimLabel }) {
+  return (
+    <div>
+      <label style={{ fontSize: 8, color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
+        {label}
+        {dimLabel && <span style={{ color: '#ef4444', marginLeft: 4 }}>{dimLabel}</span>}
+      </label>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        <input
+          className="input" type="number" min={min} max={max}
+          style={{ flex: 1, padding: '2px 4px', fontSize: 10 }}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <span style={{ fontSize: 8, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>{suffix}</span>
+      </div>
     </div>
   );
 }
