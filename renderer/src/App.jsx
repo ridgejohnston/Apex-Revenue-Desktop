@@ -111,7 +111,18 @@ export default function App() {
     });
 
     api.onLiveUpdate((data) => setLiveData(data));
-    api.stream.onStatus((status) => setStreamStatus(status));
+    api.stream.onStatus((status) => {
+      setStreamStatus(prev => {
+        // If stream just stopped unexpectedly (was streaming, now isn't) and there's an error
+        if (prev.streaming && !status.streaming && status.errorReason) {
+          // Small delay so the "LIVE" badge has time to flip before the alert
+          setTimeout(() => {
+            alert(`Stream stopped unexpectedly:\n\n${status.errorReason}\n\nCheck your Stream URL, Stream Key, and that your audio device is connected.`);
+          }, 300);
+        }
+        return status;
+      });
+    });
     api.cam.onPlatformDetected((p) => setPlatform(p));
     api.aws.onAiPrompt((data) => setAiPrompt(data));
     api.aws.onPollyAudio((base64) => {

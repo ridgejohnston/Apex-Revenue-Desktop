@@ -45,24 +45,34 @@ class StreamEngine extends EventEmitter {
       audioBitrate, resolution, fps, preset,
     } = settings;
 
-    const rtmpUrl = streamKey ? `${streamUrl}/${streamKey}` : streamUrl;
+    // Strip trailing slash so we never get double-slash in RTMP URL
+    const baseUrl = (streamUrl || '').replace(/\/+$/, '');
+    const rtmpUrl = streamKey ? `${baseUrl}/${streamKey}` : baseUrl;
+
+    // Only use dshow audio if a non-empty device name is configured
+    const useAudio = settings.audioDevice && settings.audioDevice.trim() !== '';
+
+    // Collect stderr for error reporting — last 3KB is enough
+    let stderrBuf = '';
 
     // Build FFmpeg args for RTMP streaming
-    // Input: desktop capture via GDI (Windows) or virtual device
     const args = [
-      // Video input: GDI screen capture
+      // Video input: GDI screen capture of full desktop
+      // Do NOT pass -video_size here — capture at native resolution,
+      // then scale to target at encoding time. Passing a mismatched
+      // -video_size causes an immediate fatal error on most machines.
       '-f', 'gdigrab',
       '-framerate', String(fps),
-      '-video_size', `${resolution.width}x${resolution.height}`,
       '-i', 'desktop',
 
-      // Audio input: use configured device, or skip audio if none set
-      ...(settings.audioDevice
+      // Audio input: use configured dshow device, or silent fallback
+      ...(useAudio
         ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
         : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),
 
-      // Video encoding
+      // Video encoding — scale to target resolution here instead of on input
       '-c:v', videoEncoder,
+      '-vf', `scale=${resolution.width}:${resolution.height}`,
       '-preset', preset,
       '-b:v', `${videoBitrate}k`,
       '-maxrate', `${videoBitrate}k`,
@@ -81,6 +91,10 @@ class StreamEngine extends EventEmitter {
       rtmpUrl,
     ];
 
+    console.log('[StreamEngine] Starting stream to:', rtmpUrl);
+    console.log('[StreamEngine] FFmpeg path:', this.ffmpegPath);
+    console.log('[StreamEngine] Args:', args.join(' '));
+
     this.streamProcess = spawn(this.ffmpegPath, args, {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -88,6 +102,7 @@ class StreamEngine extends EventEmitter {
 
     this.status.streaming = true;
     this.status.streamUptime = 0;
+    this.status.errorReason = null;
     this._uptimeInterval = setInterval(() => {
       this.status.streamUptime++;
       this._parseFFmpegStats();
@@ -95,20 +110,40 @@ class StreamEngine extends EventEmitter {
     }, 1000);
 
     this.streamProcess.stderr.on('data', (data) => {
-      this._handleFFmpegOutput(data.toString());
+      const text = data.toString();
+      stderrBuf = (stderrBuf + text).slice(-3000); // keep last 3KB
+      this._handleFFmpegOutput(text);
     });
 
     this.streamProcess.on('close', (code) => {
       this.status.streaming = false;
       if (this._uptimeInterval) clearInterval(this._uptimeInterval);
+
+      // Extract meaningful error from stderr when FFmpeg exits unexpectedly
+      let errorReason = null;
+      if (code !== 0 && code !== null && stderrBuf) {
+        // Pull the last error line from FFmpeg stderr
+        const lines = stderrBuf.split('\n').filter(l => l.trim());
+        const errorLine = lines.reverse().find(l =>
+          /error|failed|invalid|refused|not found|cannot|unable|no such/i.test(l)
+        );
+        errorReason = errorLine
+          ? errorLine.replace(/^\d{4}-\d{2}-\d{2}.*?error:/i, '').trim()
+          : `FFmpeg exited with code ${code}`;
+        console.error('[StreamEngine] Stream stopped unexpectedly:', errorReason);
+        console.error('[StreamEngine] Full stderr tail:\n', stderrBuf.slice(-1000));
+      }
+
+      this.status.errorReason = errorReason;
       this.emit('status', { ...this.status });
       this.streamProcess = null;
     });
 
     this.streamProcess.on('error', (err) => {
-      console.error('Stream FFmpeg error:', err);
+      console.error('[StreamEngine] Spawn error:', err);
       this.status.streaming = false;
-      this.emit('status', { ...this.status, error: err.message });
+      this.status.errorReason = err.message;
+      this.emit('status', { ...this.status });
       this.streamProcess = null;
     });
 
@@ -142,15 +177,17 @@ class StreamEngine extends EventEmitter {
     // Ensure output dir exists
     fs.mkdirSync(outputPath, { recursive: true });
 
+    const useAudio = settings.audioDevice && settings.audioDevice.trim() !== '';
+
     const args = [
       '-f', 'gdigrab',
       '-framerate', String(fps),
-      '-video_size', `${resolution.width}x${resolution.height}`,
       '-i', 'desktop',
-      ...(settings.audioDevice
+      ...(useAudio
         ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
         : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),
       '-c:v', videoEncoder,
+      '-vf', `scale=${resolution.width}:${resolution.height}`,
       '-preset', preset,
       '-crf', '18',
       '-b:v', `${videoBitrate}k`,
