@@ -293,40 +293,99 @@ class StreamEngine extends EventEmitter {
 
     // No colon in the friendly name: sanitizer is enough, no probe.
     if (!String(friendlyName).includes(':')) {
+      this._diag('has colon: no (sanitize path)');
       return this._sanitizeDshowName(friendlyName);
     }
+    this._diag('has colon: yes (alt-name lookup needed)');
 
     if (!this._altNameCache) this._altNameCache = new Map();
     if (this._altNameCache.has(friendlyName)) {
-      return this._altNameCache.get(friendlyName);
+      const cached = this._altNameCache.get(friendlyName);
+      this._diag(`cache: HIT, returning ${JSON.stringify(cached)}`);
+      return cached;
     }
+    this._diag('cache: miss, running detectWebcams');
 
     try {
+      const t0 = Date.now();
       const devices = await this.detectWebcams();
+      const elapsed = Date.now() - t0;
+      this._diag(`detectWebcams completed in ${elapsed}ms, returned ${devices.length} device(s)`);
+      devices.forEach((d, i) => {
+        this._diag(`  [${i}] name=${JSON.stringify(d.name)} altName=${d.alternativeName ? JSON.stringify(d.alternativeName) : 'null'}`);
+      });
+
       const strippedForMatch = String(friendlyName)
         .replace(/^(Default|Communications)\s*-\s*/i, '');
+      this._diag(`matching against (after stripping prefix): ${JSON.stringify(strippedForMatch)}`);
+
       const match = devices.find((d) => d.name === strippedForMatch);
 
       if (match && match.alternativeName) {
+        this._diag(`match: FOUND, using alt name ${JSON.stringify(match.alternativeName)}`);
         console.log(`[StreamEngine] Resolved "${friendlyName}" -> alternative name`);
         this._altNameCache.set(friendlyName, match.alternativeName);
         return match.alternativeName;
       }
+      if (match && !match.alternativeName) {
+        this._diag('match: FOUND but device has no alternativeName (parser issue?)');
+      } else {
+        this._diag('match: NOT FOUND in device list');
+      }
       console.warn(`[StreamEngine] No alt name found for "${friendlyName}"; falling back to sanitized friendly name (stream may fail)`);
     } catch (err) {
+      this._diag(`detectWebcams threw: ${err.message}`);
       console.warn('[StreamEngine] Alt-name lookup failed:', err.message);
     }
 
     // Fallback: sanitize and cache so we don't re-probe every call.
     const sanitized = this._sanitizeDshowName(friendlyName);
+    this._diag(`fallback: sanitized name = ${JSON.stringify(sanitized)} (may still fail in FFmpeg)`);
     this._altNameCache.set(friendlyName, sanitized);
     return sanitized;
+  }
+
+  // Pre-populate the alt-name cache by running detectWebcams once. Call
+  // this from main.js on app ready, BEFORE the renderer has a chance to
+  // open getUserMedia handles on any webcam. Rationale: Windows cameras
+  // can go into an exclusive-access state once a process holds them via
+  // DirectShow filter graph / Media Foundation, and subsequent
+  // -list_devices probes may miss the device or return it without its
+  // Alternative name line. Running the probe at true app startup beats
+  // this race; the cache then serves _resolveDshowVideoName for the
+  // rest of the session.
+  async preflightDeviceDetection() {
+    try {
+      const devices = await this.detectWebcams();
+      if (!this._altNameCache) this._altNameCache = new Map();
+      let cached = 0;
+      for (const d of devices) {
+        if (d.alternativeName) {
+          // Cache under the bare friendly name AND the browser-prefixed
+          // variants obsSettings might store (getUserMedia returns
+          // "Default - <name>" for the system default, "Communications - <name>"
+          // for the Windows communications default).
+          this._altNameCache.set(d.name, d.alternativeName);
+          this._altNameCache.set(`Default - ${d.name}`, d.alternativeName);
+          this._altNameCache.set(`Communications - ${d.name}`, d.alternativeName);
+          cached++;
+        }
+      }
+      console.log(`[StreamEngine] preflightDeviceDetection: cached ${cached} webcam alt name(s) from ${devices.length} device(s)`);
+      return { devices, cachedCount: cached };
+    } catch (err) {
+      console.warn('[StreamEngine] preflightDeviceDetection failed:', err.message);
+      return { devices: [], cachedCount: 0 };
+    }
   }
 
   async _videoInputArgs(settings, fps) {
     const source = settings.videoSource || 'screen';
     const webcamName = settings.webcamDevice;
     const webcamConfigured = webcamName && String(webcamName).trim() !== '';
+
+    this._diag(`videoSource: ${source}`);
+    this._diag(`webcamDevice requested: ${webcamConfigured ? JSON.stringify(webcamName) : '(empty)'}`);
 
     // Always log the routing decision. When the UI and stream disagree
     // ("I clicked Webcam but it streamed my screen"), this line in the
@@ -335,6 +394,7 @@ class StreamEngine extends EventEmitter {
 
     if (source === 'webcam' && webcamConfigured) {
       const deviceName = await this._resolveDshowVideoName(webcamName);
+      this._diag(`final -i video=<arg>: ${JSON.stringify(deviceName)}`);
       return [
         '-f', 'dshow',
         // Some webcams publish MJPEG at the highest FPS and YUY2 at a
@@ -345,12 +405,19 @@ class StreamEngine extends EventEmitter {
         '-i', `video=${deviceName}`,
       ];
     }
-    // Default: GDI full-desktop screen capture
+    this._diag('→ SCREEN (gdigrab)');
     return [
       '-f', 'gdigrab',
       '-framerate', String(fps),
       '-i', 'desktop',
     ];
+  }
+
+  // Push a diagnostic line to the per-stream routing diag. No-op if
+  // _routingDiag hasn't been initialized (called outside of a stream
+  // attempt).
+  _diag(line) {
+    if (this._routingDiag) this._routingDiag.push(line);
   }
 
   // Enumerate DirectShow video input devices (webcams, capture cards,
@@ -435,6 +502,12 @@ class StreamEngine extends EventEmitter {
   // ─── RTMP Streaming ───────────────────────────────────
   async startStream(settings) {
     if (this.streamProcess) throw new Error('Stream already running');
+
+    // Reset per-stream routing diagnostics. Populated by _videoInputArgs,
+    // _resolveDshowVideoName, and detectWebcams as they run, then
+    // included in the stream log written on exit. This gives us hard
+    // data on which code path fired and why for any reported issue.
+    this._routingDiag = [];
 
     // Pre-flight: verify FFmpeg is actually available. Without this, we'd
     // fall back to spawning the bare string 'ffmpeg' and hope Windows
@@ -708,6 +781,11 @@ class StreamEngine extends EventEmitter {
         `# App version: ${(app && app.getVersion && app.getVersion()) || 'unknown'}`,
         `# Exit code: ${ctx.exitCode}`,
         `# Detected error: ${ctx.errorLine || '(none)'}`,
+        '',
+        '─── Video routing diagnostics ───',
+        (this._routingDiag && this._routingDiag.length
+          ? this._routingDiag.join('\n')
+          : '(no routing diagnostics captured)'),
         '',
         '─── FFmpeg invocation ───',
         `Binary: ${this.ffmpegPath}`,

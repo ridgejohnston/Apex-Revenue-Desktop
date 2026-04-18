@@ -554,6 +554,28 @@ app.whenReady().then(async () => {
     return allowed.includes(permission);
   });
 
+  // Preflight: probe dshow for device alt-names BEFORE the renderer starts
+  // and calls getUserMedia on webcams. Windows cameras can go into an
+  // exclusive-access state once held, and subsequent
+  // `ffmpeg -list_devices true -f dshow -i dummy` probes may miss them
+  // entirely or return them without the Alternative name line. Running
+  // the probe at true app startup beats this race.
+  //
+  // The alt name (e.g. "@device_pnp_\\?\usb#vid_04f2&pid_b75e...") is
+  // what we hand to FFmpeg at stream time in place of the friendly name
+  // — it's colon-free so FFmpeg's av_strtok(":") dshow parser doesn't
+  // mis-split on it. See stream-engine.js _resolveDshowVideoName for
+  // full rationale.
+  //
+  // Best-effort: if FFmpeg isn't yet installed (first run), the probe
+  // no-ops and the cache gets populated lazily at stream time instead.
+  try {
+    const pre = await streamEngine.preflightDeviceDetection();
+    console.log(`[main] Preflight cached alt names for ${pre.cachedCount} webcam(s)`);
+  } catch (err) {
+    console.warn('[main] Preflight probe failed (non-fatal):', err.message);
+  }
+
   createMainWindow();
   createCamView();
   createTray();
