@@ -79,6 +79,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     listImages: (folderPath) => ipcRenderer.invoke('slideshow:list-images', folderPath),
   },
 
+  // ─── Native file / folder picker ──────────────────────
+  // Used by AddSourceModal's Browse buttons. openFile accepts an
+  // options object with filters (Electron showOpenDialog spec).
+  // openFolder takes no args. Both return absolute path string or
+  // null on cancel.
+  dialog: {
+    openFile: (options) => ipcRenderer.invoke('dialog:open-file', options),
+    openFolder: (options) => ipcRenderer.invoke('dialog:open-folder', options),
+  },
+
   // ─── FFmpeg ───────────────────────────────────────────
   ffmpeg: {
     check: () => ipcRenderer.invoke('ffmpeg:check'),

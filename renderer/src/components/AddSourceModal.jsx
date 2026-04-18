@@ -203,12 +203,17 @@ export default function AddSourceModal({ onAdd, onClose }) {
 
                 {/* ── Image ── */}
                 {selected.type === 'image' && (
-                  <div>
-                    <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>Image File Path</label>
-                    <input className="input" style={{ width: '100%' }}
-                      value={properties.path || ''} onChange={(e) => prop('path', e.target.value)}
-                      placeholder="C:\path\to\image.png" />
-                  </div>
+                  <FilePicker
+                    label="Image File"
+                    value={properties.path}
+                    onChange={(v) => prop('path', v)}
+                    placeholder="C:\path\to\image.png"
+                    title="Select Image File"
+                    filters={[
+                      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] },
+                      { name: 'All Files', extensions: ['*'] },
+                    ]}
+                  />
                 )}
 
                 {/* ── Image URL ── */}
@@ -260,12 +265,13 @@ export default function AddSourceModal({ onAdd, onClose }) {
                 {/* ── Image Slideshow ── */}
                 {selected.type === 'image_slideshow' && (
                   <>
-                    <div>
-                      <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>Folder Path</label>
-                      <input className="input" style={{ width: '100%' }}
-                        value={properties.folderPath || ''} onChange={(e) => prop('folderPath', e.target.value)}
-                        placeholder="C:\path\to\images\" />
-                    </div>
+                    <FolderPicker
+                      label="Folder Path"
+                      value={properties.folderPath}
+                      onChange={(v) => prop('folderPath', v)}
+                      placeholder="C:\path\to\images\"
+                      title="Select Slideshow Folder"
+                    />
                     <div>
                       <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>Slide Interval (seconds)</label>
                       <input className="input" type="number" style={{ width: '100%' }}
@@ -288,12 +294,18 @@ export default function AddSourceModal({ onAdd, onClose }) {
                 {/* ── Media Source ── */}
                 {selected.type === 'media' && (
                   <>
-                    <div>
-                      <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>File Path</label>
-                      <input className="input" style={{ width: '100%' }}
-                        value={properties.path || ''} onChange={(e) => prop('path', e.target.value)}
-                        placeholder="C:\path\to\video.mp4" />
-                    </div>
+                    <FilePicker
+                      label="Video File"
+                      value={properties.path}
+                      onChange={(v) => prop('path', v)}
+                      placeholder="C:\path\to\video.mp4"
+                      title="Select Video File"
+                      filters={[
+                        { name: 'Videos', extensions: ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi'] },
+                        { name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'] },
+                        { name: 'All Files', extensions: ['*'] },
+                      ]}
+                    />
                     <div className="flex gap-2">
                       <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
                         <input type="checkbox" checked={properties.loop || false}
@@ -416,6 +428,109 @@ export default function AddSourceModal({ onAdd, onClose }) {
             Add Source
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── File Picker ──────────────────────────────────────────
+// Wraps a path input with a native Browse button. Replaces the
+// bare label+input pattern used for image/media/slideshow sources
+// so users don't have to hand-type filesystem paths.
+//
+// filters follow Electron's showOpenDialog spec: an array of
+// { name, extensions }. Extensions are without the leading dot.
+// The Browse button falls back silently on cancel (user escapes
+// the dialog without picking); the input keeps its prior value.
+function FilePicker({ label, value, onChange, placeholder, filters, title }) {
+  const api = window.electronAPI;
+  const handleBrowse = async () => {
+    try {
+      const result = await api.dialog.openFile({
+        title: title || 'Select File',
+        filters: filters || [{ name: 'All Files', extensions: ['*'] }],
+      });
+      if (result) onChange(result);
+    } catch (err) {
+      console.warn('[FilePicker] browse failed:', err.message);
+    }
+  };
+  return (
+    <div>
+      <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>{label}</label>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          className="input"
+          style={{ flex: 1 }}
+          value={value || ''}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+        />
+        <button
+          type="button"
+          onClick={handleBrowse}
+          style={{
+            padding: '0 12px',
+            fontSize: 10,
+            fontWeight: 600,
+            background: 'var(--bg-secondary, rgba(255,255,255,0.05))',
+            color: 'var(--text-secondary)',
+            border: '1px solid var(--border, rgba(255,255,255,0.08))',
+            borderRadius: 4,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+          title="Open native file picker"
+        >
+          Browse…
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Folder Picker ────────────────────────────────────────
+// Same shape as FilePicker but uses openFolder. For the image
+// slideshow source's folder-path field.
+function FolderPicker({ label, value, onChange, placeholder, title }) {
+  const api = window.electronAPI;
+  const handleBrowse = async () => {
+    try {
+      const result = await api.dialog.openFolder({ title: title || 'Select Folder' });
+      if (result) onChange(result);
+    } catch (err) {
+      console.warn('[FolderPicker] browse failed:', err.message);
+    }
+  };
+  return (
+    <div>
+      <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>{label}</label>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          className="input"
+          style={{ flex: 1 }}
+          value={value || ''}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+        />
+        <button
+          type="button"
+          onClick={handleBrowse}
+          style={{
+            padding: '0 12px',
+            fontSize: 10,
+            fontWeight: 600,
+            background: 'var(--bg-secondary, rgba(255,255,255,0.05))',
+            color: 'var(--text-secondary)',
+            border: '1px solid var(--border, rgba(255,255,255,0.08))',
+            borderRadius: 4,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+          title="Open native folder picker"
+        >
+          Browse…
+        </button>
       </div>
     </div>
   );

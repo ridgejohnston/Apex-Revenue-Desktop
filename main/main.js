@@ -3,7 +3,7 @@
  * Combines Creator Intelligence Engine with full OBS-style streaming platform
  */
 
-const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, desktopCapturer, session, screen, protocol } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, desktopCapturer, session, screen, protocol, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -221,6 +221,50 @@ ipcMain.handle('slideshow:list-images', async (_, folderPath) => {
   } catch (err) {
     console.warn('[main] slideshow:list-images failed:', err.message);
     return [];
+  }
+});
+
+// Native file picker. Used by AddSourceModal's Browse buttons for
+// image and video file sources so users don't have to type paths.
+// `filters` follows Electron's showOpenDialog spec: an array of
+// { name, extensions }. Returns the first selected absolute path or
+// null if the user cancels.
+//
+// Parent window is the main app window so the dialog is modal and
+// can't get lost behind other windows — a common pain point with
+// non-modal pickers in frameless apps.
+ipcMain.handle('dialog:open-file', async (_, options = {}) => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: options.title || 'Select File',
+      properties: ['openFile'],
+      filters: options.filters || [{ name: 'All Files', extensions: ['*'] }],
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return null;
+    }
+    return result.filePaths[0];
+  } catch (err) {
+    console.warn('[main] dialog:open-file failed:', err.message);
+    return null;
+  }
+});
+
+// Native folder picker. Used by the Image Slideshow source's Browse
+// button. Returns the selected folder absolute path or null on cancel.
+ipcMain.handle('dialog:open-folder', async (_, options = {}) => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: options.title || 'Select Folder',
+      properties: ['openDirectory'],
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return null;
+    }
+    return result.filePaths[0];
+  } catch (err) {
+    console.warn('[main] dialog:open-folder failed:', err.message);
+    return null;
   }
 });
 
