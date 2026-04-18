@@ -314,6 +314,13 @@ class StreamEngine extends EventEmitter {
       devices.forEach((d, i) => {
         this._diag(`  [${i}] name=${JSON.stringify(d.name)} altName=${d.alternativeName ? JSON.stringify(d.alternativeName) : 'null'}`);
       });
+      // If the parser returned empty, dump the first 2KB of raw stderr
+      // so we can see exactly what FFmpeg's output format looks like on
+      // this machine and fix the parser if it's drifted again.
+      if (devices.length === 0 && this._lastDetectStderr) {
+        this._diag('raw stderr (first 2KB):');
+        this._lastDetectStderr.slice(0, 2048).split('\n').forEach((l) => this._diag(`  ${l}`));
+      }
 
       const strippedForMatch = String(friendlyName)
         .replace(/^(Default|Communications)\s*-\s*/i, '');
@@ -441,7 +448,15 @@ class StreamEngine extends EventEmitter {
       // FFmpeg always exits non-zero on the dummy input — ignore that,
       // we only care about the device list it printed along the way.
       const finish = () => {
-        resolve(this._parseDshowDeviceList(stderr));
+        const parsed = this._parseDshowDeviceList(stderr);
+        // If parsing came up empty, stash the raw stderr so the routing
+        // diagnostics can dump it. Parser failures are usually format
+        // drift in FFmpeg output — seeing the raw bytes makes the fix
+        // obvious.
+        if (parsed.length === 0) {
+          this._lastDetectStderr = stderr;
+        }
+        resolve(parsed);
       };
       proc.on('close', finish);
       proc.on('error', () => resolve([]));
@@ -454,46 +469,86 @@ class StreamEngine extends EventEmitter {
     });
   }
 
+  // Parse FFmpeg's dshow device-enumeration stderr. Returns only VIDEO
+  // devices as [{ name, alternativeName }, ...].
+  //
+  // Output format evolution:
+  //
+  // OLDER FFmpeg (pre-2020ish) emitted section headers and relied on
+  // position to classify devices:
+  //
+  //   [dshow @ 0x0] DirectShow video devices
+  //   [dshow @ 0x0]  "HP TrueVision HD Camera (04f2:b75e)"
+  //   [dshow @ 0x0]     Alternative name "@device_pnp_..."
+  //   [dshow @ 0x0] DirectShow audio devices
+  //   [dshow @ 0x0]  "Microphone Array (...)"
+  //
+  // MODERN FFmpeg (2020+ including Ridge's N-123960 build) dropped the
+  // section headers in favor of a per-line suffix:
+  //
+  //   [dshow @ 0x0]  "HP TrueVision HD Camera (04f2:b75e)" (video)
+  //   [dshow @ 0x0]     Alternative name "@device_pnp_..."
+  //   [dshow @ 0x0]  "Microphone Array (...)" (audio)
+  //
+  // The old parser gated every line on inVideoSection, which was set by
+  // the now-removed "DirectShow video devices" header. With that header
+  // gone on modern FFmpeg, inVideoSection stayed false, every device
+  // line was skipped, and the parser returned []. That's what Ridge's
+  // v3.3.16 stream log showed: "detectWebcams returned 0 device(s)".
+  //
+  // New approach: classify each device line by its (video)/(audio)
+  // suffix first. If absent (older FFmpeg), fall back to the section
+  // header state. Works for both formats.
   _parseDshowDeviceList(stderr) {
     const lines = stderr.split('\n');
     const videos = [];
-    let inVideoSection = false;
+    let sectionIsVideo = null; // null until a header is seen (older format)
     let lastDeviceIndex = -1;
+    let lastWasVideo = false;
 
     for (const line of lines) {
-      // Section headers tell us whether following names are video or audio
+      // Older-format section headers. Harmless in modern format since
+      // they just never match.
       if (/DirectShow video devices/i.test(line)) {
-        inVideoSection = true;
+        sectionIsVideo = true;
         continue;
       }
       if (/DirectShow audio devices/i.test(line)) {
-        inVideoSection = false;
+        sectionIsVideo = false;
         continue;
       }
-      if (!inVideoSection) continue;
 
-      // A primary device line looks like:
-      //   [dshow @ 000...]  "HP TrueVision HD Camera (04f2:b75e)" (video)
-      // Recent FFmpeg builds (including the bundled one) append a
-      // "(video)" or "(audio)" type suffix AFTER the closing quote —
-      // older versions didn't, and the original regex here required
-      // the closing quote to be at end-of-line, which no-matched every
-      // modern primary device line and left us with an empty device
-      // list. Capture the FIRST quoted string on the line instead;
-      // that's the device name whether there's a suffix or not.
-      //
-      // Alt name lines are distinguished by the "Alternative name"
-      // substring check, independent of the quote regex.
-      //
-      //   [dshow @ 000...]     Alternative name "@device_pnp_\\?\usb#..."
-      const primary = line.match(/"([^"]+)"/);
+      const quoted = line.match(/"([^"]+)"/);
+      if (!quoted) continue;
+
       const isAltName = /Alternative name/i.test(line);
 
-      if (primary && !isAltName) {
-        videos.push({ name: primary[1], alternativeName: null });
+      if (isAltName) {
+        // Alt name lines always follow their primary device. Only attach
+        // if the most recent primary was a video device we pushed.
+        if (lastWasVideo && lastDeviceIndex >= 0) {
+          videos[lastDeviceIndex].alternativeName = quoted[1];
+        }
+        continue;
+      }
+
+      // Primary device line. Classify by suffix first, then section.
+      const suffixVideo = /\(video\)\s*$/i.test(line);
+      const suffixAudio = /\(audio\)\s*$/i.test(line);
+
+      let isVideo;
+      if (suffixVideo) isVideo = true;
+      else if (suffixAudio) isVideo = false;
+      else if (sectionIsVideo === true) isVideo = true;
+      else if (sectionIsVideo === false) isVideo = false;
+      else continue; // no suffix, no section header — can't classify, skip
+
+      if (isVideo) {
+        videos.push({ name: quoted[1], alternativeName: null });
         lastDeviceIndex = videos.length - 1;
-      } else if (primary && isAltName && lastDeviceIndex >= 0) {
-        videos[lastDeviceIndex].alternativeName = primary[1];
+        lastWasVideo = true;
+      } else {
+        lastWasVideo = false;
       }
     }
     return videos;
