@@ -233,7 +233,14 @@ class StreamEngine extends EventEmitter {
   _videoInputArgs(settings, fps) {
     const source = settings.videoSource || 'screen';
     if (source === 'webcam' && settings.webcamDevice && settings.webcamDevice.trim() !== '') {
-      const deviceName = settings.webcamDevice;
+      // Escape colons in the device name. FFmpeg's dshow input parser
+      // treats ':' as the video/audio separator (format:
+      // video=<name>:audio=<name>), so device names containing colons —
+      // most commonly the USB vendor:product ID shown in parens like
+      // 'HP TrueVision HD Camera (04f2:b75e)' — get misparsed and
+      // trigger 'Malformed dshow input string'. Backslash-escape per
+      // FFmpeg dshow docs.
+      const deviceName = settings.webcamDevice.replace(/:/g, '\\:');
       return [
         '-f', 'dshow',
         // Some webcams publish MJPEG at the highest FPS and YUY2 at a
@@ -521,6 +528,9 @@ class StreamEngine extends EventEmitter {
     // branch below because the user intent + recovery differ:
     // video=... errors mean their configured webcam is unavailable,
     // audio=... errors mean their mic is.
+    if (/Malformed dshow input string/i.test(stderr)) {
+      return 'Hint: the webcam device name contains a character that confuses FFmpeg\'s dshow parser (usually a colon in the USB vendor:product ID, e.g. "HP TrueVision HD Camera (04f2:b75e)"). Update to v3.3.10+ which escapes these automatically, or pick a different camera name if available.';
+    }
     if (/Could not run graph.*?video=|could not find video device|I\/O error|vcap.*?error/i.test(stderr) &&
         /dshow/i.test(stderr)) {
       return 'Hint: the selected webcam could not be opened. Most common cause: another app (your web browser, Zoom, OBS, etc.) has the camera locked. Close other camera users and try again, or pick a different camera in Settings > OBS > Video Source.';
