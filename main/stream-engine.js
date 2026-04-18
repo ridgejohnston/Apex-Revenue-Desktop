@@ -406,10 +406,20 @@ class StreamEngine extends EventEmitter {
       if (!inVideoSection) continue;
 
       // A primary device line looks like:
-      //   [dshow @ 000...]  "HP TrueVision HD"
-      // An alternative-name line looks like:
+      //   [dshow @ 000...]  "HP TrueVision HD Camera (04f2:b75e)" (video)
+      // Recent FFmpeg builds (including the bundled one) append a
+      // "(video)" or "(audio)" type suffix AFTER the closing quote —
+      // older versions didn't, and the original regex here required
+      // the closing quote to be at end-of-line, which no-matched every
+      // modern primary device line and left us with an empty device
+      // list. Capture the FIRST quoted string on the line instead;
+      // that's the device name whether there's a suffix or not.
+      //
+      // Alt name lines are distinguished by the "Alternative name"
+      // substring check, independent of the quote regex.
+      //
       //   [dshow @ 000...]     Alternative name "@device_pnp_\\?\usb#..."
-      const primary = line.match(/"([^"]+)"\s*$/);
+      const primary = line.match(/"([^"]+)"/);
       const isAltName = /Alternative name/i.test(line);
 
       if (primary && !isAltName) {
