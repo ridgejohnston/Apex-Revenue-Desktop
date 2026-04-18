@@ -257,6 +257,84 @@ export default function App() {
     }
   }, []);
 
+  // Keep a ref mirror of scenes so the webcam release/restore hook
+  // below can see the latest source list. Without this, the window-
+  // exposed functions would close over whatever scenes value was in
+  // scope at mount and miss any sources added during the session.
+  const scenesRef = useRef([]);
+  useEffect(() => { scenesRef.current = scenes; }, [scenes]);
+
+  // DirectShow webcam pins are effectively exclusive on Windows. If
+  // this renderer holds a getUserMedia handle on the same camera the
+  // FFmpeg streaming process is trying to open, FFmpeg will spawn
+  // without error but never receive video frames — we observed this
+  // on v3.3.18: the stream ran 31 seconds with audio but zero video
+  // before Chaturbate's RTMP server reset the connection.
+  //
+  // main.js invokes these via executeJavaScript at stream:start and
+  // stream:stop. Release stops and drops all webcam-type source
+  // tracks; restore re-invokes activateSource on every webcam source
+  // whose visible flag is true. Other source types (screen, audio)
+  // are left alone since they don't share device pins with FFmpeg.
+  //
+  // released[] tracks which source ids to restore, keyed by the
+  // source id so we don't accidentally reactivate sources that were
+  // toggled off or removed mid-stream.
+  const releasedWebcamsRef = useRef([]);
+  useEffect(() => {
+    window.__apexReleaseWebcams = () => {
+      const toRelease = [];
+      for (const scene of scenesRef.current) {
+        for (const source of scene.sources || []) {
+          if (source.type === 'webcam' && sourceStreamsRef.current[source.id]) {
+            toRelease.push(source.id);
+          }
+        }
+      }
+      releasedWebcamsRef.current = toRelease;
+      console.log(`[Apex] Releasing ${toRelease.length} webcam stream(s) for FFmpeg`);
+      for (const id of toRelease) {
+        const stream = sourceStreamsRef.current[id];
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop());
+          delete sourceStreamsRef.current[id];
+        }
+      }
+      if (toRelease.length) {
+        setSourceStreams((prev) => {
+          const next = { ...prev };
+          for (const id of toRelease) delete next[id];
+          return next;
+        });
+      }
+      return toRelease.length;
+    };
+
+    window.__apexRestoreWebcams = async () => {
+      const ids = releasedWebcamsRef.current;
+      releasedWebcamsRef.current = [];
+      console.log(`[Apex] Restoring ${ids.length} webcam stream(s)`);
+      for (const id of ids) {
+        // Find the source config in the current scene tree. Done
+        // lookup-style so we pick up any property edits that happened
+        // while the stream was running.
+        let found = null;
+        for (const scene of scenesRef.current) {
+          const s = (scene.sources || []).find((x) => x.id === id);
+          if (s) { found = s; break; }
+        }
+        if (found && found.visible) {
+          activateSource(found);
+        }
+      }
+    };
+
+    return () => {
+      delete window.__apexReleaseWebcams;
+      delete window.__apexRestoreWebcams;
+    };
+  }, [activateSource]);
+
   const handleAddSource = useCallback(async (sourceConfig) => {
     if (!activeSceneId) return;
     const source = await api.sources.add(activeSceneId, sourceConfig);

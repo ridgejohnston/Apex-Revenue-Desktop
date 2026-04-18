@@ -396,9 +396,47 @@ ipcMain.handle('webcam:list', async () => {
 ipcMain.handle('stream:start', async (_, config) => {
   await ensureFFmpegInstalled();
   const settings = { ...store.get('obsSettings'), ...config };
+
+  // DirectShow webcam pins are effectively exclusive. If the renderer is
+  // holding a getUserMedia handle on the same camera FFmpeg is about to
+  // open, FFmpeg will spawn successfully (the device enumerates and
+  // connects) but will never receive video frames — we saw exactly this
+  // on v3.3.18 with the HP TrueVision: stream ran 31 seconds producing
+  // audio only, zero video frames, then Chaturbate RTMP reset.
+  //
+  // Ask the renderer to release ALL webcam-type source streams BEFORE we
+  // spawn FFmpeg. FFmpeg becomes the authoritative consumer for the
+  // duration of the stream. When stream:stop fires we ask the renderer
+  // to re-acquire the handles so the preview canvas comes back.
+  //
+  // Best-effort with a 2s timeout — if the renderer doesn't respond
+  // we proceed anyway rather than blocking the user from streaming.
+  if (settings.videoSource === 'webcam' && mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      await Promise.race([
+        mainWindow.webContents.executeJavaScript('window.__apexReleaseWebcams && window.__apexReleaseWebcams()'),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    } catch (err) {
+      console.warn('[main] Webcam release request failed (non-fatal):', err.message);
+    }
+  }
+
   return streamEngine.startStream(settings);
 });
-ipcMain.handle('stream:stop', () => streamEngine.stopStream());
+ipcMain.handle('stream:stop', async () => {
+  const result = await streamEngine.stopStream();
+  // Ask the renderer to re-acquire webcam streams so the preview canvas
+  // starts rendering again. Non-blocking — if this fails the user can
+  // toggle the source off/on to manually reactivate.
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.executeJavaScript('window.__apexRestoreWebcams && window.__apexRestoreWebcams()')
+        .catch(() => {});
+    } catch {}
+  }
+  return result;
+});
 ipcMain.handle('stream:get-status', () => streamEngine.getStatus());
 
 ipcMain.handle('record:start', async (_, config) => {
