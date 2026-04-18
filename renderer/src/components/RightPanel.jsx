@@ -148,6 +148,20 @@ function OBSProperties() {
     };
   }, []);
 
+  // Lazy-load webcam device list only when the user switches to Webcam
+  // source — avoids running the FFmpeg dshow probe for users who only
+  // stream their screen. MUST live above the `if (!settings) return ...`
+  // early return below: React's Rules of Hooks require the same number
+  // of hooks every render, and putting this after an early return
+  // (which fires on the first mount while settings is still loading
+  // from the store) makes the hook count jump between renders →
+  // Minified React error 310.
+  useEffect(() => {
+    if (settings?.videoSource === 'webcam' && !webcamsLoaded && !loadingWebcams) {
+      refreshWebcams();
+    }
+  }, [settings?.videoSource, webcamsLoaded, loadingWebcams]);
+
   if (!settings) return <div style={{ padding: 12, color: 'var(--text-dim)', fontSize: 11 }}>Loading...</div>;
 
   // Persist to electron-store and flash the "Saved" indicator
@@ -244,15 +258,6 @@ function OBSProperties() {
       setLoadingWebcams(false);
     }
   };
-
-  // Lazy-load webcams only when the user actually switches to Webcam
-  // source (avoids running the FFmpeg probe on every mount for users
-  // who only ever stream their screen).
-  useEffect(() => {
-    if (settings?.videoSource === 'webcam' && !webcamsLoaded && !loadingWebcams) {
-      refreshWebcams();
-    }
-  }, [settings?.videoSource, webcamsLoaded, loadingWebcams]);
 
   return (
     <div className="flex-col gap-3">
