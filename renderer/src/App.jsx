@@ -232,8 +232,28 @@ export default function App() {
     if (!activeSceneId) return;
     const source = await api.sources.add(activeSceneId, sourceConfig);
     setShowAddSource(false);
+    if (!source) return;
+
     // Auto-activate immediately after adding
-    if (source) activateSource(source);
+    activateSource(source);
+
+    // v3.3.6: if the newly added source is a video-capture type, sync
+    // obsSettings so Start Stream picks it up immediately. Mirrors the
+    // logic in handleToggleSourceVisible so both entry points converge
+    // on the same settings state.
+    const VIDEO_CAPTURE_TYPES = new Set([
+      'webcam', 'screen_capture', 'window_capture', 'game_capture',
+    ]);
+    if (VIDEO_CAPTURE_TYPES.has(source.type)) {
+      const current = (await api.store.get('obsSettings')) || {};
+      const patch = source.type === 'webcam'
+        ? {
+            videoSource: 'webcam',
+            webcamDevice: source.properties?.deviceLabel || source.properties?.deviceName || '',
+          }
+        : { videoSource: 'screen' };
+      await api.store.set('obsSettings', { ...current, ...patch });
+    }
   }, [activeSceneId, activateSource]);
 
   const handleRemoveSource = useCallback(async (sourceId) => {
@@ -244,8 +264,70 @@ export default function App() {
 
   const handleToggleSourceVisible = useCallback(async (sourceId) => {
     if (!activeSceneId) return;
+    const scene = scenes.find((s) => s.id === activeSceneId);
+    if (!scene) return;
+    const target = (scene.sources || []).find((s) => s.id === sourceId);
+    if (!target) {
+      await api.sources.toggleVisible(activeSceneId, sourceId);
+      return;
+    }
+
+    // v3.3.6: video-capture sources are mutually exclusive. FFmpeg's
+    // input pipeline can only read one -i video source at a time, so
+    // the sidebar ON toggle behaves as a radio for this category.
+    // Toggling a video source ON automatically turns OFF every other
+    // video source in the scene. Non-video sources (overlays, audio,
+    // text, browser, alerts) keep their independent ON/OFF behavior.
+    const VIDEO_CAPTURE_TYPES = new Set([
+      'webcam', 'screen_capture', 'window_capture', 'game_capture',
+    ]);
+    const isVideoCapture = VIDEO_CAPTURE_TYPES.has(target.type);
+    const goingVisible = !target.visible;
+
+    if (isVideoCapture && goingVisible) {
+      // Turn off every OTHER video-capture source that's currently on.
+      // Run these in parallel — scene-manager debounces its writes so
+      // the batch is safe.
+      const others = (scene.sources || []).filter(
+        (s) => s.id !== sourceId && s.visible && VIDEO_CAPTURE_TYPES.has(s.type)
+      );
+      await Promise.all(others.map((s) => api.sources.toggleVisible(activeSceneId, s.id)));
+    }
+
+    // Toggle the target source itself
     await api.sources.toggleVisible(activeSceneId, sourceId);
-  }, [activeSceneId]);
+
+    // Sync obsSettings.videoSource / webcamDevice to match what the
+    // stream engine will actually capture from. The stream engine reads
+    // obsSettings directly at startStream time, so these fields need to
+    // be up-to-date the moment the user hits Start Stream.
+    if (isVideoCapture) {
+      const current = (await api.store.get('obsSettings')) || {};
+      let patch;
+      if (goingVisible) {
+        if (target.type === 'webcam') {
+          patch = {
+            videoSource: 'webcam',
+            // AddSourceModal saves the dshow-compatible label as
+            // properties.deviceLabel; prefer it over deviceId (which is
+            // a getUserMedia hash that FFmpeg can't resolve).
+            webcamDevice: target.properties?.deviceLabel || target.properties?.deviceName || '',
+          };
+        } else {
+          // screen_capture, window_capture, game_capture — all route
+          // through gdigrab for now. window/game capture specialization
+          // is a future enhancement; today they fall back to full desktop.
+          patch = { videoSource: 'screen' };
+        }
+      } else {
+        // User turned OFF the currently-active video source. Fall back
+        // to 'screen' as the safe default so Start Stream doesn't fail
+        // with an empty/invalid config.
+        patch = { videoSource: 'screen' };
+      }
+      await api.store.set('obsSettings', { ...current, ...patch });
+    }
+  }, [activeSceneId, scenes]);
 
   const handleToggleSourceLock = useCallback(async (sourceId) => {
     if (!activeSceneId) return;
@@ -422,6 +504,7 @@ export default function App() {
           aiPrompt={aiPrompt}
           onDismissPrompt={() => setAiPrompt(null)}
           onAuthClick={() => setShowAuth(true)}
+          activeScene={activeScene}
         />
       </div>
 

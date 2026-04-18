@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 
 export default function RightPanel({
   activeTab, liveData, streamStatus, platform, user,
-  aiPrompt, onDismissPrompt, onAuthClick,
+  aiPrompt, onDismissPrompt, onAuthClick, activeScene,
 }) {
   const [sessionTimer, setSessionTimer] = useState(0);
   const timerRef = useRef(null);
@@ -44,7 +44,7 @@ export default function RightPanel({
       </div>
 
       <div className="flex-col flex-1" style={{ overflow: 'auto', padding: 8 }}>
-        {activeTab === 'obs' && <OBSProperties />}
+        {activeTab === 'obs' && <OBSProperties activeScene={activeScene} />}
         {activeTab === 'ai' && <AIPanel user={user} onAuthClick={onAuthClick} liveData={liveData} aiPrompt={aiPrompt} onDismissPrompt={onDismissPrompt} />}
         {activeTab === 'sync' && <SyncPanel />}
         {activeTab === 'live' && (
@@ -85,7 +85,7 @@ export default function RightPanel({
 }
 
 // ─── OBS Properties Sub-panel ───────────────────────────
-function OBSProperties() {
+function OBSProperties({ activeScene }) {
   const [settings, setSettings] = useState(null);
   const [audioInputs, setAudioInputs] = useState([]);
   const [dshowAudio, setDshowAudio] = useState([]);
@@ -101,12 +101,6 @@ function OBSProperties() {
   // otherwise holds {requested, resolved, reason, bitrateFrom, bitrateTo}
   // from the main process.
   const [encoderHealedNotice, setEncoderHealedNotice] = useState(null);
-
-  // v3.3.4: webcam device enumeration for the Video Source selector.
-  // Loaded on first render and whenever the user hits the ↻ refresh button.
-  const [webcams, setWebcams] = useState([]);
-  const [loadingWebcams, setLoadingWebcams] = useState(false);
-  const [webcamsLoaded, setWebcamsLoaded] = useState(false);
   const debounceRef = useRef(null);
   const toastRef = useRef(null);
 
@@ -156,11 +150,19 @@ function OBSProperties() {
   // (which fires on the first mount while settings is still loading
   // from the store) makes the hook count jump between renders →
   // Minified React error 310.
-  useEffect(() => {
-    if (settings?.videoSource === 'webcam' && !webcamsLoaded && !loadingWebcams) {
-      refreshWebcams();
-    }
-  }, [settings?.videoSource, webcamsLoaded, loadingWebcams]);
+  // v3.3.4 had a lazy-load useEffect here that probed the webcam
+  // device list when the user switched to Webcam source. v3.3.6 moved
+  // video-source selection entirely into the Sources panel (Sidebar),
+  // so the probe lives in AddSourceModal now.
+  //
+  // We keep this placeholder useEffect at the same position in the
+  // hook order to preserve React's Rules of Hooks guarantee across
+  // the v3.3.4 → v3.3.6 upgrade path. Users whose app state was
+  // mid-render when they updated should see no hook-count jump →
+  // prevents Minified React error 310 during the upgrade transition.
+  // Safe to remove in a future pass once we can guarantee no users
+  // are mid-upgrade.
+  useEffect(() => {}, []);
 
   if (!settings) return <div style={{ padding: 12, color: 'var(--text-dim)', fontSize: 11 }}>Loading...</div>;
 
@@ -240,24 +242,13 @@ function OBSProperties() {
     });
   };
 
-  // v3.3.4: refresh the webcam device list. Called automatically when
-  // the user switches to Webcam source for the first time, and manually
-  // when they click the ↻ button. Fresh each call so plug/unplug events
-  // reflect without restarting the app.
-  const refreshWebcams = async () => {
-    setLoadingWebcams(true);
-    try {
-      const list = await window.electronAPI.webcam.list();
-      setWebcams(list || []);
-      setWebcamsLoaded(true);
-    } catch (err) {
-      console.error('Failed to list webcams:', err);
-      setWebcams([]);
-      setWebcamsLoaded(true);
-    } finally {
-      setLoadingWebcams(false);
-    }
-  };
+  // NOTE: v3.3.4 had a refreshWebcams() handler here that loaded the
+  // dshow device list for an inline dropdown in the OBS panel. v3.3.6
+  // moved video-source management entirely into the Sources panel
+  // (Sidebar + AddSourceModal), so the handler is gone. The webcam
+  // enumeration still lives on window.electronAPI.webcam.list() and
+  // is called from AddSourceModal when the user opens the "Add Source
+  // → Webcam" flow.
 
   return (
     <div className="flex-col gap-3">
@@ -295,120 +286,127 @@ function OBSProperties() {
         />
       </div>
 
-      {/* Video Source — v3.3.4: pick between full-screen capture (gdigrab)
-          and webcam capture (dshow with named device). Defaults to screen
-          for backward compat with pre-v3.3.4 saved settings. */}
+      {/* Video Source — v3.3.6: status-only display. The source is chosen
+          and configured in the Sources panel on the left (Sidebar). This
+          right-side panel mirrors whichever video-capture source is ON in
+          the current scene. Because video inputs are mutually exclusive
+          (FFmpeg reads one -i video at a time), App.jsx enforces radio
+          behavior on the sidebar ON toggle — turning one video-capture
+          source ON automatically turns the others OFF. */}
       <div>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
           VIDEO SOURCE
         </div>
 
-        <div className="flex gap-2" style={{ marginBottom: 8 }}>
-          <button
-            className="btn"
-            onClick={() => update('videoSource', 'screen')}
-            style={{
-              flex: 1,
-              padding: '8px 10px',
-              fontSize: 11,
-              background: (settings.videoSource || 'screen') === 'screen'
-                ? 'var(--accent, #CC0000)' : 'var(--bg-secondary, rgba(255,255,255,0.04))',
-              color: (settings.videoSource || 'screen') === 'screen'
-                ? '#fff' : 'var(--text-secondary)',
-              border: '1px solid ' + ((settings.videoSource || 'screen') === 'screen'
-                ? 'var(--accent, #CC0000)' : 'var(--border, rgba(255,255,255,0.08))'),
-              cursor: 'pointer',
-            }}
-          >
-            🖥  Screen
-          </button>
-          <button
-            className="btn"
-            onClick={() => update('videoSource', 'webcam')}
-            style={{
-              flex: 1,
-              padding: '8px 10px',
-              fontSize: 11,
-              background: settings.videoSource === 'webcam'
-                ? 'var(--accent, #CC0000)' : 'var(--bg-secondary, rgba(255,255,255,0.04))',
-              color: settings.videoSource === 'webcam'
-                ? '#fff' : 'var(--text-secondary)',
-              border: '1px solid ' + (settings.videoSource === 'webcam'
-                ? 'var(--accent, #CC0000)' : 'var(--border, rgba(255,255,255,0.08))'),
-              cursor: 'pointer',
-            }}
-          >
-            📹  Webcam
-          </button>
-        </div>
+        {(() => {
+          const VIDEO_CAPTURE_TYPES = new Set([
+            'webcam', 'screen_capture', 'window_capture', 'game_capture',
+          ]);
+          const TYPE_LABELS = {
+            webcam: 'Webcam',
+            screen_capture: 'Screen Capture',
+            window_capture: 'Window Capture',
+            game_capture: 'Game Capture',
+          };
+          const TYPE_ICONS = {
+            webcam: '📷',
+            screen_capture: '🖥️',
+            window_capture: '🪟',
+            game_capture: '🎮',
+          };
 
-        {/* Webcam device picker — only visible when Webcam source is selected */}
-        {settings.videoSource === 'webcam' && (
-          <div style={{ marginBottom: 8 }}>
-            <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
-              <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>Camera Device</label>
-              <button
-                className="btn btn-sm"
-                onClick={refreshWebcams}
-                disabled={loadingWebcams}
-                title="Re-scan for connected cameras"
-                style={{ fontSize: 9, padding: '1px 6px' }}
-              >
-                {loadingWebcams ? '⏳' : '↻'} {loadingWebcams ? 'Scanning...' : 'Refresh'}
-              </button>
-            </div>
+          const sources = activeScene?.sources || [];
+          const activeVideoSource = sources.find(
+            (s) => VIDEO_CAPTURE_TYPES.has(s.type) && s.visible
+          );
+          const videoSources = sources.filter((s) => VIDEO_CAPTURE_TYPES.has(s.type));
 
-            {webcams.length > 0 ? (
-              <select
-                className="input"
-                style={{ width: '100%' }}
-                value={settings.webcamDevice || ''}
-                onChange={(e) => update('webcamDevice', e.target.value)}
-              >
-                <option value="">-- Select camera --</option>
-                {webcams.map((cam) => (
-                  <option key={cam.name} value={cam.name}>{cam.name}</option>
-                ))}
-              </select>
-            ) : (
+          if (!activeVideoSource) {
+            // No video source active. If there are video sources in the
+            // scene but all are OFF, show one message; if there aren't
+            // any, nudge the user to add one from the Sources panel.
+            const hasInactiveVideoSources = videoSources.length > 0;
+            return (
               <div style={{
-                fontSize: 10,
-                color: 'var(--text-dim)',
                 padding: '10px 12px',
                 background: 'var(--bg-secondary, rgba(255,255,255,0.03))',
-                border: '1px dashed var(--border, rgba(255,255,255,0.1))',
+                border: '1px dashed var(--border, rgba(255,255,255,0.12))',
                 borderRadius: 4,
+                fontSize: 10,
                 lineHeight: 1.5,
-              }}>
-                {loadingWebcams ? 'Scanning for cameras...' :
-                 webcamsLoaded ? (
-                   <>
-                     No cameras detected. Plug in a webcam or close other apps
-                     that may have the camera locked (browser, Zoom, Teams),
-                     then click Refresh.
-                   </>
-                 ) : 'Loading...'}
-              </div>
-            )}
-
-            {/* Device-in-use heads-up. Most common failure mode: user is
-                trying to stream from their webcam while a browser tab has
-                the getUserMedia lock. FFmpeg dshow will hard-fail silently
-                on that path, so we proactively warn. */}
-            {settings.webcamDevice && (
-              <div style={{
-                fontSize: 9,
                 color: 'var(--text-dim)',
-                marginTop: 6,
-                lineHeight: 1.4,
               }}>
-                💡 If Start Stream fails, check that no other app (browser,
-                Zoom, OBS) has <strong>{settings.webcamDevice}</strong> open —
-                Windows only lets one app capture a camera at a time.
+                {hasInactiveVideoSources ? (
+                  <>
+                    No video source is active. Turn one <strong>ON</strong> in the
+                    Sources panel on the left — only one video source can be active
+                    at a time.
+                  </>
+                ) : (
+                  <>
+                    No video source added. Click <strong>+</strong> next to Sources
+                    in the left sidebar, pick <strong>Webcam</strong> or <strong>Screen Capture</strong>,
+                    and configure it there.
+                  </>
+                )}
               </div>
-            )}
-          </div>
-        )}
+            );
+          }
+
+          // Render the active source as a read-only status card
+          const icon = TYPE_ICONS[activeVideoSource.type] || '🎥';
+          const typeLabel = TYPE_LABELS[activeVideoSource.type] || activeVideoSource.type;
+          const deviceDetail =
+            activeVideoSource.type === 'webcam'
+              ? (activeVideoSource.properties?.deviceLabel ||
+                 activeVideoSource.properties?.deviceName ||
+                 'Default camera')
+              : activeVideoSource.type === 'screen_capture'
+              ? `Display ${(activeVideoSource.properties?.displayIndex ?? 0) + 1}`
+              : null;
+
+          return (
+            <div style={{
+              padding: '10px 12px',
+              background: 'var(--bg-secondary, rgba(204,0,0,0.06))',
+              border: '1px solid var(--accent, rgba(204,0,0,0.35))',
+              borderRadius: 4,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+            }}>
+              <div style={{ fontSize: 20, lineHeight: 1 }}>{icon}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontSize: 11, fontWeight: 600, color: 'var(--text-primary)',
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                }}>
+                  {activeVideoSource.name || typeLabel}
+                </div>
+                <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 2 }}>
+                  {typeLabel}{deviceDetail ? ` · ${deviceDetail}` : ''}
+                </div>
+              </div>
+              <div style={{
+                fontSize: 9, fontWeight: 700, letterSpacing: '0.4px',
+                padding: '2px 6px', borderRadius: 10,
+                background: 'rgba(45,212,160,0.18)',
+                color: 'var(--success, #2DD4A0)',
+                boxShadow: '0 0 0 1px rgba(45,212,160,0.35)',
+                flexShrink: 0,
+              }}>
+                ACTIVE
+              </div>
+            </div>
+          );
+        })()}
+
+        <div style={{
+          fontSize: 9, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.4,
+        }}>
+          💡 Manage video sources in the <strong>Sources</strong> panel on the left.
+          Only one video source can stream at a time.
+        </div>
       </div>
 
       {/* Video Settings */}
