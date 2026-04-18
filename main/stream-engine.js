@@ -326,18 +326,47 @@ class StreamEngine extends EventEmitter {
         .replace(/^(Default|Communications)\s*-\s*/i, '');
       this._diag(`matching against (after stripping prefix): ${JSON.stringify(strippedForMatch)}`);
 
-      const match = devices.find((d) => d.name === strippedForMatch);
+      // Browser's navigator.mediaDevices.enumerateDevices() returns
+      // labels like "HP TrueVision HD Camera (04f2:b75e)" — the
+      // "(xxxx:xxxx)" is the USB vendor:product ID Chromium appends
+      // for disambiguation when multiple cameras share a friendly
+      // name. FFmpeg's DirectShow enumeration doesn't include this
+      // suffix; it returns the bare friendly name
+      // "HP TrueVision HD Camera". Exact string equality between
+      // browser label and FFmpeg name fails for these devices.
+      //
+      // Try multiple strategies in order of specificity. Stripping
+      // only the literal "(xxxx:xxxx)" USB ID pattern keeps us safe
+      // from false positives — we don't fuzzy-match arbitrary
+      // suffixes that might differentiate real distinct devices.
+      const stripUsb = (s) => s.replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, '');
+      const queryBare = stripUsb(strippedForMatch);
+
+      let match = devices.find((d) => d.name === strippedForMatch);
+      let strategy = 'exact';
+      if (!match && queryBare !== strippedForMatch) {
+        match = devices.find((d) => d.name === queryBare);
+        if (match) strategy = 'exact-after-strip-usb-from-query';
+      }
+      if (!match) {
+        match = devices.find((d) => stripUsb(d.name) === strippedForMatch);
+        if (match) strategy = 'exact-after-strip-usb-from-device';
+      }
+      if (!match) {
+        match = devices.find((d) => stripUsb(d.name) === queryBare);
+        if (match) strategy = 'exact-after-strip-usb-from-both';
+      }
 
       if (match && match.alternativeName) {
-        this._diag(`match: FOUND, using alt name ${JSON.stringify(match.alternativeName)}`);
-        console.log(`[StreamEngine] Resolved "${friendlyName}" -> alternative name`);
+        this._diag(`match: FOUND via "${strategy}", using alt name ${JSON.stringify(match.alternativeName)}`);
+        console.log(`[StreamEngine] Resolved "${friendlyName}" -> alternative name (${strategy})`);
         this._altNameCache.set(friendlyName, match.alternativeName);
         return match.alternativeName;
       }
       if (match && !match.alternativeName) {
         this._diag('match: FOUND but device has no alternativeName (parser issue?)');
       } else {
-        this._diag('match: NOT FOUND in device list');
+        this._diag('match: NOT FOUND in device list (tried exact and USB-id-stripped variants)');
       }
       console.warn(`[StreamEngine] No alt name found for "${friendlyName}"; falling back to sanitized friendly name (stream may fail)`);
     } catch (err) {
@@ -367,16 +396,24 @@ class StreamEngine extends EventEmitter {
       if (!this._altNameCache) this._altNameCache = new Map();
       let cached = 0;
       for (const d of devices) {
-        if (d.alternativeName) {
-          // Cache under the bare friendly name AND the browser-prefixed
-          // variants obsSettings might store (getUserMedia returns
-          // "Default - <name>" for the system default, "Communications - <name>"
-          // for the Windows communications default).
-          this._altNameCache.set(d.name, d.alternativeName);
-          this._altNameCache.set(`Default - ${d.name}`, d.alternativeName);
-          this._altNameCache.set(`Communications - ${d.name}`, d.alternativeName);
-          cached++;
+        if (!d.alternativeName) continue;
+        const base = d.name;
+        const keys = [base, `Default - ${base}`, `Communications - ${base}`];
+
+        // Reconstruct browser-style "(xxxx:xxxx)" USB suffix. The alt
+        // name for USB webcams always contains "vid_XXXX&pid_XXXX"
+        // (e.g. @device_pnp_\\?\usb#vid_04f2&pid_b75e&mi_00#...), so
+        // we can rebuild exactly the string Chromium enumerateDevices
+        // emits and cache an alt-name entry for it. Saves the
+        // multi-strategy matcher from having to fire at stream time.
+        const vidPid = d.alternativeName.match(/vid_([0-9a-f]{4}).*?pid_([0-9a-f]{4})/i);
+        if (vidPid) {
+          const withUsb = `${base} (${vidPid[1]}:${vidPid[2]})`;
+          keys.push(withUsb, `Default - ${withUsb}`, `Communications - ${withUsb}`);
         }
+
+        for (const k of keys) this._altNameCache.set(k, d.alternativeName);
+        cached++;
       }
       console.log(`[StreamEngine] preflightDeviceDetection: cached ${cached} webcam alt name(s) from ${devices.length} device(s)`);
       return { devices, cachedCount: cached };
