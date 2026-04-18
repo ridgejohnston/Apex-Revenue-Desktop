@@ -302,6 +302,22 @@ function OBSProperties({ activeScene, onToggleSourceVisible, onToggleCategory })
           className="input" style={{ width: '100%', marginBottom: 6 }}
           type="password" value={settings.streamKey} onChange={(e) => updateText('streamKey', e.target.value)}
         />
+
+        {/*
+          Additional Destinations (v3.3.27+). Each entry is a simulcast
+          target appended to the primary (streamUrl/streamKey) above.
+          Empty/disabled rows are filtered out in _resolveDestinations,
+          so a blank row in progress of being filled won't break Start
+          Stream. 'enabled' toggle lets the user keep a destination
+          configured but temporarily not stream to it.
+
+          Save pattern: all edits go through `update('destinations', next)`
+          which persists immediately to obsSettings.destinations[].
+        */}
+        <DestinationsEditor
+          destinations={Array.isArray(settings.destinations) ? settings.destinations : []}
+          onChange={(next) => update('destinations', next)}
+        />
       </div>
 
       {/* Stream Source — v3.3.21: renamed from "Video Source" and
@@ -1665,4 +1681,209 @@ function objectsEqual(a, b) {
   if (ka.length !== kb.length) return false;
   for (const k of ka) if (a[k] !== b[k]) return false;
   return true;
+}
+
+// ── Destinations Editor ──────────────────────────────────
+// Renders the "Additional Destinations" section below the primary
+// Stream URL/Key fields. Each row is one simulcast target. The
+// primary destination lives in streamUrl/streamKey and is NOT shown
+// here — this editor is purely for additional destinations.
+//
+// Save semantics: any edit calls onChange with a new full array, and
+// the parent's update() persists it to obsSettings.destinations[]
+// immediately. Text inputs use local state to avoid saving mid-
+// keystroke, mirroring the parent's debounced updateText pattern.
+//
+// Row state: each destination has { id, name, url, key, enabled }.
+// id is a stable identifier used only for React keys; it doesn't
+// affect streaming behavior.
+function DestinationsEditor({ destinations, onChange }) {
+  const [expanded, setExpanded] = useState(destinations.length > 0);
+  // Local copy for debounced text editing. When user types, we update
+  // local state immediately (for responsive UI) and schedule a save.
+  const [local, setLocal] = useState(destinations);
+  const debounceRef = useRef(null);
+
+  // Sync local state when props change from outside (e.g. auto-detect
+  // applies new settings, or another tab saves).
+  useEffect(() => {
+    setLocal(destinations);
+  }, [destinations]);
+
+  const persist = (next) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => onChange(next), 400);
+  };
+  const commitImmediate = (next) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    onChange(next);
+  };
+
+  const handleAdd = () => {
+    const next = [
+      ...local,
+      {
+        id: `dest-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        name: '',
+        url: '',
+        key: '',
+        enabled: true,
+      },
+    ];
+    setLocal(next);
+    commitImmediate(next);
+    setExpanded(true);
+  };
+
+  const handleRemove = (idx) => {
+    const next = local.filter((_, i) => i !== idx);
+    setLocal(next);
+    commitImmediate(next);
+  };
+
+  const handleField = (idx, field, value) => {
+    const next = local.map((d, i) => (i === idx ? { ...d, [field]: value } : d));
+    setLocal(next);
+    // Enabled toggle is a direct action — save immediately. Text fields
+    // debounce so typing doesn't spam the store.
+    if (field === 'enabled') commitImmediate(next);
+    else persist(next);
+  };
+
+  const enabledCount = local.filter((d) => d.enabled !== false && d.url && d.key).length;
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          cursor: 'pointer', userSelect: 'none', padding: '4px 0',
+        }}
+        onClick={() => setExpanded((e) => !e)}
+      >
+        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)' }}>
+          ADDITIONAL DESTINATIONS
+          {local.length > 0 && (
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400, marginLeft: 6 }}>
+              ({enabledCount}/{local.length} active)
+            </span>
+          )}
+        </div>
+        <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+          {expanded ? '▼' : '▶'}
+        </span>
+      </div>
+
+      {expanded && (
+        <>
+          {local.length === 0 ? (
+            <div style={{
+              fontSize: 10, color: 'var(--text-dim)',
+              padding: '8px 10px',
+              background: 'var(--bg-secondary, rgba(255,255,255,0.02))',
+              border: '1px dashed var(--border, rgba(255,255,255,0.08))',
+              borderRadius: 4, marginBottom: 6,
+              lineHeight: 1.5,
+            }}>
+              Simulcast to multiple platforms at once. Your primary destination
+              is set in the Stream URL / Stream Key fields above. Add more here
+              to broadcast to additional sites simultaneously.
+            </div>
+          ) : (
+            local.map((d, idx) => (
+              <DestinationRow
+                key={d.id || idx}
+                destination={d}
+                onField={(field, value) => handleField(idx, field, value)}
+                onRemove={() => handleRemove(idx)}
+              />
+            ))
+          )}
+
+          <button
+            type="button"
+            onClick={handleAdd}
+            style={{
+              width: '100%', padding: '6px 10px', fontSize: 10, fontWeight: 600,
+              background: 'transparent',
+              color: 'var(--text-secondary)',
+              border: '1px dashed var(--border, rgba(255,255,255,0.15))',
+              borderRadius: 4, cursor: 'pointer', marginTop: 4,
+            }}
+          >
+            + Add Destination
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Single destination row inside the editor. Self-contained presentation
+// component — parent owns all state, row just fires onField / onRemove.
+function DestinationRow({ destination, onField, onRemove }) {
+  const d = destination;
+  const disabled = d.enabled === false;
+  return (
+    <div style={{
+      padding: '8px 10px',
+      background: 'var(--bg-secondary, rgba(255,255,255,0.03))',
+      border: '1px solid var(--border, rgba(255,255,255,0.08))',
+      borderRadius: 4,
+      marginBottom: 6,
+      opacity: disabled ? 0.55 : 1,
+      transition: 'opacity 0.15s',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <label
+          style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            fontSize: 10, color: 'var(--text-dim)', cursor: 'pointer',
+            userSelect: 'none',
+          }}
+          title={disabled ? 'Enable this destination' : 'Disable (keep configured but skip)'}
+        >
+          <input
+            type="checkbox"
+            checked={d.enabled !== false}
+            onChange={(e) => onField('enabled', e.target.checked)}
+            style={{ margin: 0 }}
+          />
+          <span style={{ color: disabled ? 'var(--text-dim)' : 'var(--text-secondary)' }}>
+            {disabled ? 'OFF' : 'ON'}
+          </span>
+        </label>
+        <input
+          className="input" style={{ flex: 1, fontSize: 10 }}
+          value={d.name || ''} onChange={(e) => onField('name', e.target.value)}
+          placeholder="Destination name (e.g., Stripchat)"
+        />
+        <button
+          type="button"
+          onClick={onRemove}
+          style={{
+            padding: '2px 8px', fontSize: 10,
+            background: 'transparent',
+            color: 'var(--text-dim)',
+            border: '1px solid var(--border, rgba(255,255,255,0.08))',
+            borderRadius: 3, cursor: 'pointer',
+          }}
+          title="Remove destination"
+        >
+          ✕
+        </button>
+      </div>
+      <input
+        className="input" style={{ width: '100%', marginBottom: 4, fontSize: 10 }}
+        value={d.url || ''} onChange={(e) => onField('url', e.target.value)}
+        placeholder="rtmp://live.example.com/live"
+      />
+      <input
+        className="input" style={{ width: '100%', fontSize: 10 }}
+        type="password"
+        value={d.key || ''} onChange={(e) => onField('key', e.target.value)}
+        placeholder="Stream key"
+      />
+    </div>
+  );
 }

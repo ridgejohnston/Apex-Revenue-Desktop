@@ -38,6 +38,12 @@ const store = new Store({
       outputPath: app.getPath('videos'),
       streamKey: '',
       streamUrl: 'rtmp://global.live.mmcdn.com/live-origin',
+      // Additional simulcast destinations (v3.3.27+). Primary destination
+      // still comes from the streamUrl/streamKey fields above. Each entry:
+      //   { id, name, url, key, enabled, platform }
+      // _resolveDestinations in stream-engine.js concatenates the primary
+      // + enabled entries from this list.
+      destinations: [],
       videoEncoder: 'libx264',
       videoBitrate: 2500,
       audioBitrate: 160,
@@ -407,13 +413,15 @@ async function maybeFirstRunObsAutoconfig() {
 
     // Preserve any user-meaningful fields that shouldn't be auto-derived:
     // stream URL (platform choice), stream key (secret), audio device
-    // (personal mic preference). Everything else gets the recommendation.
+    // (personal mic preference), simulcast destinations (user-curated).
+    // Everything else gets the recommendation.
     const merged = {
       ...recommendations,
-      streamUrl:   current.streamUrl   || 'rtmp://global.live.mmcdn.com/live-origin',
-      streamKey:   current.streamKey   || '',
-      audioDevice: current.audioDevice || '',
-      outputPath:  current.outputPath  || recommendations.outputPath,
+      streamUrl:    current.streamUrl    || 'rtmp://global.live.mmcdn.com/live-origin',
+      streamKey:    current.streamKey    || '',
+      destinations: Array.isArray(current.destinations) ? current.destinations : [],
+      audioDevice:  current.audioDevice  || '',
+      outputPath:   current.outputPath   || recommendations.outputPath,
       _autoconfiguredAt: new Date().toISOString(),
       _autoconfigSpecs: specs,
     };
