@@ -90,6 +90,13 @@ function OBSProperties() {
   const [audioInputs, setAudioInputs] = useState([]);
   const [dshowAudio, setDshowAudio] = useState([]);
   const [savedToast, setSavedToast] = useState(false);
+  // Auto-detect preview state. `detected` holds the {recommendations,
+  // specs, encoderLabels} bundle from the main process. `selectedFields`
+  // is the Set of keys the user has checked for application. Null
+  // detected = panel not open.
+  const [detected, setDetected] = useState(null);
+  const [selectedFields, setSelectedFields] = useState(new Set());
+  const [detecting, setDetecting] = useState(false);
   const debounceRef = useRef(null);
   const toastRef = useRef(null);
 
@@ -107,6 +114,13 @@ function OBSProperties() {
     window.electronAPI.sources.getDshowDevices().then((devs) => {
       if (devs?.audio?.length) setDshowAudio(devs.audio);
     }).catch(() => {});
+
+    // When FFmpeg finishes installing mid-session, main bumps the encoder
+    // from the libx264 fallback to whatever hardware encoder just became
+    // available. Re-load settings so the UI mirrors the change.
+    window.electronAPI.obsSettings.onAutoRefreshed(() => {
+      window.electronAPI.store.get('obsSettings').then(setSettings);
+    });
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -137,6 +151,59 @@ function OBSProperties() {
     setSettings(updated);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => persist(updated), 600);
+  };
+
+  // ─── Auto-detect handlers ───────────────────────────────
+  // Opens the preview panel with fresh recommendations from the main
+  // process. Does NOT save anything — the user still has to click Apply.
+  const handleOpenAutoDetect = async () => {
+    setDetecting(true);
+    try {
+      const result = await window.electronAPI.obsSettings.detect();
+      setDetected(result);
+      // Default-check fields whose detected value actually differs from
+      // what's currently saved. If nothing differs we still let the user
+      // see the detected values but nothing is pre-checked.
+      const diffs = new Set();
+      for (const [key, recVal] of Object.entries(result.recommendations || {})) {
+        if (key === 'outputPath' && settings.outputPath) continue; // respect user's recording path
+        if (!objectsEqual(recVal, settings[key])) diffs.add(key);
+      }
+      setSelectedFields(diffs);
+    } catch (err) {
+      console.error('[Apex] Auto-detect failed:', err);
+      alert('Auto-detect failed. See dev console for details.');
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  // Apply the user-selected subset of recommendations. The main process
+  // writes to electron-store AND stamps _encoderUserSelectedAt if
+  // videoEncoder was in the fields list — that stamp protects the choice
+  // from the post-FFmpeg-install encoder refresh.
+  const handleApplyDetected = async () => {
+    const fields = Array.from(selectedFields);
+    if (fields.length === 0) {
+      setDetected(null);
+      return;
+    }
+    const merged = await window.electronAPI.obsSettings.applyDetected(fields);
+    setSettings(merged);
+    setDetected(null);
+    setSelectedFields(new Set());
+    setSavedToast(true);
+    if (toastRef.current) clearTimeout(toastRef.current);
+    toastRef.current = setTimeout(() => setSavedToast(false), 1800);
+  };
+
+  const toggleField = (key) => {
+    setSelectedFields((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
 
   return (
@@ -177,7 +244,31 @@ function OBSProperties() {
 
       {/* Video Settings */}
       <div>
-        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>VIDEO</div>
+        <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)' }}>VIDEO</div>
+          <button
+            className="btn btn-sm"
+            onClick={handleOpenAutoDetect}
+            disabled={detecting || !!detected}
+            style={{ fontSize: 9, padding: '2px 8px', gap: 4 }}
+            title="Detect recommended video settings based on your computer"
+          >
+            {detecting ? '⏳ Detecting...' : '⚡ Auto-detect'}
+          </button>
+        </div>
+
+        {/* Auto-detect preview panel — shown after Auto-detect is clicked */}
+        {detected && (
+          <AutoDetectPanel
+            detected={detected}
+            currentSettings={settings}
+            selectedFields={selectedFields}
+            onToggleField={toggleField}
+            onApply={handleApplyDetected}
+            onCancel={() => { setDetected(null); setSelectedFields(new Set()); }}
+          />
+        )}
+
         <div className="flex gap-2" style={{ marginBottom: 4 }}>
           <div className="flex-1">
             <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>Resolution</label>
@@ -1087,4 +1178,136 @@ function TierField({ label, value, min, max, onChange, suffix, dimLabel }) {
       </div>
     </div>
   );
+}
+
+// ─── Auto-detect Preview Panel ───────────────────────────
+// Shown inline in the OBS VIDEO section when the user clicks Auto-detect.
+// Displays what was detected about their machine, lists each recommendation
+// alongside the current value, and lets them check off which fields to
+// apply. Fields where detected == current are shown as "✓ already set"
+// and are disabled. Apply writes to electron-store via main; user edits
+// made after applying are preserved on future app starts.
+function AutoDetectPanel({ detected, currentSettings, selectedFields, onToggleField, onApply, onCancel }) {
+  const { recommendations, specs, encoderLabels } = detected;
+  // Fields the user can choose to apply. Intentionally omits streamUrl,
+  // streamKey, audioDevice, outputPath — those are personal/platform
+  // choices, not hardware-derived.
+  const applicableFields = [
+    { key: 'videoEncoder', label: 'Video Encoder', render: (v) => encoderLabels?.[v] || v },
+    { key: 'videoBitrate', label: 'Video Bitrate', render: (v) => `${v} kbps` },
+    { key: 'resolution',   label: 'Resolution',    render: (v) => `${v.width}×${v.height}` },
+    { key: 'fps',          label: 'Frame Rate',    render: (v) => `${v} fps` },
+    { key: 'preset',       label: 'Encoder Preset',render: (v) => v },
+    { key: 'audioBitrate', label: 'Audio Bitrate', render: (v) => `${v} kbps` },
+  ];
+
+  const numSelected = selectedFields.size;
+
+  return (
+    <div style={{
+      background: 'var(--bg-tertiary)',
+      border: '1px solid var(--accent, #7c5cfc)',
+      borderRadius: 6,
+      padding: 10,
+      marginBottom: 10,
+      fontSize: 11,
+    }}>
+      <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent, #7c5cfc)', marginBottom: 6 }}>
+        ⚡ DETECTED
+      </div>
+
+      {/* Specs line */}
+      <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 8, lineHeight: 1.5 }}>
+        {specs.cpuModel && <div>{specs.cpuModel} · {specs.cpuCores} cores · {specs.totalRamGb} GB RAM</div>}
+        <div>
+          Encoders available:{' '}
+          {specs.detectedEncoders?.length
+            ? specs.detectedEncoders.map((e) => encoderLabels?.[e] || e).join(', ')
+            : <span style={{ color: 'var(--warning, #ffa502)' }}>FFmpeg not installed yet — detection limited</span>
+          }
+        </div>
+      </div>
+
+      {/* Per-field checklist */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 }}>
+        {applicableFields.map(({ key, label, render }) => {
+          const recVal = recommendations[key];
+          const curVal = currentSettings[key];
+          const sameAsCurrent = objectsEqual(recVal, curVal);
+          const isChecked = selectedFields.has(key);
+          return (
+            <label
+              key={key}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '3px 6px', borderRadius: 3,
+                background: isChecked ? 'rgba(124,92,252,0.08)' : 'transparent',
+                opacity: sameAsCurrent ? 0.55 : 1,
+                cursor: sameAsCurrent ? 'default' : 'pointer',
+                fontSize: 10,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={isChecked}
+                disabled={sameAsCurrent}
+                onChange={() => onToggleField(key)}
+                style={{ margin: 0, cursor: sameAsCurrent ? 'default' : 'pointer' }}
+              />
+              <span style={{ flex: 1, color: 'var(--text-secondary)' }}>{label}</span>
+              <span style={{ fontFamily: 'monospace', color: 'var(--text-dim)', fontSize: 9 }}>
+                {curVal !== undefined ? render(curVal) : '—'}
+              </span>
+              <span style={{ color: 'var(--text-dim)', fontSize: 9 }}>→</span>
+              <span style={{
+                fontFamily: 'monospace',
+                color: sameAsCurrent ? 'var(--text-dim)' : 'var(--accent, #7c5cfc)',
+                fontSize: 9,
+                fontWeight: 600,
+              }}>
+                {render(recVal)}{sameAsCurrent && ' ✓'}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+
+      {/* Actions */}
+      <div className="flex gap-2 justify-between items-center">
+        <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>
+          {numSelected === 0
+            ? 'Nothing to apply — all recommendations match your current settings.'
+            : `${numSelected} field${numSelected === 1 ? '' : 's'} will be overwritten.`
+          }
+        </span>
+        <div className="flex gap-1">
+          <button className="btn btn-sm" onClick={onCancel} style={{ fontSize: 10 }}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-sm btn-accent"
+            onClick={onApply}
+            disabled={numSelected === 0}
+            style={{ fontSize: 10 }}
+          >
+            Apply {numSelected > 0 ? `(${numSelected})` : ''}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Deep-equals helper for comparing recommendation values vs current
+// settings. Handles primitives and plain objects (resolution: {w, h}).
+// Not a general-purpose deep equals — only needs to match what
+// autoconfig.js produces.
+function objectsEqual(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== 'object' || typeof b !== 'object') return a === b;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) if (a[k] !== b[k]) return false;
+  return true;
 }

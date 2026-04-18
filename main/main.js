@@ -13,6 +13,7 @@ const streamEngine = require('./stream-engine');
 const sceneManager = require('./scene-manager');
 const audioMixer = require('./audio-mixer');
 const ffmpegInstaller = require('./ffmpeg-installer');
+const autoconfig = require('./autoconfig');
 const { autoUpdater } = require('electron-updater');
 const EarningsTracker = require('../shared/earnings-tracker');
 const { VERSION } = require('../shared/apex-config');
@@ -143,7 +144,19 @@ function createTray() {
 
 // Store
 ipcMain.handle('store:get', (_, key) => store.get(key));
-ipcMain.handle('store:set', (_, key, value) => store.set(key, value));
+ipcMain.handle('store:set', (_, key, value) => {
+  // When the user saves obsSettings and their videoEncoder differs from
+  // what's already stored, treat that as an explicit encoder choice and
+  // mark _encoderUserSelectedAt. refreshEncoderForFreshInstall() reads
+  // this flag and stays out of the way after a user-made selection.
+  if (key === 'obsSettings' && value && typeof value === 'object') {
+    const prev = store.get('obsSettings') || {};
+    if (value.videoEncoder && value.videoEncoder !== prev.videoEncoder) {
+      value = { ...value, _encoderUserSelectedAt: new Date().toISOString() };
+    }
+  }
+  return store.set(key, value);
+});
 
 // Window controls
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
@@ -228,6 +241,13 @@ async function ensureFFmpegInstalled() {
       mainWindow?.webContents.send('ffmpeg:install-progress', progress);
     });
     mainWindow?.webContents.send('ffmpeg:installed', { success: true, path: exePath });
+
+    // If this is the first time FFmpeg landed on this machine AND the user
+    // hasn't customized their encoder choice yet, nudge the saved encoder
+    // to whatever's actually available in this build. Without this, users
+    // whose first-run autoconfig ran pre-FFmpeg would be stuck with the
+    // libx264 fallback even though NVENC/AMF/QSV are actually present now.
+    await refreshEncoderForFreshInstall();
   } catch (err) {
     mainWindow?.webContents.send('ffmpeg:installed', { success: false, error: err.message });
     const wrapped = new Error(`FFmpeg auto-install failed: ${err.message}. You can retry from Settings → Streaming → Install FFmpeg.`);
@@ -235,6 +255,128 @@ async function ensureFFmpegInstalled() {
     throw wrapped;
   }
 }
+
+// ─── OBS Autoconfig ─────────────────────────────────────
+//
+// Runs once on first app launch to seed obsSettings with recommendations
+// based on the user's machine (GPU, display, FFmpeg encoders). After the
+// one-time seed, user edits save through store.set('obsSettings', ...)
+// as normal and always win on subsequent launches. The "Auto-detect"
+// button in the OBS panel is the only path that overwrites user choices,
+// and it goes through 'obs-settings:apply-detected' with explicit
+// user confirmation.
+async function maybeFirstRunObsAutoconfig() {
+  try {
+    const current = store.get('obsSettings') || {};
+
+    // Already autoconfigured once? Leave user's saved state alone.
+    if (current._autoconfiguredAt) return;
+
+    const { recommendations, specs } = await autoconfig.detectRecommendedObsSettings({
+      ffmpegPath: ffmpegInstaller.findFFmpegPath(),
+      screenModule: screen,
+      videosPath: app.getPath('videos'),
+    });
+
+    // Preserve any user-meaningful fields that shouldn't be auto-derived:
+    // stream URL (platform choice), stream key (secret), audio device
+    // (personal mic preference). Everything else gets the recommendation.
+    const merged = {
+      ...recommendations,
+      streamUrl:   current.streamUrl   || 'rtmp://global.live.mmcdn.com/live-origin',
+      streamKey:   current.streamKey   || '',
+      audioDevice: current.audioDevice || '',
+      outputPath:  current.outputPath  || recommendations.outputPath,
+      _autoconfiguredAt: new Date().toISOString(),
+      _autoconfigSpecs: specs,
+    };
+    store.set('obsSettings', merged);
+    console.log('[Apex] First-run OBS autoconfig applied:', {
+      encoder: merged.videoEncoder,
+      bitrate: merged.videoBitrate,
+      resolution: merged.resolution,
+      detectedEncoders: specs.detectedEncoders,
+    });
+  } catch (err) {
+    console.warn('[Apex] First-run OBS autoconfig failed (non-fatal):', err.message);
+    // Non-fatal — the packaged defaults in electron-store's schema still apply
+  }
+}
+
+// If the user hasn't picked an encoder themselves yet, re-run the encoder
+// portion of autoconfig after an FFmpeg install. Called from the
+// ensureFFmpegInstalled flow so the first streaming attempt benefits from
+// the freshly-available hardware encoders even though autoconfig ran
+// pre-install. Only touches videoEncoder — no bitrate/resolution/etc.
+async function refreshEncoderForFreshInstall() {
+  try {
+    const current = store.get('obsSettings') || {};
+    // If user has explicitly chosen a non-default encoder, do not override
+    if (current._encoderUserSelectedAt) return;
+
+    const { recommendations } = await autoconfig.detectRecommendedObsSettings({
+      ffmpegPath: ffmpegInstaller.findFFmpegPath(),
+      screenModule: screen,
+      videosPath: app.getPath('videos'),
+    });
+    if (recommendations.videoEncoder && recommendations.videoEncoder !== current.videoEncoder) {
+      const merged = {
+        ...current,
+        videoEncoder: recommendations.videoEncoder,
+        // Also refresh bitrate ceiling since hardware encoders get a higher budget
+        videoBitrate: recommendations.videoBitrate,
+      };
+      store.set('obsSettings', merged);
+      mainWindow?.webContents.send('obs-settings:auto-refreshed', {
+        encoder: merged.videoEncoder,
+        bitrate: merged.videoBitrate,
+      });
+      console.log('[Apex] Post-install encoder refresh:', merged.videoEncoder);
+    }
+  } catch (err) {
+    console.warn('[Apex] Post-install encoder refresh failed:', err.message);
+  }
+}
+
+// On-demand autoconfig detection — returns recommendations WITHOUT
+// persisting anything. The renderer uses this to show the user what
+// would change before they confirm.
+ipcMain.handle('obs-settings:detect', async () => {
+  return autoconfig.detectRecommendedObsSettings({
+    ffmpegPath: ffmpegInstaller.findFFmpegPath(),
+    screenModule: screen,
+    videosPath: app.getPath('videos'),
+  });
+});
+
+// Apply a selected subset of recommendations to obsSettings. `fields` is
+// an array of keys the user wants to overwrite (e.g. ['videoEncoder',
+// 'videoBitrate']). Anything not in `fields` is preserved from the
+// current saved settings. Returns the merged result so the renderer can
+// refresh its local state immediately.
+ipcMain.handle('obs-settings:apply-detected', async (_, payload) => {
+  const fields = (payload && payload.fields) || [];
+  const current = store.get('obsSettings') || {};
+  const { recommendations } = await autoconfig.detectRecommendedObsSettings({
+    ffmpegPath: ffmpegInstaller.findFFmpegPath(),
+    screenModule: screen,
+    videosPath: app.getPath('videos'),
+  });
+  const patch = {};
+  for (const key of fields) {
+    if (recommendations[key] !== undefined) patch[key] = recommendations[key];
+  }
+  const merged = {
+    ...current,
+    ...patch,
+    _lastAutoDetectAppliedAt: new Date().toISOString(),
+    // Mark that the user explicitly set the encoder so the post-install
+    // refresh above doesn't later overwrite their intentional choice.
+    ...(fields.includes('videoEncoder') ? { _encoderUserSelectedAt: new Date().toISOString() } : {}),
+  };
+  store.set('obsSettings', merged);
+  return merged;
+});
 
 ipcMain.handle('stream:start', async (_, config) => {
   await ensureFFmpegInstalled();
@@ -435,6 +577,11 @@ app.whenReady().then(async () => {
     streamEngine.ffmpegPath = ffmpegPath;
   }
   // Renderer will receive ffmpeg status via 'ffmpeg:check' IPC on load
+
+  // First-launch OBS autoconfig. Runs once, ever. User edits after this
+  // point are saved via store.set('obsSettings', ...) and always win on
+  // subsequent launches — see maybeFirstRunObsAutoconfig for the guard.
+  await maybeFirstRunObsAutoconfig();
 
   startHeartbeat();
 

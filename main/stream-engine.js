@@ -44,28 +44,48 @@ class StreamEngine extends EventEmitter {
   }
 
   // ─── Encoder Detection ────────────────────────────────
-  // Runs `ffmpeg -encoders` once and caches the best available H.264 encoder.
-  // Falls back through libx264 → h264_nvenc → h264_amf → h264_mf.
-  _detectH264Encoder() {
-    if (this._h264Encoder) return this._h264Encoder;
-    try {
-      const out = execFileSync(this.ffmpegPath, ['-encoders', '-v', 'quiet'], {
-        timeout: 8000,
-        windowsHide: true,
-      }).toString();
-      for (const enc of H264_ENCODER_CANDIDATES) {
-        if (out.includes(` ${enc} `)) {
-          console.log(`[StreamEngine] Using H.264 encoder: ${enc}`);
-          this._h264Encoder = enc;
-          return enc;
-        }
+  // Probes `ffmpeg -encoders` once, caches the full list of available
+  // H.264 encoders, and returns the user's preferred encoder when it's
+  // actually available. Falls back to the best hardware-first option,
+  // then finally to h264_mf (bundled with every Windows 10+ FFmpeg).
+  //
+  // `preferred` is the settings.videoEncoder string from the UI — passing
+  // it through here is what makes the UI selector actually drive the
+  // stream. Previously this method ignored settings and auto-picked.
+  _detectH264Encoder(preferred) {
+    // Probe + cache the available list once per engine instance.
+    if (!this._availableH264Encoders) {
+      try {
+        const out = execFileSync(this.ffmpegPath, ['-encoders', '-v', 'quiet'], {
+          timeout: 8000,
+          windowsHide: true,
+        }).toString();
+        this._availableH264Encoders = H264_ENCODER_CANDIDATES.filter(
+          (enc) => out.includes(` ${enc} `)
+        );
+        console.log('[StreamEngine] Available H.264 encoders:', this._availableH264Encoders);
+      } catch (e) {
+        console.warn('[StreamEngine] Could not query encoders:', e.message);
+        this._availableH264Encoders = [];
       }
-    } catch (e) {
-      console.warn('[StreamEngine] Could not query encoders:', e.message);
     }
-    // Last-resort fallback — h264_mf is built into every Windows 10+ FFmpeg
+
+    // Honor the user's preference when it's actually compiled into this
+    // FFmpeg build. If they picked libx264 on a bundle that has it
+    // disabled (our standard S3 bundle does), fall through to auto-pick
+    // rather than spawning a doomed ffmpeg call.
+    if (preferred && this._availableH264Encoders.includes(preferred)) {
+      return preferred;
+    }
+    if (preferred) {
+      console.warn(`[StreamEngine] Preferred encoder "${preferred}" unavailable in this FFmpeg build — auto-selecting from ${this._availableH264Encoders.join(', ') || 'none'}`);
+    }
+
+    // Auto-select: first available from the priority order, then mf as last resort
+    if (this._availableH264Encoders.length > 0) {
+      return this._availableH264Encoders[0];
+    }
     console.warn('[StreamEngine] Falling back to h264_mf encoder');
-    this._h264Encoder = 'h264_mf';
     return 'h264_mf';
   }
 
@@ -134,8 +154,9 @@ class StreamEngine extends EventEmitter {
       audioBitrate, resolution, fps,
     } = settings;
 
-    // Detect best available H.264 encoder (cached after first call)
-    const encoder = this._detectH264Encoder();
+    // Resolve H.264 encoder: honor the user's choice from obsSettings
+    // when it's available in this FFmpeg build, otherwise auto-pick.
+    const encoder = this._detectH264Encoder(settings.videoEncoder);
 
     // Strip trailing slash so we never get double-slash in RTMP URL
     const baseUrl = (streamUrl || '').replace(/\/+$/, '');
@@ -371,7 +392,7 @@ class StreamEngine extends EventEmitter {
     // Ensure output dir exists
     fs.mkdirSync(outputPath, { recursive: true });
 
-    const encoder = this._detectH264Encoder();
+    const encoder = this._detectH264Encoder(settings.videoEncoder);
     const useAudio = settings.audioDevice && settings.audioDevice.trim() !== '';
 
     const args = [

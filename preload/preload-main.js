@@ -12,6 +12,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (key, value) => ipcRenderer.invoke('store:set', key, value),
   },
 
+  // ─── OBS Settings Autoconfig ─────────────────────────
+  // detect() returns { recommendations, specs, encoderLabels } WITHOUT
+  // saving — used by the UI to show the user what would change before
+  // they confirm. applyDetected({ fields }) applies the user-selected
+  // subset of recommendations and returns the merged result.
+  obsSettings: {
+    detect:        () => ipcRenderer.invoke('obs-settings:detect'),
+    applyDetected: (fields) => ipcRenderer.invoke('obs-settings:apply-detected', { fields }),
+    onAutoRefreshed: (cb) => ipcRenderer.on('obs-settings:auto-refreshed', (_, data) => cb(data)),
+  },
+
   // ─── Window Controls ─────────────────────────────────
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),
