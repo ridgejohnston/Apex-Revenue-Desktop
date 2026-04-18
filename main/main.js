@@ -770,15 +770,67 @@ ipcMain.on('updates:install', () => {
     console.error('[Updater] Cleanup error (continuing):', e.message);
   }
 
-  if (mainWindow) {
-    mainWindow.removeAllListeners('close');
-    mainWindow.destroy();
-    log('mainWindow destroyed');
+  // v3.3.9: aggressive window/view teardown. The "ApexRevenue cannot be
+  // closed" NSIS error fires when the installer detects our process
+  // tree is still alive during its uninstall phase. The usual culprits
+  // on Windows:
+  //   • The cam-platform BrowserView is a separate WebContents process.
+  //     Its embedded page (Chaturbate/Stripchat) may have beforeunload
+  //     handlers or open WebSockets that stall graceful close.
+  //   • Secondary BrowserWindows (if any) — must close all, not just
+  //     mainWindow, before quitAndInstall can proceed.
+  //   • Slow AWS/IoT/MQTT teardown keeping the main process event loop
+  //     alive past the installer's wait timeout.
+
+  // 1) Detach and destroy the cam BrowserView first — its page is most
+  //    likely to have beforeunload stalls. BrowserView.webContents.close()
+  //    forces close without running before-unload. webContents.destroy()
+  //    (undocumented but exists) fully tears down the process.
+  try {
+    if (typeof camView !== 'undefined' && camView) {
+      try { mainWindow?.removeBrowserView?.(camView); } catch {}
+      try { camView.webContents?.close({ waitForBeforeUnload: false }); } catch {}
+      try { camView.webContents?.destroy?.(); } catch {}
+      log('camView destroyed');
+    }
+  } catch (e) {
+    log(`camView teardown ERROR: ${e.message}`);
   }
 
-  // Give child processes ~500ms to actually die after SIGTERM. Without this
-  // the PowerShell watcher may start polling while ffmpeg.exe is still
-  // half-alive and holding the file handle.
+  // 2) Destroy ALL BrowserWindows, not just mainWindow. Strip listeners
+  //    first so 'close' handlers with e.preventDefault() can't block.
+  try {
+    const allWindows = BrowserWindow.getAllWindows();
+    for (const win of allWindows) {
+      try {
+        win.removeAllListeners('close');
+        win.removeAllListeners('before-unload');
+        // webContents.close({waitForBeforeUnload:false}) is an Electron
+        // 22+ API that skips the beforeunload prompt chain.
+        try { win.webContents?.close({ waitForBeforeUnload: false }); } catch {}
+        win.destroy();
+      } catch {}
+    }
+    log(`Destroyed ${allWindows.length} window(s)`);
+  } catch (e) {
+    log(`window teardown ERROR: ${e.message}`);
+  }
+
+  // 2.5) Destroy the system tray icon. Tray holds a Windows system
+  //      resource handle that can prevent the main process from
+  //      exiting cleanly. Without this, the process remains alive in
+  //      the background even after all windows are gone.
+  try {
+    if (typeof tray !== 'undefined' && tray && !tray.isDestroyed?.()) {
+      tray.destroy();
+      log('tray destroyed');
+    }
+  } catch (e) {
+    log(`tray teardown ERROR: ${e.message}`);
+  }
+
+  // 3) Give child processes ~500ms to actually die after destroy(). The
+  //    BrowserView/renderer processes exit asynchronously on Windows.
   setTimeout(() => {
     try {
       const installerPath = downloadedInstallerPath;
@@ -791,8 +843,6 @@ ipcMain.on('updates:install', () => {
       // that job, including our "detached" PowerShell, BEFORE the
       // installer can be spawned. Node's detached flag maps to
       // DETACHED_PROCESS on Windows, not CREATE_BREAKAWAY_FROM_JOB.
-      // Result: the app closed, the installer never launched, user saw
-      // nothing happen. This is the symptom Ridge hit on v3.3.1.
       //
       // autoUpdater.quitAndInstall() ships with electron-updater's
       // Update.exe helper, which IS compiled with the proper breakaway
@@ -803,12 +853,26 @@ ipcMain.on('updates:install', () => {
       //   false → don't pass /S — our NSIS config is oneClick:false,
       //           /S causes the wizard to abort in undefined state.
       //   true  → re-launch the new version after install completes.
-      //
-      // The FFmpeg cleanup above (before this setTimeout) is what makes
-      // quitAndInstall safe here — it prevents the file-lock race that
-      // originally made us avoid this path.
-      log('Calling autoUpdater.quitAndInstall(false, true) — Update.exe handles job-object breakaway');
+      log('Calling autoUpdater.quitAndInstall(false, true)');
       autoUpdater.quitAndInstall(false, true);
+
+      // SAFETY NET: quitAndInstall internally calls app.quit(), which
+      // waits for all windows to close gracefully and all the app's
+      // event loop tasks to drain. If an AWS MQTT connection, a pending
+      // network request, or a stuck renderer IPC blocks that drain,
+      // Update.exe's wait-for-parent-death check times out and launches
+      // the installer while our process is still alive — that's the
+      // "ApexRevenue cannot be closed" dialog the user saw on v3.3.7→v3.3.8.
+      //
+      // Force app.exit(0) after 1.2s as a hard backup. app.exit is a
+      // synchronous process-kill that bypasses the event loop entirely.
+      // Windows's Job Object will cascade the kill to every renderer/
+      // utility child, so by the time Update.exe's installer runs, the
+      // whole ApexRevenue.exe process tree is confirmed dead.
+      setTimeout(() => {
+        log('SAFETY NET: quitAndInstall did not exit within 1.2s — forcing app.exit(0)');
+        try { app.exit(0); } catch {}
+      }, 1200);
     } catch (err) {
       log(`quitAndInstall ERROR: ${err.message}\n${err.stack || ''}`);
       console.error('[Updater] quitAndInstall failed:', err);
