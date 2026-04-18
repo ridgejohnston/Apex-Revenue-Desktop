@@ -638,8 +638,27 @@ app.whenReady().then(async () => {
   });
 
   // Stream status updates
+  // Track streaming state so we can auto-restore the renderer's webcam
+  // preview when the stream ends for ANY reason — Stop Stream click,
+  // Chaturbate disconnect, FFmpeg process crash, network drop. The
+  // explicit restore in the stream:stop IPC only fires on user-initiated
+  // stops; without this listener, an unexpected stream death would leave
+  // the preview canvas dark even though FFmpeg has released the camera.
+  let wasStreaming = false;
   streamEngine.on('status', (status) => {
     mainWindow?.webContents.send('stream:status', status);
+
+    const nowStreaming = !!status.streaming;
+    if (wasStreaming && !nowStreaming) {
+      // Streaming just ended — restore the renderer's webcam preview.
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try {
+          mainWindow.webContents.executeJavaScript('window.__apexRestoreWebcams && window.__apexRestoreWebcams()')
+            .catch(() => {});
+        } catch {}
+      }
+    }
+    wasStreaming = nowStreaming;
   });
 
   // When the stream engine's runtime encoder probe discovers that the
