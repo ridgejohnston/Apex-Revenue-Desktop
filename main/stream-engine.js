@@ -70,7 +70,6 @@ class StreamEngine extends EventEmitter {
   }
 
   // Build the video encoding args for the detected encoder.
-  // -preset is libx264/nvenc-specific; h264_mf and h264_amf don't support it.
   _videoEncodeArgs(encoder, videoBitrate, fps, resolution) {
     const base = [
       '-c:v', encoder,
@@ -82,11 +81,34 @@ class StreamEngine extends EventEmitter {
     ];
     // Scale to target resolution
     const scaleArgs = ['-vf', `scale=${resolution.width}:${resolution.height}`];
-    // Preset only applies to libx264 and h264_nvenc
-    const presetArgs = (encoder === 'libx264' || encoder === 'h264_nvenc')
-      ? ['-preset', 'veryfast']
-      : [];
+    const presetArgs = this._presetArgsFor(encoder);
     return [...scaleArgs, ...base, ...presetArgs];
+  }
+
+  // Each H.264 encoder uses its own preset vocabulary. Mixing them produces
+  // cryptic "Invalid argument" errors at startup — e.g. NVENC rejects the
+  // x264 name 'veryfast' because NVENC's presets are p1 (fastest) through
+  // p7 (slowest). Keep each encoder's presets in its own lane.
+  _presetArgsFor(encoder) {
+    switch (encoder) {
+      case 'libx264':
+        // x264 software encoder: classic speed/quality presets
+        return ['-preset', 'veryfast'];
+      case 'h264_nvenc':
+        // NVIDIA NVENC (modern API): p2 is roughly the 'veryfast' equivalent
+        return ['-preset', 'p2'];
+      case 'h264_qsv':
+        // Intel QuickSync accepts x264-style names
+        return ['-preset', 'veryfast'];
+      case 'h264_amf':
+      case 'h264_mf':
+        // AMD AMF and Windows Media Foundation: no portable preset vocab —
+        // just use encoder defaults. Attempting to set an x264 preset on
+        // either throws the same EINVAL we were debugging.
+        return [];
+      default:
+        return [];
+    }
   }
 
   // ─── RTMP Streaming ───────────────────────────────────
@@ -238,6 +260,15 @@ class StreamEngine extends EventEmitter {
     if (!stderr) return null;
     const s = stderr.toLowerCase();
 
+    // Encoder preset rejection — each H.264 encoder has its own preset
+    // vocabulary (x264 uses 'veryfast', NVENC uses 'p1'-'p7', etc.). When
+    // _videoEncodeArgs sends the wrong one, FFmpeg fails setup with
+    // 'Unable to parse "preset"' + 'Error applying encoder options'.
+    if (/unable to parse ["']?preset["']?/i.test(stderr) ||
+        /error applying encoder options/i.test(stderr)) {
+      return 'Hint: the selected encoder rejected the configured preset. Each H.264 encoder uses its own preset names (x264 → veryfast/fast/medium, NVENC → p1-p7, AMF/MF → no presets). Try a different encoder in Settings > OBS.';
+    }
+
     if (/gdigrab.*?(could not|cannot|failed|error)/i.test(stderr) ||
         /couldn\'?t capture image/i.test(stderr)) {
       return 'Hint: gdigrab (screen capture) failed to initialize. Check that you have an active desktop session (not locked/RDP), and that display scaling is set to 100%.';
@@ -252,7 +283,7 @@ class StreamEngine extends EventEmitter {
       return 'Hint: the RTMP server refused the connection. Verify the Stream URL and Stream Key are correct, and that your firewall allows outbound TCP 1935.';
     }
     if (/invalid argument/i.test(stderr) && /output/i.test(stderr)) {
-      return 'Hint: "Invalid argument" on output is often caused by an input failure (gdigrab or dshow). Check the full log for lines before this one to see which input failed to initialize.';
+      return 'Hint: "Invalid argument" on output is often caused by an input or encoder setup failure. Check the full log for lines before this one to see which component failed to initialize.';
     }
     return null;
   }
