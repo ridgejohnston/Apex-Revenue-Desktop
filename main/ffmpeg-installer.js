@@ -45,8 +45,33 @@ function findFFmpegPath() {
     if (fs.existsSync(p)) return p;
   }
 
+  // 4. system PATH — use Windows `where.exe` to honor the user's PATH setup.
+  // Some users install FFmpeg to non-standard directories or via package
+  // managers (Chocolatey, Scoop, winget) that put it somewhere PATH-only.
+  // Cached after first successful lookup so we don't pay the ~20ms on
+  // every stream/record start.
+  if (_cachedPathLookup !== undefined) return _cachedPathLookup;
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('where.exe', ['ffmpeg.exe'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2000,
+    });
+    const firstHit = (out || '').split(/\r?\n/).map((s) => s.trim()).find(Boolean);
+    if (firstHit && fs.existsSync(firstHit)) {
+      _cachedPathLookup = firstHit;
+      return firstHit;
+    }
+  } catch {
+    // where.exe returns non-zero when not found — cache the negative
+  }
+  _cachedPathLookup = null;
   return null;
 }
+
+// Cached result of the PATH lookup (undefined = not yet probed).
+let _cachedPathLookup;
 
 /**
  * Returns true if FFmpeg is available on this machine.
@@ -121,6 +146,11 @@ async function downloadAndInstallFFmpeg(onProgress) {
   if (!fs.existsSync(exePath)) {
     throw new Error('FFmpeg extraction completed but ffmpeg.exe not found at expected path.');
   }
+
+  // Invalidate the PATH-lookup cache so a subsequent findFFmpegPath()
+  // call picks up the newly installed binary instead of returning the
+  // stale "not found" result from before the install.
+  _cachedPathLookup = undefined;
 
   return exePath;
 }

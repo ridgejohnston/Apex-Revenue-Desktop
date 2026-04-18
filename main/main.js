@@ -213,7 +213,31 @@ ipcMain.handle('audio:set-muted', (_, deviceId, muted) => audioMixer.setMuted(de
 ipcMain.handle('audio:get-levels', () => audioMixer.getLevels());
 
 // ─── Stream Engine IPC ──────────────────────────────────
+
+// Shared helper: if FFmpeg is missing, download and extract the S3 bundle
+// to userData before the stream/record call proceeds. Progress is streamed
+// to the renderer so the existing FFmpeg install banner can show a bar.
+// Throws on install failure so the IPC handler rejects cleanly — the
+// renderer catches that and surfaces the error to the user.
+async function ensureFFmpegInstalled() {
+  if (ffmpegInstaller.isFFmpegInstalled()) return;
+
+  mainWindow?.webContents.send('ffmpeg:installing', { reason: 'auto' });
+  try {
+    const exePath = await ffmpegInstaller.downloadAndInstallFFmpeg((progress) => {
+      mainWindow?.webContents.send('ffmpeg:install-progress', progress);
+    });
+    mainWindow?.webContents.send('ffmpeg:installed', { success: true, path: exePath });
+  } catch (err) {
+    mainWindow?.webContents.send('ffmpeg:installed', { success: false, error: err.message });
+    const wrapped = new Error(`FFmpeg auto-install failed: ${err.message}. You can retry from Settings → Streaming → Install FFmpeg.`);
+    wrapped.code = 'FFMPEG_INSTALL_FAILED';
+    throw wrapped;
+  }
+}
+
 ipcMain.handle('stream:start', async (_, config) => {
+  await ensureFFmpegInstalled();
   const settings = { ...store.get('obsSettings'), ...config };
   return streamEngine.startStream(settings);
 });
@@ -221,6 +245,7 @@ ipcMain.handle('stream:stop', () => streamEngine.stopStream());
 ipcMain.handle('stream:get-status', () => streamEngine.getStatus());
 
 ipcMain.handle('record:start', async (_, config) => {
+  await ensureFFmpegInstalled();
   const settings = { ...store.get('obsSettings'), ...config };
   return streamEngine.startRecording(settings);
 });

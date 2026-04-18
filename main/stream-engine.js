@@ -93,6 +93,20 @@ class StreamEngine extends EventEmitter {
   async startStream(settings) {
     if (this.streamProcess) throw new Error('Stream already running');
 
+    // Pre-flight: verify FFmpeg is actually available. Without this, we'd
+    // fall back to spawning the bare string 'ffmpeg' and hope Windows
+    // resolves it via PATH. When PATH doesn't have it either, FFmpeg
+    // either fails to spawn (confusing ENOENT) or — worse — some broken
+    // partial install spawns and produces misleading errors like
+    // "Error opening output files: Invalid argument".
+    const resolvedPath = findFFmpegPath();
+    if (!resolvedPath) {
+      const err = new Error('FFmpeg is not installed. Open Settings → Streaming and click "Install FFmpeg", or install it to your system PATH.');
+      err.code = 'FFMPEG_NOT_INSTALLED';
+      throw err;
+    }
+    this.ffmpegPath = resolvedPath; // refresh in case it was just installed this session
+
     const {
       streamUrl, streamKey, videoBitrate,
       audioBitrate, resolution, fps,
@@ -308,6 +322,16 @@ class StreamEngine extends EventEmitter {
   // ─── Local Recording ──────────────────────────────────
   async startRecording(settings) {
     if (this.recordProcess) throw new Error('Recording already running');
+
+    // Pre-flight: same reasoning as startStream — surface a clean error
+    // instead of a confusing FFmpeg exit when the binary is missing.
+    const resolvedPath = findFFmpegPath();
+    if (!resolvedPath) {
+      const err = new Error('FFmpeg is not installed. Open Settings → Streaming and click "Install FFmpeg", or install it to your system PATH.');
+      err.code = 'FFMPEG_NOT_INSTALLED';
+      throw err;
+    }
+    this.ffmpegPath = resolvedPath;
 
     const { outputPath, videoBitrate, audioBitrate, resolution, fps } = settings;
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
