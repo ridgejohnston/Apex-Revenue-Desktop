@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     detect:        () => ipcRenderer.invoke('obs-settings:detect'),
     applyDetected: (fields) => ipcRenderer.invoke('obs-settings:apply-detected', { fields }),
     onAutoRefreshed: (cb) => ipcRenderer.on('obs-settings:auto-refreshed', (_, data) => cb(data)),
+    // Fired when startStream's runtime encoder probe discovers the user's
+    // saved encoder isn't usable on this machine (e.g. NVENC on a box
+    // without NVIDIA drivers) and silently corrects to a working one.
+    // The renderer shows a dismissible toast explaining what changed.
+    onEncoderAutoHealed: (cb) => ipcRenderer.on('obs-settings:encoder-auto-healed', (_, data) => cb(data)),
   },
 
   // ─── Window Controls ─────────────────────────────────

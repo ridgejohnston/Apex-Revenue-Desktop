@@ -567,6 +567,34 @@ app.whenReady().then(async () => {
     mainWindow?.webContents.send('stream:status', status);
   });
 
+  // When the stream engine's runtime encoder probe discovers that the
+  // user's saved videoEncoder choice doesn't actually work on this
+  // machine (e.g. h264_nvenc on a box without NVIDIA drivers), it emits
+  // 'encoder-auto-changed'. Persist the working encoder to the store so
+  // the user doesn't hit the same failure path next launch, and tell the
+  // renderer so the UI can refresh + toast.
+  streamEngine.on('encoder-auto-changed', ({ requested, resolved, reason }) => {
+    const current = store.get('obsSettings') || {};
+    const updated = {
+      ...current,
+      videoEncoder: resolved,
+      _encoderAutoHealedAt: new Date().toISOString(),
+      _encoderAutoHealedFrom: requested,
+    };
+    store.set('obsSettings', updated);
+    console.log(`[Apex] Encoder auto-healed: ${requested} → ${resolved}. Reason: ${reason}`);
+    mainWindow?.webContents.send('obs-settings:encoder-auto-healed', {
+      requested,
+      resolved,
+      reason,
+    });
+    // Also fire the existing auto-refresh event so the OBS panel's
+    // useEffect re-reads settings and the dropdown shows the new value.
+    mainWindow?.webContents.send('obs-settings:auto-refreshed', {
+      encoder: resolved,
+    });
+  });
+
   // Initialize AWS (silently)
   try { await awsServices.init(store); }
   catch (e) { console.error('AWS init error:', e); }

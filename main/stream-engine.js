@@ -15,10 +15,33 @@ function findFFmpeg() {
   return findFFmpegPath() || 'ffmpeg';
 }
 
-// H.264 encoder preference order — first one found in the FFmpeg binary wins.
-// h264_mf is Windows Media Foundation (always available on Win10+), so it is
-// the guaranteed fallback when no other encoder is compiled in.
-const H264_ENCODER_CANDIDATES = ['libx264', 'h264_nvenc', 'h264_amf', 'h264_mf'];
+// H.264 encoder preference order. Ordered hardware-first (zero CPU cost)
+// → software fallback (works anywhere). CRITICAL: being in this list and
+// being returned by `ffmpeg -encoders` only means the encoder is COMPILED
+// INTO the FFmpeg binary — runtime availability depends on the user's
+// actual GPU and drivers. _probeEncoderRuntime() verifies that the
+// encoder can actually open on this specific machine.
+//
+// Order rationale:
+//   h264_nvenc   → NVIDIA GPU + nvcuda.dll from drivers
+//   h264_qsv     → Intel CPU with integrated graphics (most Intel laptops)
+//   h264_amf     → AMD GPU + AMF runtime from drivers
+//   libopenh264  → Cisco's BSD software encoder. Ships in our bundled
+//                  FFmpeg (--enable-libopenh264) and runs anywhere that
+//                  FFmpeg runs. This is the reliable no-hardware fallback.
+//   libx264      → Disabled in our bundle (--disable-libx264), but may
+//                  be present in a system-wide FFmpeg the user installed.
+//   h264_mf      → Windows Media Foundation. Only in FFmpeg builds that
+//                  were compiled with --enable-mediafoundation. Our
+//                  current bundle does NOT have this.
+const H264_ENCODER_CANDIDATES = [
+  'h264_nvenc',
+  'h264_qsv',
+  'h264_amf',
+  'libopenh264',
+  'libx264',
+  'h264_mf',
+];
 
 class StreamEngine extends EventEmitter {
   constructor() {
@@ -44,49 +67,107 @@ class StreamEngine extends EventEmitter {
   }
 
   // ─── Encoder Detection ────────────────────────────────
-  // Probes `ffmpeg -encoders` once, caches the full list of available
-  // H.264 encoders, and returns the user's preferred encoder when it's
-  // actually available. Falls back to the best hardware-first option,
-  // then finally to h264_mf (bundled with every Windows 10+ FFmpeg).
+  // Two-phase detection:
+  //   1. Compile-time: which H.264 encoders does this FFmpeg binary have
+  //      built in? (answered by `ffmpeg -encoders`)
+  //   2. Runtime:      which of those can actually INITIALIZE on this
+  //      specific machine? (answered by attempting a tiny test encode)
   //
-  // `preferred` is the settings.videoEncoder string from the UI — passing
-  // it through here is what makes the UI selector actually drive the
-  // stream. Previously this method ignored settings and auto-picked.
+  // The runtime phase is what we were missing — FFmpeg cheerfully lists
+  // h264_nvenc in its -encoders output even on machines with no NVIDIA
+  // driver, then fails at stream time with "Cannot load nvcuda.dll".
+  // Same story for h264_amf (AMF runtime DLL) and h264_qsv (libvpl).
+  //
+  // Results are cached on the instance, so we only pay the probe cost
+  // once per app session. The probe itself runs in ~300-500ms per encoder
+  // and is skipped entirely for encoders not compiled in.
   _detectH264Encoder(preferred) {
-    // Probe + cache the available list once per engine instance.
-    if (!this._availableH264Encoders) {
-      try {
-        const out = execFileSync(this.ffmpegPath, ['-encoders', '-v', 'quiet'], {
-          timeout: 8000,
-          windowsHide: true,
-        }).toString();
-        this._availableH264Encoders = H264_ENCODER_CANDIDATES.filter(
-          (enc) => out.includes(` ${enc} `)
-        );
-        console.log('[StreamEngine] Available H.264 encoders:', this._availableH264Encoders);
-      } catch (e) {
-        console.warn('[StreamEngine] Could not query encoders:', e.message);
-        this._availableH264Encoders = [];
-      }
-    }
+    this._ensureAvailableEncoders();
 
-    // Honor the user's preference when it's actually compiled into this
-    // FFmpeg build. If they picked libx264 on a bundle that has it
-    // disabled (our standard S3 bundle does), fall through to auto-pick
-    // rather than spawning a doomed ffmpeg call.
-    if (preferred && this._availableH264Encoders.includes(preferred)) {
+    // Honor user's preferred encoder when it's actually usable here.
+    if (preferred && this._usableH264Encoders.includes(preferred)) {
       return preferred;
     }
     if (preferred) {
-      console.warn(`[StreamEngine] Preferred encoder "${preferred}" unavailable in this FFmpeg build — auto-selecting from ${this._availableH264Encoders.join(', ') || 'none'}`);
+      console.warn(`[StreamEngine] Preferred encoder "${preferred}" is not usable on this machine. Usable: ${this._usableH264Encoders.join(', ') || 'none'}`);
     }
 
-    // Auto-select: first available from the priority order, then mf as last resort
-    if (this._availableH264Encoders.length > 0) {
-      return this._availableH264Encoders[0];
+    // Auto-select the first usable encoder from the priority order.
+    if (this._usableH264Encoders.length > 0) {
+      return this._usableH264Encoders[0];
     }
-    console.warn('[StreamEngine] Falling back to h264_mf encoder');
+
+    // Absolute last resort — no encoders probed clean. h264_mf is always
+    // available on Windows 10+ IF it was compiled in; worst case FFmpeg
+    // will fail with a clearer error than we'd otherwise produce.
+    console.warn('[StreamEngine] No H.264 encoder survived runtime probing — falling back blindly to h264_mf');
     return 'h264_mf';
+  }
+
+  // Populate this._usableH264Encoders with the encoders that both (a) are
+  // compiled into this FFmpeg binary AND (b) pass a runtime open test.
+  // Populated on first call, cached for the rest of the app session.
+  _ensureAvailableEncoders() {
+    if (this._usableH264Encoders) return;
+
+    // Phase 1: compile-time list
+    let compiled = [];
+    try {
+      const out = execFileSync(this.ffmpegPath, ['-encoders', '-v', 'quiet'], {
+        timeout: 8000,
+        windowsHide: true,
+      }).toString();
+      compiled = H264_ENCODER_CANDIDATES.filter((enc) => out.includes(` ${enc} `));
+      console.log('[StreamEngine] Compile-time H.264 encoders:', compiled);
+    } catch (e) {
+      console.warn('[StreamEngine] -encoders probe failed:', e.message);
+      this._usableH264Encoders = [];
+      return;
+    }
+
+    // Phase 2: runtime probe each. Keep only the ones that actually open.
+    const usable = [];
+    for (const enc of compiled) {
+      if (this._probeEncoderRuntime(enc)) {
+        usable.push(enc);
+      } else {
+        console.warn(`[StreamEngine] Runtime probe failed for ${enc} — not usable on this machine`);
+      }
+    }
+    this._usableH264Encoders = usable;
+    console.log('[StreamEngine] Runtime-usable H.264 encoders:', usable);
+  }
+
+  // Run a tiny test encode to verify the encoder can actually initialize
+  // on this machine. We generate 0.05 seconds of 128x72 null video and
+  // try to push it through the encoder to a null sink — if the encoder
+  // can't load its runtime dependencies (nvcuda.dll, amfrt, etc.), the
+  // ffmpeg call exits non-zero and we know to skip it.
+  //
+  // Returns true if the encoder opened cleanly, false otherwise.
+  _probeEncoderRuntime(encoder) {
+    try {
+      execFileSync(this.ffmpegPath, [
+        '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'nullsrc=s=128x72:d=0.05',
+        '-c:v', encoder,
+        ...this._presetArgsFor(encoder),
+        '-t', '0.05',
+        '-f', 'null', '-',
+      ], {
+        timeout: 5000,
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'pipe'], // capture stderr for debugging
+      });
+      return true;
+    } catch (err) {
+      // Non-zero exit = encoder can't init. Log stderr in case we need it.
+      const stderr = (err.stderr && err.stderr.toString()) || '';
+      if (stderr) {
+        console.warn(`[StreamEngine] Probe stderr for ${encoder}:`, stderr.trim().split('\n').slice(-3).join(' | '));
+      }
+      return false;
+    }
   }
 
   // Build the video encoding args for the detected encoder.
@@ -120,6 +201,12 @@ class StreamEngine extends EventEmitter {
       case 'h264_qsv':
         // Intel QuickSync accepts x264-style names
         return ['-preset', 'veryfast'];
+      case 'libopenh264':
+        // Cisco OpenH264: no preset vocabulary, but -rc_mode bitrate is
+        // the sensible default for live streaming (matches our CBR-ish
+        // -b:v/-maxrate config). Without -rc_mode it may pick quality mode
+        // and ignore bitrate entirely.
+        return ['-rc_mode', 'bitrate'];
       case 'h264_amf':
       case 'h264_mf':
         // AMD AMF and Windows Media Foundation: no portable preset vocab —
@@ -155,8 +242,22 @@ class StreamEngine extends EventEmitter {
     } = settings;
 
     // Resolve H.264 encoder: honor the user's choice from obsSettings
-    // when it's available in this FFmpeg build, otherwise auto-pick.
+    // when it's actually usable on this machine, otherwise auto-pick a
+    // working fallback. _detectH264Encoder now runtime-probes each
+    // candidate to avoid returning encoders that are compiled-in but
+    // can't open (e.g. h264_nvenc on a machine without nvcuda.dll).
     const encoder = this._detectH264Encoder(settings.videoEncoder);
+
+    // If the resolved encoder differs from the user's saved choice, emit
+    // a notice so main.js can persist the correction to the store and the
+    // renderer can toast the user about what changed.
+    if (settings.videoEncoder && encoder !== settings.videoEncoder) {
+      this.emit('encoder-auto-changed', {
+        requested: settings.videoEncoder,
+        resolved: encoder,
+        reason: `"${settings.videoEncoder}" is not usable on this machine. Falling back to "${encoder}".`,
+      });
+    }
 
     // Strip trailing slash so we never get double-slash in RTMP URL
     const baseUrl = (streamUrl || '').replace(/\/+$/, '');
@@ -281,6 +382,17 @@ class StreamEngine extends EventEmitter {
     if (!stderr) return null;
     const s = stderr.toLowerCase();
 
+    // Hardware encoder runtime driver missing. The most common is
+    // "Cannot load nvcuda.dll" when NVENC is selected on a machine
+    // without NVIDIA drivers — FFmpeg compiled NVENC in, but the user's
+    // system doesn't have the NVIDIA runtime DLLs. v3.3.2+ auto-falls
+    // back to a working encoder, but preserve this hint for older
+    // installs or unusual configs.
+    if (/cannot load (nvcuda|nvEncodeAPI|amfrt|libvpl|libmfx)/i.test(stderr) ||
+        /failed loading (nvcuda|amf|qsv)/i.test(stderr)) {
+      return 'Hint: the selected hardware encoder cannot initialize because its GPU runtime is missing. NVENC needs NVIDIA drivers, AMF needs AMD drivers, QSV needs Intel graphics. Open Settings → OBS and change the encoder to "OpenH264 (Software)" which runs anywhere, or click "⚡ Auto-detect" to let Apex pick a working encoder.';
+    }
+
     // Encoder preset rejection — each H.264 encoder has its own preset
     // vocabulary (x264 uses 'veryfast', NVENC uses 'p1'-'p7', etc.). When
     // _videoEncodeArgs sends the wrong one, FFmpeg fails setup with
@@ -288,6 +400,13 @@ class StreamEngine extends EventEmitter {
     if (/unable to parse ["']?preset["']?/i.test(stderr) ||
         /error applying encoder options/i.test(stderr)) {
       return 'Hint: the selected encoder rejected the configured preset. Each H.264 encoder uses its own preset names (x264 → veryfast/fast/medium, NVENC → p1-p7, AMF/MF → no presets). Try a different encoder in Settings > OBS.';
+    }
+
+    // Generic encoder open failure when we didn't catch a more specific
+    // signature above. Points at the encoder as the likely culprit.
+    if (/error while opening encoder/i.test(stderr) ||
+        /could not open encoder/i.test(stderr)) {
+      return 'Hint: the video encoder failed to initialize. This usually means the hardware encoder picked cannot run on this machine. Change the encoder in Settings > OBS to "OpenH264 (Software)" which works on any system.';
     }
 
     if (/gdigrab.*?(could not|cannot|failed|error)/i.test(stderr) ||
@@ -298,7 +417,7 @@ class StreamEngine extends EventEmitter {
       return 'Hint: the configured audio input device (dshow) was not found. Pick a different microphone in Settings > OBS, or set it to "None" to stream with silent audio.';
     }
     if (/unknown encoder|encoder not found/i.test(stderr)) {
-      return 'Hint: the selected video encoder is not available in this FFmpeg build. Try switching to the default "x264 (CPU)" encoder in Settings > OBS.';
+      return 'Hint: the selected video encoder is not available in this FFmpeg build. Try switching to "OpenH264 (Software)" in Settings > OBS.';
     }
     if (/connection refused|connection timed out|network is unreachable/i.test(stderr)) {
       return 'Hint: the RTMP server refused the connection. Verify the Stream URL and Stream Key are correct, and that your firewall allows outbound TCP 1935.';
@@ -393,6 +512,13 @@ class StreamEngine extends EventEmitter {
     fs.mkdirSync(outputPath, { recursive: true });
 
     const encoder = this._detectH264Encoder(settings.videoEncoder);
+    if (settings.videoEncoder && encoder !== settings.videoEncoder) {
+      this.emit('encoder-auto-changed', {
+        requested: settings.videoEncoder,
+        resolved: encoder,
+        reason: `"${settings.videoEncoder}" is not usable on this machine. Falling back to "${encoder}".`,
+      });
+    }
     const useAudio = settings.audioDevice && settings.audioDevice.trim() !== '';
 
     const args = [

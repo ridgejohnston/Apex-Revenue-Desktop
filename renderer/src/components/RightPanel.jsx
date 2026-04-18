@@ -97,6 +97,9 @@ function OBSProperties() {
   const [detected, setDetected] = useState(null);
   const [selectedFields, setSelectedFields] = useState(new Set());
   const [detecting, setDetecting] = useState(false);
+  // Toast state for the encoder-auto-healed notice. Null = hidden,
+  // otherwise holds {requested, resolved, reason} from the main process.
+  const [encoderHealedNotice, setEncoderHealedNotice] = useState(null);
   const debounceRef = useRef(null);
   const toastRef = useRef(null);
 
@@ -120,6 +123,16 @@ function OBSProperties() {
     // available. Re-load settings so the UI mirrors the change.
     window.electronAPI.obsSettings.onAutoRefreshed(() => {
       window.electronAPI.store.get('obsSettings').then(setSettings);
+    });
+
+    // When startStream's runtime probe discovers the saved encoder can't
+    // actually open on this machine, main auto-corrects to a working
+    // encoder and fires this event. Refresh settings so the dropdown
+    // reflects the new encoder, and show a dismissible notice so the
+    // user understands why their selection changed.
+    window.electronAPI.obsSettings.onEncoderAutoHealed((data) => {
+      window.electronAPI.store.get('obsSettings').then(setSettings);
+      setEncoderHealedNotice(data);
     });
 
     return () => {
@@ -257,6 +270,40 @@ function OBSProperties() {
           </button>
         </div>
 
+        {/* Encoder auto-healed notice — shows when the runtime probe
+            discovered the saved encoder doesn't work on this machine
+            and silently corrected it to a working one. */}
+        {encoderHealedNotice && (
+          <div style={{
+            background: 'rgba(255,165,2,0.08)',
+            border: '1px solid var(--warning, #ffa502)',
+            borderRadius: 6,
+            padding: '8px 10px',
+            marginBottom: 10,
+            fontSize: 10,
+            color: 'var(--text-primary)',
+            position: 'relative',
+          }}>
+            <button
+              onClick={() => setEncoderHealedNotice(null)}
+              style={{
+                position: 'absolute', top: 4, right: 6,
+                background: 'none', border: 'none',
+                color: 'var(--text-dim)', cursor: 'pointer', fontSize: 12, padding: 2,
+              }}
+              aria-label="Dismiss"
+            >✕</button>
+            <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--warning, #ffa502)', marginBottom: 4 }}>
+              ⚠ Encoder auto-corrected
+            </div>
+            <div style={{ color: 'var(--text-secondary)', lineHeight: 1.5, paddingRight: 12 }}>
+              {encoderHealedNotice.reason} Your saved settings have been updated so
+              streaming works on your hardware. You can change this anytime in the
+              Encoder dropdown below.
+            </div>
+          </div>
+        )}
+
         {/* Auto-detect preview panel — shown after Auto-detect is clicked */}
         {detected && (
           <AutoDetectPanel
@@ -322,10 +369,12 @@ function OBSProperties() {
               className="input" style={{ width: '100%' }}
               value={settings.videoEncoder} onChange={(e) => update('videoEncoder', e.target.value)}
             >
-              <option value="libx264">x264 (CPU)</option>
-              <option value="h264_nvenc">NVENC (NVIDIA)</option>
-              <option value="h264_amf">AMF (AMD)</option>
-              <option value="h264_qsv">QuickSync (Intel)</option>
+              <option value="libopenh264">OpenH264 (Software — works anywhere)</option>
+              <option value="h264_nvenc">NVENC (NVIDIA GPU)</option>
+              <option value="h264_qsv">QuickSync (Intel iGPU)</option>
+              <option value="h264_amf">AMF (AMD GPU)</option>
+              <option value="libx264">x264 (if system FFmpeg)</option>
+              <option value="h264_mf">Media Foundation (Windows)</option>
             </select>
           </div>
         </div>
