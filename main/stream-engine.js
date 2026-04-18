@@ -230,6 +230,49 @@ class StreamEngine extends EventEmitter {
   //   settings.videoSource === 'screen' or anything else (including
   //     undefined from pre-v3.3.4 saved settings) → gdigrab desktop
   //     capture. This is the backward-compat path.
+  // Sanitize a dshow device name before handing it to FFmpeg. Two
+  // transforms:
+  //
+  //   1. Strip browser prefixes. navigator.mediaDevices.enumerateDevices()
+  //      returns labels like "Default - Microphone Array (...)" or
+  //      "Communications - Speakers (...)" where the prefix signals
+  //      which Windows device role is the system default. FFmpeg's
+  //      dshow doesn't know about these roles — it expects the raw
+  //      Windows friendly name as shown by `ffmpeg -list_devices`.
+  //      If the store saved a browser-formatted label (e.g. from an
+  //      older UI code path), the prefix breaks FFmpeg's device
+  //      lookup with 'Could not find audio only device with name...'.
+  //
+  //   2. Escape colons. FFmpeg's dshow input format uses ':' as the
+  //      video/audio separator (e.g. 'video=<n>:audio=<n>'), so any
+  //      colon inside a device name — including the USB
+  //      vendor:product ID tacked onto camera names like
+  //      'HP TrueVision HD Camera (04f2:b75e)' — gets misparsed as
+  //      the separator and triggers 'Malformed dshow input string'.
+  //      Backslash-escape per FFmpeg dshow docs.
+  //
+  // Applied uniformly to both video and audio dshow names so every
+  // edge case handled for one input type is handled for the other.
+  _sanitizeDshowName(name) {
+    if (!name) return '';
+    return String(name)
+      .replace(/^(Default|Communications)\s*-\s*/i, '')
+      .replace(/:/g, '\\:');
+  }
+
+  // Build the FFmpeg audio input args. 'audio=<n>' for real devices,
+  // silent lavfi fallback when no device is configured. Uses the
+  // same sanitizer as video.
+  _audioInputArgs(settings) {
+    const raw = settings.audioDevice;
+    const useAudio = raw && String(raw).trim() !== '';
+    if (useAudio) {
+      const deviceName = this._sanitizeDshowName(raw);
+      return ['-f', 'dshow', '-i', `audio=${deviceName}`];
+    }
+    return ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo'];
+  }
+
   _videoInputArgs(settings, fps) {
     const source = settings.videoSource || 'screen';
     if (source === 'webcam' && settings.webcamDevice && settings.webcamDevice.trim() !== '') {
@@ -240,7 +283,7 @@ class StreamEngine extends EventEmitter {
       // 'HP TrueVision HD Camera (04f2:b75e)' — get misparsed and
       // trigger 'Malformed dshow input string'. Backslash-escape per
       // FFmpeg dshow docs.
-      const deviceName = settings.webcamDevice.replace(/:/g, '\\:');
+      const deviceName = this._sanitizeDshowName(settings.webcamDevice);
       return [
         '-f', 'dshow',
         // Some webcams publish MJPEG at the highest FPS and YUY2 at a
@@ -373,9 +416,6 @@ class StreamEngine extends EventEmitter {
     const baseUrl = (streamUrl || '').replace(/\/+$/, '');
     const rtmpUrl = streamKey ? `${baseUrl}/${streamKey}` : baseUrl;
 
-    // Only use dshow audio if a non-empty device name is configured
-    const useAudio = settings.audioDevice && settings.audioDevice.trim() !== '';
-
     // Collect stderr for error reporting — last 3KB is enough
     let stderrBuf = '';
 
@@ -387,10 +427,10 @@ class StreamEngine extends EventEmitter {
       // gdigrab for full-desktop screen capture.
       ...this._videoInputArgs(settings, fps),
 
-      // Audio input: use configured dshow device, or silent fallback
-      ...(useAudio
-        ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
-        : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),
+      // Audio input: dshow with configured device, or silent lavfi
+      // fallback when no device is configured. Device name is
+      // sanitized (browser prefix stripped, colons escaped).
+      ...this._audioInputArgs(settings),
 
       // Video encoding with auto-detected encoder + per-encoder args
       ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
@@ -528,6 +568,9 @@ class StreamEngine extends EventEmitter {
     // branch below because the user intent + recovery differ:
     // video=... errors mean their configured webcam is unavailable,
     // audio=... errors mean their mic is.
+    if (/Could not find audio only device with name/i.test(stderr)) {
+      return 'Hint: the configured audio device name is not recognized by FFmpeg. This usually means the name has a browser prefix like "Default - " (from the browser device list) that the FFmpeg dshow driver does not know about. v3.3.11+ strips these prefixes automatically — if you are on an older version, re-pick the microphone in Settings > OBS > Audio Device.';
+    }
     if (/Malformed dshow input string/i.test(stderr)) {
       return 'Hint: the webcam device name contains a character that confuses FFmpeg\'s dshow parser (usually a colon in the USB vendor:product ID, e.g. "HP TrueVision HD Camera (04f2:b75e)"). Update to v3.3.10+ which escapes these automatically, or pick a different camera name if available.';
     }
@@ -645,13 +688,10 @@ class StreamEngine extends EventEmitter {
         reason: `"${settings.videoEncoder}" is not usable on this machine. Falling back to "${encoder}".`,
       });
     }
-    const useAudio = settings.audioDevice && settings.audioDevice.trim() !== '';
 
     const args = [
       ...this._videoInputArgs(settings, fps),
-      ...(useAudio
-        ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
-        : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),
+      ...this._audioInputArgs(settings),
       ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
       ...(encoder === 'libx264' ? ['-crf', '18'] : []),
       '-c:a', 'aac',
