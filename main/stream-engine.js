@@ -273,7 +273,57 @@ class StreamEngine extends EventEmitter {
     return ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo'];
   }
 
-  _videoInputArgs(settings, fps) {
+  // Resolve a webcam friendly name to the argv value we hand to FFmpeg's
+  // -i flag. Earlier versions tried to backslash-escape colons, but
+  // FFmpegs libavdevice/dshow.c uses av_strtok(":") which does not
+  // honor escapes, so "\:" passes through as literal chars and the
+  // parser still splits on the colon.
+  //
+  // The FFmpeg-recommended workaround is to use the device Windows
+  // stable alternative name ("@device_pnp_..."), which is colon-free
+  // and parses cleanly. We probe dshow (detectWebcams) to find the
+  // alt name matching the friendly name, and swap it in for
+  // colon-bearing names. No-colon names pass through the sanitizer
+  // unchanged.
+  //
+  // Cached per engine instance. The dshow device list only changes on
+  // plug/unplug so one lookup per session is enough.
+  async _resolveDshowVideoName(friendlyName) {
+    if (!friendlyName) return '';
+
+    // No colon in the friendly name: sanitizer is enough, no probe.
+    if (!String(friendlyName).includes(':')) {
+      return this._sanitizeDshowName(friendlyName);
+    }
+
+    if (!this._altNameCache) this._altNameCache = new Map();
+    if (this._altNameCache.has(friendlyName)) {
+      return this._altNameCache.get(friendlyName);
+    }
+
+    try {
+      const devices = await this.detectWebcams();
+      const strippedForMatch = String(friendlyName)
+        .replace(/^(Default|Communications)\s*-\s*/i, '');
+      const match = devices.find((d) => d.name === strippedForMatch);
+
+      if (match && match.alternativeName) {
+        console.log(`[StreamEngine] Resolved "${friendlyName}" -> alternative name`);
+        this._altNameCache.set(friendlyName, match.alternativeName);
+        return match.alternativeName;
+      }
+      console.warn(`[StreamEngine] No alt name found for "${friendlyName}"; falling back to sanitized friendly name (stream may fail)`);
+    } catch (err) {
+      console.warn('[StreamEngine] Alt-name lookup failed:', err.message);
+    }
+
+    // Fallback: sanitize and cache so we don't re-probe every call.
+    const sanitized = this._sanitizeDshowName(friendlyName);
+    this._altNameCache.set(friendlyName, sanitized);
+    return sanitized;
+  }
+
+  async _videoInputArgs(settings, fps) {
     const source = settings.videoSource || 'screen';
     if (source === 'webcam' && settings.webcamDevice && settings.webcamDevice.trim() !== '') {
       // Escape colons in the device name. FFmpeg's dshow input parser
@@ -283,7 +333,7 @@ class StreamEngine extends EventEmitter {
       // 'HP TrueVision HD Camera (04f2:b75e)' — get misparsed and
       // trigger 'Malformed dshow input string'. Backslash-escape per
       // FFmpeg dshow docs.
-      const deviceName = this._sanitizeDshowName(settings.webcamDevice);
+      const deviceName = await this._resolveDshowVideoName(settings.webcamDevice);
       return [
         '-f', 'dshow',
         // Some webcams publish MJPEG at the highest FPS and YUY2 at a
@@ -419,17 +469,17 @@ class StreamEngine extends EventEmitter {
     // Collect stderr for error reporting — last 3KB is enough
     let stderrBuf = '';
 
+    // Pre-resolve video input args. Async because webcam names with
+    // colons need an alt-name lookup via detectWebcams.
+    const videoInputArgs = await this._videoInputArgs(settings, fps);
+
     // Build FFmpeg args for RTMP streaming
     const args = [
-      // Video input — branches on settings.videoSource: 'webcam' uses
-      // dshow with the named device, 'screen' (or any other value,
-      // including legacy undefined from pre-v3.3.4 settings) uses
-      // gdigrab for full-desktop screen capture.
-      ...this._videoInputArgs(settings, fps),
+      ...videoInputArgs,
 
       // Audio input: dshow with configured device, or silent lavfi
       // fallback when no device is configured. Device name is
-      // sanitized (browser prefix stripped, colons escaped).
+      // sanitized (browser prefix stripped).
       ...this._audioInputArgs(settings),
 
       // Video encoding with auto-detected encoder + per-encoder args
@@ -689,8 +739,9 @@ class StreamEngine extends EventEmitter {
       });
     }
 
+    const videoInputArgs = await this._videoInputArgs(settings, fps);
     const args = [
-      ...this._videoInputArgs(settings, fps),
+      ...videoInputArgs,
       ...this._audioInputArgs(settings),
       ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
       ...(encoder === 'libx264' ? ['-crf', '18'] : []),
