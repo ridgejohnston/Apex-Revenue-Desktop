@@ -8,6 +8,7 @@ const { EventEmitter } = require('events');
 const { spawn, execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { app } = require('electron');
 const { findFFmpegPath } = require('./ffmpeg-installer');
 
 function findFFmpeg() {
@@ -156,7 +157,7 @@ class StreamEngine extends EventEmitter {
 
     this.streamProcess.stderr.on('data', (data) => {
       const text = data.toString();
-      stderrBuf = (stderrBuf + text).slice(-3000); // keep last 3KB
+      stderrBuf = (stderrBuf + text).slice(-8000); // keep last 8KB (was 3KB — not enough for real diagnostics)
       this._handleFFmpegOutput(text);
     });
 
@@ -166,6 +167,7 @@ class StreamEngine extends EventEmitter {
 
       // Extract meaningful error from stderr when FFmpeg exits unexpectedly
       let errorReason = null;
+      let logPath = null;
       if (code !== 0 && code !== null && stderrBuf) {
         // Pull the last error line from FFmpeg stderr
         const lines = stderrBuf.split('\n').filter(l => l.trim());
@@ -175,11 +177,30 @@ class StreamEngine extends EventEmitter {
         errorReason = errorLine
           ? errorLine.replace(/^\d{4}-\d{2}-\d{2}.*?error:/i, '').trim()
           : `FFmpeg exited with code ${code}`;
+
+        // Detect the specific "EINVAL masquerading as output error" pattern
+        // and surface a more actionable hint to the renderer.
+        const hint = this._diagnosticHint(stderrBuf);
+        if (hint) errorReason = `${errorReason}\n\n${hint}`;
+
+        // Write full log to disk so the user can share it when reporting
+        logPath = this._writeStreamLog({
+          mode: 'stream',
+          args,
+          rtmpUrl,
+          streamKey: settings.streamKey, // will be redacted by _writeStreamLog
+          exitCode: code,
+          stderr: stderrBuf,
+          errorLine,
+        });
+        if (logPath) errorReason = `${errorReason}\n\nFull log: ${logPath}`;
+
         console.error('[StreamEngine] Stream stopped unexpectedly:', errorReason);
-        console.error('[StreamEngine] Full stderr tail:\n', stderrBuf.slice(-1000));
+        console.error('[StreamEngine] Full stderr tail:\n', stderrBuf.slice(-2000));
       }
 
       this.status.errorReason = errorReason;
+      this.status.errorLogPath = logPath;
       this.emit('status', { ...this.status });
       this.streamProcess = null;
     });
@@ -194,6 +215,79 @@ class StreamEngine extends EventEmitter {
 
     this.emit('status', { ...this.status });
     return true;
+  }
+
+  // Inspects FFmpeg stderr for known root-cause signatures and returns a
+  // human-readable hint. "Invalid argument" on output is usually caused by
+  // the INPUT failing — this helper looks for that signature specifically.
+  _diagnosticHint(stderr) {
+    if (!stderr) return null;
+    const s = stderr.toLowerCase();
+
+    if (/gdigrab.*?(could not|cannot|failed|error)/i.test(stderr) ||
+        /couldn\'?t capture image/i.test(stderr)) {
+      return 'Hint: gdigrab (screen capture) failed to initialize. Check that you have an active desktop session (not locked/RDP), and that display scaling is set to 100%.';
+    }
+    if (/dshow.*?(could not|cannot|not found|no such)/i.test(stderr)) {
+      return 'Hint: the configured audio input device (dshow) was not found. Pick a different microphone in Settings > OBS, or set it to "None" to stream with silent audio.';
+    }
+    if (/unknown encoder|encoder not found/i.test(stderr)) {
+      return 'Hint: the selected video encoder is not available in this FFmpeg build. Try switching to the default "x264 (CPU)" encoder in Settings > OBS.';
+    }
+    if (/connection refused|connection timed out|network is unreachable/i.test(stderr)) {
+      return 'Hint: the RTMP server refused the connection. Verify the Stream URL and Stream Key are correct, and that your firewall allows outbound TCP 1935.';
+    }
+    if (/invalid argument/i.test(stderr) && /output/i.test(stderr)) {
+      return 'Hint: "Invalid argument" on output is often caused by an input failure (gdigrab or dshow). Check the full log for lines before this one to see which input failed to initialize.';
+    }
+    return null;
+  }
+
+  // Writes the full FFmpeg invocation + stderr to a timestamped log file so
+  // the user can share it when reporting a streaming bug. Stream key is
+  // redacted before writing. Returns the absolute file path (or null on
+  // failure — logging must never block the user).
+  _writeStreamLog(ctx) {
+    try {
+      const userData = app && typeof app.getPath === 'function'
+        ? app.getPath('userData')
+        : null;
+      if (!userData) return null;
+
+      const logDir = path.join(userData, 'logs');
+      fs.mkdirSync(logDir, { recursive: true });
+
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const file = path.join(logDir, `${ctx.mode}-${ts}.log`);
+
+      // Redact the stream key everywhere it appears
+      const keyPattern = ctx.streamKey && ctx.streamKey.length > 3
+        ? new RegExp(ctx.streamKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')
+        : null;
+      const redact = (s) => keyPattern ? s.replace(keyPattern, '<REDACTED_KEY>') : s;
+
+      const body = [
+        `# Apex Revenue — ${ctx.mode} log`,
+        `# Generated: ${new Date().toISOString()}`,
+        `# App version: ${(app && app.getVersion && app.getVersion()) || 'unknown'}`,
+        `# Exit code: ${ctx.exitCode}`,
+        `# Detected error: ${ctx.errorLine || '(none)'}`,
+        '',
+        '─── FFmpeg invocation ───',
+        `Binary: ${this.ffmpegPath}`,
+        ctx.rtmpUrl ? `RTMP URL: ${redact(ctx.rtmpUrl)}` : '',
+        `Full args: ${redact(ctx.args.join(' '))}`,
+        '',
+        '─── FFmpeg stderr (last 8KB) ───',
+        redact(ctx.stderr || ''),
+      ].filter(Boolean).join('\n');
+
+      fs.writeFileSync(file, body, 'utf8');
+      return file;
+    } catch (e) {
+      console.error('[StreamEngine] Failed to write stream log:', e.message);
+      return null;
+    }
   }
 
   stopStream() {
