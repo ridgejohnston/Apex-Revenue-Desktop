@@ -484,6 +484,111 @@ class StreamEngine extends EventEmitter {
   // whole file as fast as possible, burning through a 2-hour movie in
   // ~30s). `-stream_loop -1` reloops indefinitely so a 3-minute clip
   // doesn't end the stream after 3 minutes.
+  // ─── Simulcast / Output Resolution ───────────────────────
+  //
+  // Feature: stream to multiple platforms simultaneously via FFmpeg's
+  // Resolve the list of streaming destinations. Semantics (v3.3.26+):
+  //
+  //   • settings.streamUrl + settings.streamKey  →  primary destination
+  //     (position 0; omitted only if either field is blank)
+  //   • settings.destinations[] with enabled+url+key entries  →
+  //     additional simulcast targets appended after the primary
+  //
+  // Rationale for this layout: the existing Stream URL / Stream Key
+  // fields in RightPanel map directly to "the primary destination",
+  // which matches what every user already has configured. Additional
+  // destinations are purely additive — adding a second destination
+  // doesn't require moving the primary into a list.
+  //
+  // Returns normalized [{ name, url, key, fullUrl }] for consumption
+  // by _buildOutputArgs. Throws STREAM_CONFIG_MISSING if the final
+  // list is empty.
+  _resolveDestinations(settings) {
+    const normalize = (d) => {
+      const base = String(d.url || '').replace(/\/+$/, '');
+      const key = String(d.key || '');
+      return {
+        name: d.name || d.platform || 'Destination',
+        url: base,
+        key,
+        fullUrl: key ? `${base}/${key}` : base,
+      };
+    };
+
+    const resolved = [];
+
+    // Primary destination from the top-level streamUrl/streamKey
+    // fields. Both must be set — blank key means the user hasn't
+    // configured their stream yet and we fall through to destinations[]
+    // or throw below.
+    if (settings.streamUrl && settings.streamKey) {
+      resolved.push({
+        name: settings.streamName || 'Primary',
+        url: settings.streamUrl,
+        key: settings.streamKey,
+      });
+    }
+
+    // Additional destinations. Filter to enabled entries with both
+    // url and key set so empty/disabled rows in the UI don't attempt
+    // to connect.
+    if (Array.isArray(settings.destinations)) {
+      for (const d of settings.destinations) {
+        if (d && d.enabled !== false && d.url && d.key) {
+          resolved.push(d);
+        }
+      }
+    }
+
+    if (resolved.length === 0) {
+      const err = new Error('No stream destination configured. Enter a Stream URL and Stream Key in the Output section, or add a destination in Additional Destinations.');
+      err.code = 'STREAM_CONFIG_MISSING';
+      throw err;
+    }
+
+    return resolved.map(normalize);
+  }
+
+  // Build the FFmpeg output args for 1 or N destinations.
+  //
+  // Single destination: -f flv <url>  (simpler, same as pre-simulcast)
+  // Multi-destination:  -flags +global_header -f tee "[opts]url1|[opts]url2|..."
+  //
+  // tee-muxer specifics:
+  //   • f=flv     — each output is FLV/RTMP (required by all cam sites)
+  //   • onfail=ignore — if one destination fails (bad key, network cut,
+  //                      platform kicks us), the others keep going. Without
+  //                      this, any single failure would kill the whole stream.
+  //   • +global_header — required so codec extradata sits at the top of
+  //                      the stream rather than inline-per-packet; each
+  //                      output muxer needs to read it.
+  //   • URL escaping — tee uses '|' as output separator and ':' inside
+  //                    option blocks. URLs containing these need
+  //                    backslash-escaping. Cam-site ingest URLs in
+  //                    practice don't use '|' but we escape defensively.
+  _buildOutputArgs(destinations) {
+    if (destinations.length === 1) {
+      return [
+        '-f', 'flv',
+        '-flvflags', 'no_duration_filesize',
+        destinations[0].fullUrl,
+      ];
+    }
+    const escapeForTee = (s) => String(s)
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|')
+      .replace(/\[/g, '\\[')
+      .replace(/\]/g, '\\]');
+    const teeSpec = destinations
+      .map((d) => `[f=flv:onfail=ignore:flvflags=no_duration_filesize]${escapeForTee(d.fullUrl)}`)
+      .join('|');
+    return [
+      '-flags', '+global_header',
+      '-f', 'tee',
+      teeSpec,
+    ];
+  }
+
   _buildMediaFileInput(settings, fps) {
     const p = settings.mediaPath;
     if (!p || !String(p).trim()) {
@@ -838,8 +943,7 @@ class StreamEngine extends EventEmitter {
     }
 
     const {
-      streamUrl, streamKey, videoBitrate,
-      audioBitrate, resolution, fps,
+      videoBitrate, audioBitrate, resolution, fps,
     } = settings;
 
     // Resolve H.264 encoder: honor the user's choice from obsSettings
@@ -860,9 +964,11 @@ class StreamEngine extends EventEmitter {
       });
     }
 
-    // Strip trailing slash so we never get double-slash in RTMP URL
-    const baseUrl = (streamUrl || '').replace(/\/+$/, '');
-    const rtmpUrl = streamKey ? `${baseUrl}/${streamKey}` : baseUrl;
+    // Resolve destinations (single or simulcast) — supersedes the
+    // legacy streamUrl/streamKey pair. Throws STREAM_CONFIG_MISSING
+    // if nothing is configured.
+    const destinations = this._resolveDestinations(settings);
+    const outputArgs = this._buildOutputArgs(destinations);
 
     // Collect stderr for error reporting — last 3KB is enough
     let stderrBuf = '';
@@ -888,13 +994,20 @@ class StreamEngine extends EventEmitter {
       '-b:a', `${audioBitrate}k`,
       '-ar', '44100',
 
-      // Output
-      '-f', 'flv',
-      '-flvflags', 'no_duration_filesize',
-      rtmpUrl,
+      // Output — single -f flv, or -f tee with pipe-separated outputs
+      // when simulcasting to multiple destinations.
+      ...outputArgs,
     ];
 
-    console.log('[StreamEngine] Starting stream to:', rtmpUrl);
+    // Log what we're streaming to, redacting keys per destination
+    if (destinations.length === 1) {
+      console.log('[StreamEngine] Starting stream to:', `${destinations[0].url}/<REDACTED>`);
+    } else {
+      console.log(`[StreamEngine] Starting SIMULCAST to ${destinations.length} destinations:`);
+      destinations.forEach((d, i) => {
+        console.log(`  [${i}] ${d.name}: ${d.url}/<REDACTED>`);
+      });
+    }
     console.log('[StreamEngine] FFmpeg path:', this.ffmpegPath);
     console.log('[StreamEngine] Args:', args.join(' '));
 
@@ -944,8 +1057,10 @@ class StreamEngine extends EventEmitter {
         logPath = this._writeStreamLog({
           mode: 'stream',
           args,
-          rtmpUrl,
-          streamKey: settings.streamKey, // will be redacted by _writeStreamLog
+          // Pass ALL destinations so _writeStreamLog redacts every
+          // stream key that could appear in stderr (simulcasting
+          // surfaces multiple per-destination errors).
+          destinations,
           exitCode: code,
           stderr: stderrBuf,
           errorLine,
@@ -1064,11 +1179,49 @@ class StreamEngine extends EventEmitter {
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       const file = path.join(logDir, `${ctx.mode}-${ts}.log`);
 
-      // Redact the stream key everywhere it appears
-      const keyPattern = ctx.streamKey && ctx.streamKey.length > 3
-        ? new RegExp(ctx.streamKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')
+      // Redaction: collect every stream key that might appear in
+      // stderr / args and build one combined regex. Simulcast streams
+      // may surface per-destination error lines containing any of the
+      // keys, so we have to scrub the full set rather than just one.
+      //
+      // Input shapes accepted:
+      //   ctx.destinations = [{ name, url, key, fullUrl }]  (current)
+      //   ctx.streamKey = '...' + ctx.rtmpUrl = '...'       (legacy)
+      const keys = [];
+      if (Array.isArray(ctx.destinations)) {
+        for (const d of ctx.destinations) {
+          if (d && d.key && d.key.length > 3) keys.push(d.key);
+        }
+      }
+      if (ctx.streamKey && ctx.streamKey.length > 3) keys.push(ctx.streamKey);
+      const keyPattern = keys.length
+        ? new RegExp(
+            keys.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+            'g'
+          )
         : null;
-      const redact = (s) => keyPattern ? s.replace(keyPattern, '<REDACTED_KEY>') : s;
+      const redact = (s) => keyPattern && s
+        ? String(s).replace(keyPattern, '<REDACTED_KEY>')
+        : s;
+
+      // Build the destinations section. If ctx has destinations[],
+      // list each one; otherwise synthesize from rtmpUrl so legacy
+      // callers still produce readable logs.
+      let destinationsBlock;
+      if (Array.isArray(ctx.destinations) && ctx.destinations.length) {
+        const lines = ctx.destinations.map((d, i) => {
+          const keyMask = d.key ? '<REDACTED_KEY>' : '(no key)';
+          return `  [${i}] ${d.name || 'Destination'}: ${d.url || '(no url)'}/${keyMask}`;
+        });
+        destinationsBlock = [
+          `─── Destinations (${ctx.destinations.length}${ctx.destinations.length > 1 ? ' — SIMULCAST' : ''}) ───`,
+          ...lines,
+        ].join('\n');
+      } else if (ctx.rtmpUrl) {
+        destinationsBlock = `─── Destination ───\n  ${redact(ctx.rtmpUrl)}`;
+      } else {
+        destinationsBlock = '─── Destination ───\n  (not captured)';
+      }
 
       const body = [
         `# Apex Revenue — ${ctx.mode} log`,
@@ -1082,9 +1235,10 @@ class StreamEngine extends EventEmitter {
           ? this._routingDiag.join('\n')
           : '(no routing diagnostics captured)'),
         '',
+        destinationsBlock,
+        '',
         '─── FFmpeg invocation ───',
         `Binary: ${this.ffmpegPath}`,
-        ctx.rtmpUrl ? `RTMP URL: ${redact(ctx.rtmpUrl)}` : '',
         `Full args: ${redact(ctx.args.join(' '))}`,
         '',
         '─── FFmpeg stderr (last 8KB) ───',
@@ -1145,8 +1299,7 @@ class StreamEngine extends EventEmitter {
     this.ffmpegPath = resolvedPath;
 
     const {
-      streamUrl, streamKey, videoBitrate,
-      audioBitrate, resolution, fps,
+      videoBitrate, audioBitrate, resolution, fps,
     } = settings;
 
     const encoder = this._detectH264Encoder(settings.videoEncoder);
@@ -1158,13 +1311,16 @@ class StreamEngine extends EventEmitter {
       });
     }
 
-    const rtmpUrl = `${(streamUrl || '').replace(/\/$/, '')}/${streamKey || ''}`;
-    if (!streamUrl || !streamKey) {
-      const err = new Error('Stream URL and key are required.');
-      err.code = 'STREAM_CONFIG_MISSING';
-      throw err;
-    }
+    // Resolve destinations and build output args. Same helper used
+    // by the direct-path startStream, so simulcast works identically
+    // for webcam (pipe) and non-webcam (direct) sources.
+    const destinations = this._resolveDestinations(settings);
+    const outputArgs = this._buildOutputArgs(destinations);
 
+    this._diag(`destinations: ${destinations.length} ${destinations.length > 1 ? '(SIMULCAST)' : '(single)'}`);
+    destinations.forEach((d, i) => {
+      this._diag(`  [${i}] ${d.name}: ${d.url}/<REDACTED>`);
+    });
     this._diag(`encoder: ${encoder}`);
     this._diag(`bitrate: ${videoBitrate}k video / ${audioBitrate}k audio`);
     this._diag(`resolution: ${resolution} @ ${fps} fps`);
@@ -1196,16 +1352,22 @@ class StreamEngine extends EventEmitter {
       '-b:a', `${audioBitrate}k`,
       '-ar', '44100',
 
-      // Output
-      '-f', 'flv',
-      '-flvflags', 'no_duration_filesize',
-      rtmpUrl,
+      // Output — single -f flv or -f tee for simulcast
+      ...outputArgs,
     ];
 
     this._diag(`spawning ffmpeg with ${args.length} args`);
-    console.log('[StreamEngine] Spawning FFmpeg (pipe mode) with args:', args.map((a) =>
-      a.includes(streamKey || 'no-key') ? '<REDACTED>' : a
-    ).join(' '));
+    // Redact every destination's key when logging the command line
+    const redactedArgs = args.map((a) => {
+      let result = a;
+      for (const d of destinations) {
+        if (d.key && result.includes(d.key)) {
+          result = result.split(d.key).join('<REDACTED>');
+        }
+      }
+      return result;
+    });
+    console.log('[StreamEngine] Spawning FFmpeg (pipe mode) with args:', redactedArgs.join(' '));
 
     let stderrBuf = '';
 
@@ -1264,8 +1426,7 @@ class StreamEngine extends EventEmitter {
         logPath = this._writeStreamLog({
           mode: 'stream-pipe',
           args,
-          rtmpUrl,
-          streamKey: settings.streamKey,
+          destinations,
           exitCode: code,
           stderr: stderrBuf,
           errorLine,
