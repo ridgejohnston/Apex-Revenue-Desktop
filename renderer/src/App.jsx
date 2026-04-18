@@ -81,6 +81,35 @@ export default function App() {
       const active = await api.scenes.getActive();
       if (active) setActiveSceneId(active.id);
 
+      // Re-establish source capture streams. Scenes persist to disk
+      // (scene-manager), but their getUserMedia / getDisplayMedia
+      // handles don't — those are Web APIs that live in memory and
+      // only exist for the current renderer process. On app restart,
+      // the sidebar shows every source with its saved visible state,
+      // but without this reactivation loop there's no stream backing
+      // any of them: preview canvas is empty, Start Stream on a
+      // webcam source silently fails the preflight, virtual cam
+      // output freezes on the last frame.
+      //
+      // activateSource is a useCallback with [] deps so its identity
+      // is stable; calling it here (declared below) is safe even
+      // though React would normally want it in the deps array. It
+      // handles webcam, screen_capture, window_capture, game_capture,
+      // audio_input, and audio_output, with its own try/catch — if
+      // a device is busy or missing, it logs a warning and moves on
+      // rather than throwing.
+      //
+      // Only visible sources get activated. Hidden ones stay dormant
+      // until the user toggles them on, matching the pre-restart
+      // behavior of an uninterrupted session.
+      for (const scene of allScenes) {
+        for (const source of scene.sources || []) {
+          if (source.visible) {
+            activateSource(source);
+          }
+        }
+      }
+
       // Check auth
       const session = await api.aws.getSession();
       if (session) setUser(session);
