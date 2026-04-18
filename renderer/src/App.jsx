@@ -8,6 +8,9 @@ import AuthModal from './components/AuthModal';
 import SettingsModal from './components/SettingsModal';
 import AddSourceModal from './components/AddSourceModal';
 import DebugPanel from './components/DebugPanel';
+import BeautyPanel from './components/BeautyPanel';
+import { BeautyFilter } from './filters/beauty-filter';
+const { BEAUTY_DEFAULTS, BEAUTY_STORE_KEY, clampConfig: clampBeauty, isBeautyUnlocked } = require('../../shared/beauty-config');
 
 const api = window.electronAPI;
 
@@ -107,6 +110,12 @@ export default function App() {
   const [showSoftExpireBanner, setShowSoftExpireBanner] = useState(false);
   const [expiryWarning, setExpiryWarning] = useState(null); // { hours, expiresAt } | null
   const [aiPrompt, setAiPrompt] = useState(null);
+
+  // Beauty filter — config (persisted) + live filter instances keyed by sourceId
+  const [beautyConfig, setBeautyConfig] = useState(BEAUTY_DEFAULTS);
+  const beautyConfigRef = useRef(BEAUTY_DEFAULTS);
+  const beautyFiltersRef = useRef({});   // sourceId → BeautyFilter
+  useEffect(() => { beautyConfigRef.current = beautyConfig; }, [beautyConfig]);
   const [showAuth, setShowAuth] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAddSource, setShowAddSource] = useState(false);
@@ -180,6 +189,12 @@ export default function App() {
       // Check FFmpeg
       const ffmpeg = await api.ffmpeg.check();
       setFfmpegStatus(ffmpeg);
+
+      // Hydrate beauty filter config (persisted across launches)
+      try {
+        const saved = await api.store?.get?.(BEAUTY_STORE_KEY);
+        if (saved) setBeautyConfig(clampBeauty(saved));
+      } catch {}
     })();
 
     // FFmpeg events
@@ -286,6 +301,27 @@ export default function App() {
         };
         stream = await navigator.mediaDevices.getUserMedia(constraints);
 
+        // Beauty Filter: wrap the raw webcam stream in a WebGL2 bilateral
+        // filter before anything else sees it. Preview canvas, stream
+        // output (FFmpeg), and virtual camera all consume the same
+        // beautified stream — one processing pass, no pipeline forks.
+        //
+        // Gating: only active when the user's effective tier includes
+        // `beautyFilter` (admin bypass / beta / paid Platinum). We read
+        // the current plan from a ref so this callback can stay stable.
+        if (effectivePlanRef.current && isBeautyUnlocked(effectivePlanRef.current)) {
+          try {
+            const filter = new BeautyFilter(stream, beautyConfigRef.current);
+            const filteredStream = filter.getStream();
+            if (filteredStream !== stream) {
+              beautyFiltersRef.current[id] = filter;
+              stream = filteredStream;
+            }
+          } catch (e) {
+            console.warn('[Apex] Beauty filter init failed, using raw stream:', e?.message);
+          }
+        }
+
       } else if (type === 'screen_capture' || type === 'window_capture' || type === 'game_capture') {
         // Electron: use desktopCapturer source id via chromeMediaSource constraint
         const chromeSourceId = properties.sourceId
@@ -332,6 +368,13 @@ export default function App() {
 
   // Stop capture and release device when a source is removed
   const deactivateSource = useCallback((sourceId) => {
+    // Tear down the beauty filter (if any) BEFORE stopping the track,
+    // so the filter's internal video element can unbind cleanly.
+    const filter = beautyFiltersRef.current[sourceId];
+    if (filter) {
+      try { filter.destroy(); } catch {}
+      delete beautyFiltersRef.current[sourceId];
+    }
     const stream = sourceStreamsRef.current[sourceId];
     if (stream) {
       stream.getTracks().forEach((t) => t.stop());
@@ -828,6 +871,47 @@ export default function App() {
       ? 'admin-toggle'
       : (subscription?.billingSource || 'unknown');
 
+  // Ref mirror of effectivePlan so callbacks (activateSource) can read
+  // the latest tier without being re-created on every subscription update.
+  const effectivePlanRef = useRef(effectivePlan);
+  useEffect(() => { effectivePlanRef.current = effectivePlan; }, [effectivePlan]);
+
+  // ─── Beauty filter handlers ───────────────────────────
+  const handleBeautyChange = useCallback((next) => {
+    const clamped = clampBeauty(next);
+    setBeautyConfig(clamped);
+    // Persist to electron-store so settings survive restarts
+    api.store?.set?.(BEAUTY_STORE_KEY, clamped);
+    // Live-update all active filter instances — no reload / reactivate
+    for (const filter of Object.values(beautyFiltersRef.current)) {
+      try { filter.update(clamped); } catch {}
+    }
+  }, []);
+
+  // When the tier changes such that beauty filter access changes state
+  // (admin flips toggle, subscription downgrades, etc.), reactivate
+  // currently-visible webcam sources so they pick up or drop the filter.
+  const lastBeautyAccessRef = useRef(null);
+  useEffect(() => {
+    const now = isBeautyUnlocked(effectivePlan);
+    if (lastBeautyAccessRef.current === null) {
+      lastBeautyAccessRef.current = now;
+      return;
+    }
+    if (lastBeautyAccessRef.current !== now) {
+      lastBeautyAccessRef.current = now;
+      // Reactivate webcam sources only — no need to bounce screen captures
+      for (const scene of scenesRef.current || []) {
+        for (const source of scene.sources || []) {
+          if (source.type === 'webcam' && source.visible) {
+            deactivateSource(source.id);
+            activateSource(source);
+          }
+        }
+      }
+    }
+  }, [effectivePlan, activateSource, deactivateSource]);
+
   // ─── Derived State ────────────────────────────────────
   const activeScene = scenes.find((s) => s.id === activeSceneId) || scenes[0];
 
@@ -1023,6 +1107,10 @@ export default function App() {
           activeScene={activeScene}
           onToggleSourceVisible={handleToggleSourceVisible}
           onToggleCategory={handleToggleCategory}
+          beautyConfig={beautyConfig}
+          onBeautyChange={handleBeautyChange}
+          beautyUnlocked={isBeautyUnlocked(effectivePlan)}
+          effectivePlan={effectivePlan}
         />
       </div>
 

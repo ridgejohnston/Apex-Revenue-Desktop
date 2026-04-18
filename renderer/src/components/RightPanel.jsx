@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import BeautyPanel from './BeautyPanel';
 
 // Source-type → Stream Source category mapping. MUST stay in sync with
 // App.jsx VIDEO_CATEGORY_MAP — both files need this table and neither
@@ -21,6 +22,7 @@ export default function RightPanel({
   activeTab, liveData, streamStatus, platform, user,
   aiPrompt, onDismissPrompt, onAuthClick, activeScene,
   onToggleSourceVisible, onToggleCategory,
+  beautyConfig, onBeautyChange, beautyUnlocked, effectivePlan,
 }) {
   const [sessionTimer, setSessionTimer] = useState(0);
   const timerRef = useRef(null);
@@ -57,7 +59,7 @@ export default function RightPanel({
       {/* Panel Header */}
       <div className="section-header">
         <span>
-          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI Prompt Engine' : '🔗 Toy Sync'}
+          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI Prompt Engine' : activeTab === 'beauty' ? '✨ Beauty Filter' : '🔗 Toy Sync'}
         </span>
       </div>
 
@@ -65,6 +67,14 @@ export default function RightPanel({
         {activeTab === 'obs' && <OBSProperties activeScene={activeScene} onToggleSourceVisible={onToggleSourceVisible} onToggleCategory={onToggleCategory} />}
         {activeTab === 'ai' && <AIPanel user={user} onAuthClick={onAuthClick} liveData={liveData} aiPrompt={aiPrompt} onDismissPrompt={onDismissPrompt} />}
         {activeTab === 'sync' && <SyncPanel />}
+        {activeTab === 'beauty' && (
+          <BeautyPanel
+            config={beautyConfig}
+            onChange={onBeautyChange}
+            unlocked={beautyUnlocked}
+            effectivePlan={effectivePlan}
+          />
+        )}
         {activeTab === 'live' && (
           <LivePanel
             liveData={liveData}

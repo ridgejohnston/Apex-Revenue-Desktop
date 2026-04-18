@@ -37,6 +37,7 @@ const FEATURE_MAP = {
     virtualCam:   false,
     cloudSync:    false,
     whaleAlerts:  false,
+    beautyFilter: false,
   },
   platinum: {
     aiPrompts:    true,
@@ -46,6 +47,7 @@ const FEATURE_MAP = {
     virtualCam:   true,
     cloudSync:    true,
     whaleAlerts:  true,
+    beautyFilter: true,
   },
 };
 
