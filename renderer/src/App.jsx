@@ -505,6 +505,7 @@ export default function App() {
           onDismissPrompt={() => setAiPrompt(null)}
           onAuthClick={() => setShowAuth(true)}
           activeScene={activeScene}
+          onToggleSourceVisible={handleToggleSourceVisible}
         />
       </div>
 

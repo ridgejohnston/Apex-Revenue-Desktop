@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 export default function RightPanel({
   activeTab, liveData, streamStatus, platform, user,
   aiPrompt, onDismissPrompt, onAuthClick, activeScene,
+  onToggleSourceVisible,
 }) {
   const [sessionTimer, setSessionTimer] = useState(0);
   const timerRef = useRef(null);
@@ -44,7 +45,7 @@ export default function RightPanel({
       </div>
 
       <div className="flex-col flex-1" style={{ overflow: 'auto', padding: 8 }}>
-        {activeTab === 'obs' && <OBSProperties activeScene={activeScene} />}
+        {activeTab === 'obs' && <OBSProperties activeScene={activeScene} onToggleSourceVisible={onToggleSourceVisible} />}
         {activeTab === 'ai' && <AIPanel user={user} onAuthClick={onAuthClick} liveData={liveData} aiPrompt={aiPrompt} onDismissPrompt={onDismissPrompt} />}
         {activeTab === 'sync' && <SyncPanel />}
         {activeTab === 'live' && (
@@ -85,7 +86,7 @@ export default function RightPanel({
 }
 
 // ─── OBS Properties Sub-panel ───────────────────────────
-function OBSProperties({ activeScene }) {
+function OBSProperties({ activeScene, onToggleSourceVisible }) {
   const [settings, setSettings] = useState(null);
   const [audioInputs, setAudioInputs] = useState([]);
   const [dshowAudio, setDshowAudio] = useState([]);
@@ -286,126 +287,174 @@ function OBSProperties({ activeScene }) {
         />
       </div>
 
-      {/* Video Source — v3.3.6: status-only display. The source is chosen
-          and configured in the Sources panel on the left (Sidebar). This
-          right-side panel mirrors whichever video-capture source is ON in
-          the current scene. Because video inputs are mutually exclusive
-          (FFmpeg reads one -i video at a time), App.jsx enforces radio
-          behavior on the sidebar ON toggle — turning one video-capture
-          source ON automatically turns the others OFF. */}
+      {/* Video Source — v3.3.7: two interactive pill buttons on the right
+          that control the corresponding sources in the left sidebar.
+          Clicking Screen finds the scene's screen_capture source and
+          toggles it ON; clicking Webcam finds the webcam source and
+          toggles it ON. App.jsx's handleToggleSourceVisible enforces
+          radio behavior — turning one video-capture source ON auto-
+          turns OFF the others — so the two panels stay in sync without
+          any additional wiring. If a source of the clicked type doesn't
+          exist in the scene yet, the button is disabled with a hint to
+          add one from the Sources panel. */}
       <div>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
           VIDEO SOURCE
         </div>
 
         {(() => {
-          const VIDEO_CAPTURE_TYPES = new Set([
-            'webcam', 'screen_capture', 'window_capture', 'game_capture',
-          ]);
-          const TYPE_LABELS = {
-            webcam: 'Webcam',
-            screen_capture: 'Screen Capture',
-            window_capture: 'Window Capture',
-            game_capture: 'Game Capture',
-          };
-          const TYPE_ICONS = {
-            webcam: '📷',
-            screen_capture: '🖥️',
-            window_capture: '🪟',
-            game_capture: '🎮',
-          };
-
           const sources = activeScene?.sources || [];
-          const activeVideoSource = sources.find(
-            (s) => VIDEO_CAPTURE_TYPES.has(s.type) && s.visible
-          );
-          const videoSources = sources.filter((s) => VIDEO_CAPTURE_TYPES.has(s.type));
 
-          if (!activeVideoSource) {
-            // No video source active. If there are video sources in the
-            // scene but all are OFF, show one message; if there aren't
-            // any, nudge the user to add one from the Sources panel.
-            const hasInactiveVideoSources = videoSources.length > 0;
-            return (
-              <div style={{
-                padding: '10px 12px',
-                background: 'var(--bg-secondary, rgba(255,255,255,0.03))',
-                border: '1px dashed var(--border, rgba(255,255,255,0.12))',
-                borderRadius: 4,
-                fontSize: 10,
-                lineHeight: 1.5,
-                color: 'var(--text-dim)',
-              }}>
-                {hasInactiveVideoSources ? (
-                  <>
-                    No video source is active. Turn one <strong>ON</strong> in the
-                    Sources panel on the left — only one video source can be active
-                    at a time.
-                  </>
-                ) : (
-                  <>
-                    No video source added. Click <strong>+</strong> next to Sources
-                    in the left sidebar, pick <strong>Webcam</strong> or <strong>Screen Capture</strong>,
-                    and configure it there.
-                  </>
-                )}
-              </div>
-            );
-          }
+          // Pick target source for each button. Preference: the visible
+          // one if present (so clicking the active button toggles it
+          // OFF), otherwise the first of its type (so clicking an
+          // inactive button toggles THAT source ON, with radio behavior
+          // in App.jsx turning off the other).
+          const pickTarget = (type) => {
+            const visible = sources.find((s) => s.type === type && s.visible);
+            if (visible) return visible;
+            return sources.find((s) => s.type === type) || null;
+          };
+          const screenSource = pickTarget('screen_capture');
+          const webcamSource = pickTarget('webcam');
 
-          // Render the active source as a read-only status card
-          const icon = TYPE_ICONS[activeVideoSource.type] || '🎥';
-          const typeLabel = TYPE_LABELS[activeVideoSource.type] || activeVideoSource.type;
-          const deviceDetail =
-            activeVideoSource.type === 'webcam'
-              ? (activeVideoSource.properties?.deviceLabel ||
-                 activeVideoSource.properties?.deviceName ||
-                 'Default camera')
-              : activeVideoSource.type === 'screen_capture'
-              ? `Display ${(activeVideoSource.properties?.displayIndex ?? 0) + 1}`
-              : null;
+          const screenActive = !!(screenSource && screenSource.visible);
+          const webcamActive = !!(webcamSource && webcamSource.visible);
+
+          // Button style helper — accent red when active, neutral when
+          // available but inactive, dimmed when no source of that type
+          // exists in the scene (button is disabled).
+          const buttonStyle = (active, available) => ({
+            flex: 1,
+            padding: '10px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            letterSpacing: '0.3px',
+            background: active
+              ? 'var(--accent, #CC0000)'
+              : available
+              ? 'var(--bg-secondary, rgba(255,255,255,0.04))'
+              : 'rgba(255,255,255,0.02)',
+            color: active
+              ? '#fff'
+              : available
+              ? 'var(--text-secondary)'
+              : 'var(--text-dim)',
+            border: '1px solid ' + (active
+              ? 'var(--accent, #CC0000)'
+              : available
+              ? 'var(--border, rgba(255,255,255,0.08))'
+              : 'rgba(255,255,255,0.05)'),
+            borderRadius: 4,
+            cursor: available ? 'pointer' : 'not-allowed',
+            opacity: available ? 1 : 0.55,
+            transition: 'all 0.15s ease',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 4,
+          });
 
           return (
-            <div style={{
-              padding: '10px 12px',
-              background: 'var(--bg-secondary, rgba(204,0,0,0.06))',
-              border: '1px solid var(--accent, rgba(204,0,0,0.35))',
-              borderRadius: 4,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-            }}>
-              <div style={{ fontSize: 20, lineHeight: 1 }}>{icon}</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
+            <>
+              <div className="flex gap-2" style={{ marginBottom: 6 }}>
+                <button
+                  style={buttonStyle(screenActive, !!screenSource)}
+                  onClick={() => screenSource && onToggleSourceVisible?.(screenSource.id)}
+                  disabled={!screenSource}
+                  title={
+                    !screenSource
+                      ? 'No Screen Capture source in this scene. Add one from the Sources panel on the left.'
+                      : screenActive
+                      ? 'Turn Screen Capture off'
+                      : 'Turn Screen Capture on (will turn off the active video source)'
+                  }
+                >
+                  <span style={{ fontSize: 18, lineHeight: 1 }}>🖥️</span>
+                  <span>Screen</span>
+                  {screenActive && (
+                    <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.5px', opacity: 0.9 }}>
+                      ACTIVE
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  style={buttonStyle(webcamActive, !!webcamSource)}
+                  onClick={() => webcamSource && onToggleSourceVisible?.(webcamSource.id)}
+                  disabled={!webcamSource}
+                  title={
+                    !webcamSource
+                      ? 'No Webcam source in this scene. Add one from the Sources panel on the left.'
+                      : webcamActive
+                      ? 'Turn Webcam off'
+                      : 'Turn Webcam on (will turn off the active video source)'
+                  }
+                >
+                  <span style={{ fontSize: 18, lineHeight: 1 }}>📷</span>
+                  <span>Webcam</span>
+                  {webcamActive && (
+                    <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.5px', opacity: 0.9 }}>
+                      ACTIVE
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              {/* Active source details — shows the name + device for the
+                  currently visible video source, if any. For webcam this
+                  is the camera name, for screen_capture the display number. */}
+              {(() => {
+                const active = sources.find(
+                  (s) =>
+                    s.visible &&
+                    ['webcam', 'screen_capture', 'window_capture', 'game_capture'].includes(s.type)
+                );
+                if (!active) return null;
+                const deviceDetail =
+                  active.type === 'webcam'
+                    ? active.properties?.deviceLabel || active.properties?.deviceName || 'Default camera'
+                    : active.type === 'screen_capture'
+                    ? `Display ${(active.properties?.displayIndex ?? 0) + 1}`
+                    : null;
+                return (
+                  <div style={{
+                    fontSize: 9,
+                    color: 'var(--text-dim)',
+                    padding: '6px 2px',
+                    lineHeight: 1.4,
+                  }}>
+                    Streaming from: <strong style={{ color: 'var(--text-secondary)' }}>{active.name}</strong>
+                    {deviceDetail ? <> · {deviceDetail}</> : null}
+                  </div>
+                );
+              })()}
+
+              {/* If neither source type exists, prompt to add one */}
+              {!screenSource && !webcamSource && (
                 <div style={{
-                  fontSize: 11, fontWeight: 600, color: 'var(--text-primary)',
-                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  padding: '10px 12px',
+                  marginTop: 4,
+                  background: 'var(--bg-secondary, rgba(255,255,255,0.03))',
+                  border: '1px dashed var(--border, rgba(255,255,255,0.12))',
+                  borderRadius: 4,
+                  fontSize: 10,
+                  lineHeight: 1.5,
+                  color: 'var(--text-dim)',
                 }}>
-                  {activeVideoSource.name || typeLabel}
+                  Add a Screen Capture or Webcam source from the <strong>Sources</strong> panel
+                  (click <strong>+</strong> on the left) to enable these buttons.
                 </div>
-                <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 2 }}>
-                  {typeLabel}{deviceDetail ? ` · ${deviceDetail}` : ''}
-                </div>
-              </div>
-              <div style={{
-                fontSize: 9, fontWeight: 700, letterSpacing: '0.4px',
-                padding: '2px 6px', borderRadius: 10,
-                background: 'rgba(45,212,160,0.18)',
-                color: 'var(--success, #2DD4A0)',
-                boxShadow: '0 0 0 1px rgba(45,212,160,0.35)',
-                flexShrink: 0,
-              }}>
-                ACTIVE
-              </div>
-            </div>
+              )}
+            </>
           );
         })()}
 
         <div style={{
           fontSize: 9, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.4,
         }}>
-          💡 Manage video sources in the <strong>Sources</strong> panel on the left.
-          Only one video source can stream at a time.
+          💡 These buttons control sources in the <strong>Sources</strong> panel on the left.
+          Only one video source streams at a time.
         </div>
       </div>
 
