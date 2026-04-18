@@ -755,55 +755,37 @@ ipcMain.on('updates:install', () => {
       const installerPath = downloadedInstallerPath;
       log(`setTimeout fired. installerPath=${installerPath} exists=${installerPath && fs.existsSync(installerPath)}`);
 
-      if (installerPath && fs.existsSync(installerPath)) {
-        // Use PowerShell to wait for THIS process to fully exit before launching
-        // the installer. quitAndInstall() spawns the installer then calls app.quit(),
-        // which means the installer starts while our process still has file locks —
-        // causing "Failed to uninstall old application files." By waiting for the
-        // PID to die first, the installer always finds files fully released.
-        //
-        // NOTE ON NSIS ARGS: our electron-builder config uses oneClick:false, which
-        // produces a full-wizard installer. Passing /S (silent) to that kind of
-        // installer causes it to abort immediately or run in undefined state —
-        // that's the bug behind "I clicked Restart & Update and nothing happened."
-        // With no silent flag, the installer shows its wizard UI (user sees it
-        // actually installing, and any errors surface as real dialogs). The
-        // installer's own NSIS manifest handles UAC elevation — no -Verb RunAs
-        // needed, which also avoids the UAC-prompt-hidden-behind-powershell
-        // edge case on some Windows configs.
-        const pid = process.pid;
-        const escaped = installerPath.replace(/'/g, "''");
-        const psCmd = [
-          `$proc = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
-          `if ($proc) { $proc.WaitForExit(8000) }`,
-          // Belt-and-suspenders: even if the main process exited, child
-          // ffmpeg.exe procs take a moment to fully release handles. Wait for
-          // any Apex-owned ffmpeg.exe instances. Ignore errors if none exist.
-          `Get-Process ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*apex*' } | ForEach-Object { $_.WaitForExit(3000) }`,
-          // Launch installer WITHOUT /S — wizard UI is visible so user sees
-          // progress, NSIS manifest self-elevates, runAfterFinish relaunches
-          // the app automatically.
-          `Start-Process '${escaped}'`,
-        ].join('; ');
-
-        spawn('powershell.exe', [
-          '-ExecutionPolicy', 'Bypass',
-          '-WindowStyle', 'Hidden',
-          '-Command', psCmd,
-        ], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-
-        log('PowerShell watcher spawned (detached). Invoking app.exit(0) now.');
-        // Exit immediately — PowerShell watcher will launch installer once we're gone
-        app.exit(0);
-      } else {
-        log('Fallback: no cached installer path — calling autoUpdater.quitAndInstall(true, true)');
-        // Fallback: no cached path — use electron-updater's built-in method
-        autoUpdater.quitAndInstall(true, true);
-      }
+      // BACKGROUND: earlier versions tried to launch the installer via a
+      // detached PowerShell spawn + .unref(). That looks correct on every
+      // other platform, but on Windows Electron apps run inside a Job
+      // Object — when app.exit() fires, Windows kills ALL processes in
+      // that job, including our "detached" PowerShell, BEFORE the
+      // installer can be spawned. Node's detached flag maps to
+      // DETACHED_PROCESS on Windows, not CREATE_BREAKAWAY_FROM_JOB.
+      // Result: the app closed, the installer never launched, user saw
+      // nothing happen. This is the symptom Ridge hit on v3.3.1.
+      //
+      // autoUpdater.quitAndInstall() ships with electron-updater's
+      // Update.exe helper, which IS compiled with the proper breakaway
+      // flags. It's the only reliable way to spawn the installer from
+      // a dying Electron process on Windows.
+      //
+      // Args: (isSilent=false, isForceRunAfter=true)
+      //   false → don't pass /S — our NSIS config is oneClick:false,
+      //           /S causes the wizard to abort in undefined state.
+      //   true  → re-launch the new version after install completes.
+      //
+      // The FFmpeg cleanup above (before this setTimeout) is what makes
+      // quitAndInstall safe here — it prevents the file-lock race that
+      // originally made us avoid this path.
+      log('Calling autoUpdater.quitAndInstall(false, true) — Update.exe handles job-object breakaway');
+      autoUpdater.quitAndInstall(false, true);
     } catch (err) {
-      log(`setTimeout ERROR: ${err.message}\n${err.stack || ''}`);
-      console.error('[Updater] Install failed:', err);
+      log(`quitAndInstall ERROR: ${err.message}\n${err.stack || ''}`);
+      console.error('[Updater] quitAndInstall failed:', err);
       isUpdating = false;
+      // Last-ditch: restart the app in its current state so the user
+      // can try again (or download manually).
       app.relaunch();
       app.exit(0);
     }
