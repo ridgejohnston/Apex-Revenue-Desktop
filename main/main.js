@@ -3,7 +3,7 @@
  * Combines Creator Intelligence Engine with full OBS-style streaming platform
  */
 
-const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, desktopCapturer, session, screen, protocol, dialog } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, desktopCapturer, session, screen, protocol, dialog, shell, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -14,6 +14,7 @@ const sceneManager = require('./scene-manager');
 const audioMixer = require('./audio-mixer');
 const ffmpegInstaller = require('./ffmpeg-installer');
 const autoconfig = require('./autoconfig');
+const errorLogger = require('./error-logger');
 const { autoUpdater } = require('electron-updater');
 const EarningsTracker = require('../shared/earnings-tracker');
 const { VERSION } = require('../shared/apex-config');
@@ -265,6 +266,66 @@ ipcMain.handle('dialog:open-folder', async (_, options = {}) => {
   } catch (err) {
     console.warn('[main] dialog:open-folder failed:', err.message);
     return null;
+  }
+});
+
+// ─── Error Logger IPC ────────────────────────────────────
+// Six handlers that let the renderer participate in the central
+// error log: pushing errors in, reading them back out, and offering
+// Ridge one-click copy/open actions.
+
+// Forward a renderer-side error into the central log. The renderer
+// hooks its window.error / unhandledrejection / console.error events
+// and calls this for each. Keeps all errors (main + renderer) in a
+// single file.
+ipcMain.handle('errors:log', (_, level, source, message, context) => {
+  try {
+    errorLogger.log(level, source, message, context);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+// Return the last N entries from the in-memory ring buffer. Fast
+// path for "show recent errors" UI that doesn't want to read from
+// disk. Default 200 gives roughly the last session's worth of activity.
+ipcMain.handle('errors:recent', (_, n) => errorLogger.recent(n));
+
+// Return the full current log file contents. Used when the user
+// explicitly wants "everything, not just recent" — e.g., when
+// reproducing a long-running stream issue.
+ipcMain.handle('errors:read-all', () => errorLogger.readAll());
+
+// Truncate the log and clear the in-memory buffer. Writes an
+// 'info: Log cleared' entry so the next batch of errors still has
+// context for when the clear happened.
+ipcMain.handle('errors:clear', () => {
+  errorLogger.clear();
+  return true;
+});
+
+// Open the log directory in Explorer/Finder so the user can zip
+// it up, inspect rotated files, etc. shell.openPath returns a
+// string error message on failure (empty string on success).
+ipcMain.handle('errors:open-folder', async () => {
+  const dir = errorLogger.getLogDir();
+  if (!dir) return { ok: false, error: 'Log directory not initialized' };
+  const err = await shell.openPath(dir);
+  if (err) return { ok: false, error: err };
+  return { ok: true, path: dir };
+});
+
+// Read the full log (disk + in-memory) and push to the system
+// clipboard. This is the primary workflow Ridge asked for — hit one
+// button, paste to the assistant, done.
+ipcMain.handle('errors:copy-to-clipboard', () => {
+  try {
+    const contents = errorLogger.readAll();
+    clipboard.writeText(contents || '(log is empty)');
+    return { ok: true, bytes: (contents || '').length };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
 
@@ -669,6 +730,55 @@ protocol.registerSchemesAsPrivileged([
 
 // ─── App Lifecycle ──────────────────────────────────────
 app.whenReady().then(async () => {
+  // Initialize the error logger FIRST so any subsequent startup error
+  // has somewhere to land. Needs to happen in whenReady (not at import
+  // time) because it uses app.getPath('userData') which is only
+  // valid after the app is initialized.
+  errorLogger.init();
+
+  // Main-process uncaught exception: a last-line-of-defense for bugs
+  // that slip through try/catch in async code. Log it and KEEP GOING
+  // — Node's default behavior on uncaughtException is to exit, which
+  // would be worse UX than a potentially-degraded-but-running app.
+  // If the exception is fatal (e.g. corrupted state), later code
+  // paths will fail more cleanly with their own error messages.
+  process.on('uncaughtException', (err) => {
+    try {
+      errorLogger.log('fatal', 'main.uncaught', err && err.message, {
+        stack: err && err.stack,
+        name: err && err.name,
+      });
+    } catch {}
+    console.error('[main] uncaughtException:', err);
+  });
+
+  // Promises rejected without a .catch land here. Common source of
+  // silent bugs in async IPC handlers.
+  process.on('unhandledRejection', (reason) => {
+    try {
+      const isErr = reason instanceof Error;
+      errorLogger.log('error', 'main.rejection',
+        isErr ? reason.message : String(reason),
+        { stack: isErr ? reason.stack : undefined }
+      );
+    } catch {}
+    console.error('[main] unhandledRejection:', reason);
+  });
+
+  // Renderer process crashed or was killed. Happens when the renderer
+  // hits an OOM, a native module crashes, or Chromium itself segfaults.
+  // The user would otherwise just see a blank window — logging this
+  // at least gives us a breadcrumb.
+  app.on('render-process-gone', (_event, _webContents, details) => {
+    try {
+      errorLogger.log('fatal', 'renderer.gone', `Renderer exited: ${details.reason}`, {
+        exitCode: details.exitCode,
+        reason: details.reason,
+      });
+    } catch {}
+    console.error('[main] render-process-gone:', details);
+  });
+
   // Wire the apex-file:// handler. Incoming URLs look like
   //   apex-file:///C:/Users/Ridge/Pictures/banner.png
   // which we parse into a native filesystem path via fileURLToPath.
@@ -804,6 +914,15 @@ app.whenReady().then(async () => {
   // restore dance needed).
   streamEngine.on('status', (status) => {
     mainWindow?.webContents.send('stream:status', status);
+    // Mirror stream errors into the central log so the Debug panel
+    // surfaces them alongside other errors. The stream engine still
+    // writes its own detailed per-incident log to userData/stream-logs/;
+    // this is a shorter breadcrumb for the unified view.
+    if (status && status.errorReason) {
+      errorLogger.log('error', 'stream-engine', status.errorReason, {
+        errorLogPath: status.errorLogPath,
+      });
+    }
   });
 
   // When the stream engine's runtime encoder probe discovers that the
@@ -813,6 +932,7 @@ app.whenReady().then(async () => {
   // the user doesn't hit the same failure path next launch, and tell the
   // renderer so the UI can refresh + toast.
   streamEngine.on('encoder-auto-changed', ({ requested, resolved, reason }) => {
+    errorLogger.log('warn', 'stream-engine', `Encoder auto-changed: ${requested} -> ${resolved}`, { reason });
     const current = store.get('obsSettings') || {};
 
     // Bitrate must also be recomputed when the encoder class changes.

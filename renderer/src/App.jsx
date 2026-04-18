@@ -7,6 +7,7 @@ import RightPanel from './components/RightPanel';
 import AuthModal from './components/AuthModal';
 import SettingsModal from './components/SettingsModal';
 import AddSourceModal from './components/AddSourceModal';
+import DebugPanel from './components/DebugPanel';
 
 const api = window.electronAPI;
 
@@ -14,11 +15,38 @@ const api = window.electronAPI;
 export class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { error: null };
+    this.state = { error: null, info: null, copied: false };
   }
   static getDerivedStateFromError(error) {
     return { error };
   }
+  // Log the caught error into the central error log. Fires when a
+  // render-phase error propagates up; network/async/event-handler
+  // errors are handled by the window-level listeners in index.jsx.
+  componentDidCatch(error, info) {
+    this.setState({ info });
+    try {
+      window.electronAPI?.errors?.log('fatal', 'react.boundary', error?.message || String(error), {
+        stack: error?.stack,
+        componentStack: info?.componentStack,
+      });
+    } catch {}
+  }
+  handleCopy = async () => {
+    try {
+      // Prefer the main-side handler (it grabs the full log, not just
+      // this one error). Falls back to navigator.clipboard if IPC
+      // isn't available for some reason.
+      if (window.electronAPI?.errors?.copyToClipboard) {
+        await window.electronAPI.errors.copyToClipboard();
+      } else {
+        const txt = `${this.state.error?.message}\n\n${this.state.error?.stack}`;
+        await navigator.clipboard.writeText(txt);
+      }
+      this.setState({ copied: true });
+      setTimeout(() => this.setState({ copied: false }), 2000);
+    } catch {}
+  };
   render() {
     if (this.state.error) {
       return (
@@ -30,21 +58,35 @@ export class ErrorBoundary extends React.Component {
           <div style={{ fontSize: 16, fontWeight: 700, color: '#f87171', marginBottom: 8 }}>Apex Revenue encountered an error</div>
           <div style={{
             fontSize: 11, color: '#9ca3af', background: '#1a1a2e', padding: 16, borderRadius: 6,
-            maxWidth: 600, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+            maxWidth: 600, maxHeight: 300, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
           }}>
             {this.state.error?.message}
             {'\n\n'}
             {this.state.error?.stack}
           </div>
-          <button
-            onClick={() => window.location.reload()}
-            style={{
-              marginTop: 20, padding: '8px 20px', background: '#6366f1', color: '#fff',
-              border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12,
-            }}
-          >
-            Reload App
-          </button>
+          <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+            <button
+              onClick={this.handleCopy}
+              style={{
+                padding: '8px 20px', background: '#334155', color: '#fff',
+                border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12,
+              }}
+            >
+              {this.state.copied ? '✓ Copied' : '📋 Copy Error Log'}
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              style={{
+                padding: '8px 20px', background: '#6366f1', color: '#fff',
+                border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12,
+              }}
+            >
+              Reload App
+            </button>
+          </div>
+          <div style={{ fontSize: 10, color: '#6b7280', marginTop: 12 }}>
+            Paste the copied log to your developer for troubleshooting.
+          </div>
         </div>
       );
     }
@@ -64,6 +106,7 @@ export default function App() {
   const [showAuth, setShowAuth] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAddSource, setShowAddSource] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
   const [activeTab, setActiveTab] = useState('obs'); // 'obs' | 'live' | 'fans' | 'ai'
   const [sidebarMode, setSidebarMode] = useState('scenes'); // 'scenes' | 'platforms'
   const [updateStatus, setUpdateStatus] = useState(null);
@@ -162,6 +205,20 @@ export default function App() {
     });
 
     api.updates.onStatus((status) => setUpdateStatus(status));
+  }, []);
+
+  // Global keyboard shortcut: Ctrl+Shift+D (Cmd+Shift+D on macOS)
+  // opens the debug panel. Separate from per-component key handlers
+  // so it works regardless of which element has focus.
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+        e.preventDefault();
+        setShowDebug(true);
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
   }, []);
 
   // ─── Scene Actions ─────────────────────────────────────
@@ -839,6 +896,53 @@ export default function App() {
       {showAddSource && (
         <AddSourceModal onAdd={handleAddSource} onClose={() => setShowAddSource(false)} />
       )}
+      {showDebug && (
+        <DebugPanel onClose={() => setShowDebug(false)} />
+      )}
+      {/*
+        Floating Debug button — bottom-right, always accessible. The
+        primary workflow when something breaks: click the bug, hit
+        "Copy to Clipboard", paste into the dev chat. Small enough to
+        not intrude on normal use; red-tinted so it's easy to find
+        in a panic.
+        Also openable via Ctrl+Shift+D — the keyboard shortcut is
+        wired in the useEffect below.
+      */}
+      <button
+        onClick={() => setShowDebug(true)}
+        title="Debug & Error Log (Ctrl+Shift+D)"
+        style={{
+          position: 'fixed',
+          bottom: 16,
+          right: 16,
+          width: 36,
+          height: 36,
+          borderRadius: '50%',
+          background: 'rgba(220, 38, 38, 0.85)',
+          color: '#fff',
+          border: '1px solid rgba(255,255,255,0.15)',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+          cursor: 'pointer',
+          fontSize: 16,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 900,
+          padding: 0,
+          lineHeight: 1,
+          transition: 'transform 0.15s, background 0.15s',
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = 'rgba(220, 38, 38, 1)';
+          e.currentTarget.style.transform = 'scale(1.08)';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = 'rgba(220, 38, 38, 0.85)';
+          e.currentTarget.style.transform = 'scale(1)';
+        }}
+      >
+        🐛
+      </button>
     </div>
   );
 }

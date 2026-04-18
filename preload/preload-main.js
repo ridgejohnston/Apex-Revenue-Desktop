@@ -89,6 +89,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openFolder: (options) => ipcRenderer.invoke('dialog:open-folder', options),
   },
 
+  // ─── Error Log / Debug ────────────────────────────────
+  // Central error logger. log() pushes renderer errors into the
+  // same store as main-process errors. copyToClipboard() is the
+  // primary user-facing action — hit one button, paste to the
+  // dev/AI assistant. recent()/readAll() back the debug panel UI.
+  errors: {
+    log: (level, source, message, context) =>
+      ipcRenderer.invoke('errors:log', level, source, message, context),
+    recent: (n) => ipcRenderer.invoke('errors:recent', n),
+    readAll: () => ipcRenderer.invoke('errors:read-all'),
+    clear: () => ipcRenderer.invoke('errors:clear'),
+    openFolder: () => ipcRenderer.invoke('errors:open-folder'),
+    copyToClipboard: () => ipcRenderer.invoke('errors:copy-to-clipboard'),
+  },
+
   // ─── FFmpeg ───────────────────────────────────────────
   ffmpeg: {
     check: () => ipcRenderer.invoke('ffmpeg:check'),
