@@ -411,10 +411,20 @@ export default function App() {
   // Right-panel Screen/Webcam buttons aggregate everything in their
   // category — see handleToggleCategory below.
   const VIDEO_CATEGORY_MAP = {
+    // Live capture (aggregated: any of the 3 screen-types → 'screen')
     webcam: 'webcam',
     screen_capture: 'screen',
     window_capture: 'screen',
     game_capture: 'screen',
+
+    // Media sources (each is its own category — distinct button in the
+    // right panel's Stream Source section). Labels here must match the
+    // category strings the right-panel buttons dispatch with.
+    video_url: 'video_url',
+    media: 'media',
+    image_url: 'image_url',
+    image: 'image',
+    image_slideshow: 'slideshow',
   };
   const getVideoCategory = (sourceType) => VIDEO_CATEGORY_MAP[sourceType] || null;
 

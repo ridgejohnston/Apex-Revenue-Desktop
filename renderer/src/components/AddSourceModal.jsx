@@ -5,9 +5,11 @@ const SOURCE_TYPES = [
   { type: 'screen_capture',  name: 'Screen Capture',    icon: '🖥️', category: 'Video',  desc: 'Capture entire display' },
   { type: 'window_capture',  name: 'Window Capture',    icon: '🪟', category: 'Video',  desc: 'Capture a specific window' },
   { type: 'game_capture',    name: 'Game Capture',      icon: '🎮', category: 'Video',  desc: 'Capture fullscreen games' },
-  { type: 'image',           name: 'Image',             icon: '🖼️', category: 'Media',  desc: 'Display a static image' },
+  { type: 'image',           name: 'Image',             icon: '🖼️', category: 'Media',  desc: 'Display a static image file' },
+  { type: 'image_url',       name: 'Image URL',         icon: '🌅', category: 'Media',  desc: 'Display an image from a URL' },
   { type: 'image_slideshow', name: 'Image Slideshow',   icon: '🎞️', category: 'Media',  desc: 'Rotate through images' },
-  { type: 'media',           name: 'Media Source',      icon: '🎬', category: 'Media',  desc: 'Video/audio file playback' },
+  { type: 'media',           name: 'Video File',        icon: '🎬', category: 'Media',  desc: 'Play back a local video/audio file' },
+  { type: 'video_url',       name: 'Video URL',         icon: '🎥', category: 'Media',  desc: 'Play back a video from a URL' },
   { type: 'text',            name: 'Text (GDI+)',       icon: '📝', category: 'Display', desc: 'Custom text overlay' },
   { type: 'browser',         name: 'Browser Source',    icon: '🌐', category: 'Display', desc: 'Embed a webpage/widget' },
   { type: 'color',           name: 'Color Source',      icon: '🎨', category: 'Display', desc: 'Solid color background' },
@@ -207,6 +209,52 @@ export default function AddSourceModal({ onAdd, onClose }) {
                       value={properties.path || ''} onChange={(e) => prop('path', e.target.value)}
                       placeholder="C:\path\to\image.png" />
                   </div>
+                )}
+
+                {/* ── Image URL ── */}
+                {selected.type === 'image_url' && (
+                  <>
+                    <div>
+                      <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>Image URL</label>
+                      <input className="input" style={{ width: '100%' }}
+                        value={properties.url || ''} onChange={(e) => prop('url', e.target.value)}
+                        placeholder="https://example.com/banner.png" />
+                    </div>
+                    <div style={{ fontSize: 9, color: 'var(--text-dim)', lineHeight: 1.4 }}>
+                      Supports direct image links (PNG, JPG, WebP, GIF). The image loads
+                      once when the source becomes visible and re-fetches if the URL
+                      changes.
+                    </div>
+                  </>
+                )}
+
+                {/* ── Video URL ── */}
+                {selected.type === 'video_url' && (
+                  <>
+                    <div>
+                      <label style={{ fontSize: 10, color: 'var(--text-dim)' }}>Video URL</label>
+                      <input className="input" style={{ width: '100%' }}
+                        value={properties.url || ''} onChange={(e) => prop('url', e.target.value)}
+                        placeholder="https://example.com/video.mp4" />
+                    </div>
+                    <div className="flex gap-2">
+                      <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <input type="checkbox" checked={properties.loop || false}
+                          onChange={(e) => prop('loop', e.target.checked)} />
+                        Loop
+                      </label>
+                      <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <input type="checkbox" checked={properties.muted || false}
+                          onChange={(e) => prop('muted', e.target.checked)} />
+                        Muted
+                      </label>
+                    </div>
+                    <div style={{ fontSize: 9, color: 'var(--text-dim)', lineHeight: 1.4 }}>
+                      Supports direct video links (MP4, WebM) and HLS streams (.m3u8).
+                      YouTube/Twitch URLs are not supported — use Browser Source for
+                      those platforms.
+                    </div>
+                  </>
                 )}
 
                 {/* ── Image Slideshow ── */}
