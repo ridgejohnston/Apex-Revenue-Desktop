@@ -218,6 +218,109 @@ class StreamEngine extends EventEmitter {
     }
   }
 
+  // ─── Video Input Source ───────────────────────────────
+  // Build the FFmpeg input args for the configured video source.
+  //
+  //   settings.videoSource === 'webcam'  → dshow capture of the named
+  //     device in settings.webcamDevice. The webcam outputs whatever
+  //     its native resolution is (typically 1280x720 or 1920x1080);
+  //     _videoEncodeArgs's scale filter resamples to the user's chosen
+  //     stream resolution, so aspect/dimensions stay consistent.
+  //
+  //   settings.videoSource === 'screen' or anything else (including
+  //     undefined from pre-v3.3.4 saved settings) → gdigrab desktop
+  //     capture. This is the backward-compat path.
+  _videoInputArgs(settings, fps) {
+    const source = settings.videoSource || 'screen';
+    if (source === 'webcam' && settings.webcamDevice && settings.webcamDevice.trim() !== '') {
+      const deviceName = settings.webcamDevice;
+      return [
+        '-f', 'dshow',
+        // Some webcams publish MJPEG at the highest FPS and YUY2 at a
+        // lower one. rtbufsize avoids 'real-time buffer too full' warnings
+        // for cameras that emit frames in bursts during autofocus hunt.
+        '-rtbufsize', '256M',
+        '-framerate', String(fps),
+        '-i', `video=${deviceName}`,
+      ];
+    }
+    // Default: GDI full-desktop screen capture
+    return [
+      '-f', 'gdigrab',
+      '-framerate', String(fps),
+      '-i', 'desktop',
+    ];
+  }
+
+  // Enumerate DirectShow video input devices (webcams, capture cards,
+  // virtual cameras). Runs FFmpeg with `-list_devices true -f dshow`
+  // against a dummy input — FFmpeg dumps the device list to stderr and
+  // exits non-zero; we parse out video device names.
+  //
+  // Output shape: [{ name, alternativeName }, ...]
+  async detectWebcams() {
+    return new Promise((resolve) => {
+      const proc = spawn(this.ffmpegPath, [
+        '-hide_banner',
+        '-list_devices', 'true',
+        '-f', 'dshow',
+        '-i', 'dummy',
+      ], { windowsHide: true });
+
+      let stderr = '';
+      proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+
+      // FFmpeg always exits non-zero on the dummy input — ignore that,
+      // we only care about the device list it printed along the way.
+      const finish = () => {
+        resolve(this._parseDshowDeviceList(stderr));
+      };
+      proc.on('close', finish);
+      proc.on('error', () => resolve([]));
+
+      // Safety timeout — some DirectShow drivers can hang briefly when
+      // probed. Five seconds is well over the typical ~200ms response.
+      setTimeout(() => {
+        try { proc.kill(); } catch {}
+      }, 5000);
+    });
+  }
+
+  _parseDshowDeviceList(stderr) {
+    const lines = stderr.split('\n');
+    const videos = [];
+    let inVideoSection = false;
+    let lastDeviceIndex = -1;
+
+    for (const line of lines) {
+      // Section headers tell us whether following names are video or audio
+      if (/DirectShow video devices/i.test(line)) {
+        inVideoSection = true;
+        continue;
+      }
+      if (/DirectShow audio devices/i.test(line)) {
+        inVideoSection = false;
+        continue;
+      }
+      if (!inVideoSection) continue;
+
+      // A primary device line looks like:
+      //   [dshow @ 000...]  "HP TrueVision HD"
+      // An alternative-name line looks like:
+      //   [dshow @ 000...]     Alternative name "@device_pnp_\\?\usb#..."
+      const primary = line.match(/"([^"]+)"\s*$/);
+      const isAltName = /Alternative name/i.test(line);
+
+      if (primary && !isAltName) {
+        videos.push({ name: primary[1], alternativeName: null });
+        lastDeviceIndex = videos.length - 1;
+      } else if (primary && isAltName && lastDeviceIndex >= 0) {
+        videos[lastDeviceIndex].alternativeName = primary[1];
+      }
+    }
+    return videos;
+  }
+
   // ─── RTMP Streaming ───────────────────────────────────
   async startStream(settings) {
     if (this.streamProcess) throw new Error('Stream already running');
@@ -271,10 +374,11 @@ class StreamEngine extends EventEmitter {
 
     // Build FFmpeg args for RTMP streaming
     const args = [
-      // Video input: GDI screen capture of full desktop at native resolution
-      '-f', 'gdigrab',
-      '-framerate', String(fps),
-      '-i', 'desktop',
+      // Video input — branches on settings.videoSource: 'webcam' uses
+      // dshow with the named device, 'screen' (or any other value,
+      // including legacy undefined from pre-v3.3.4 settings) uses
+      // gdigrab for full-desktop screen capture.
+      ...this._videoInputArgs(settings, fps),
 
       // Audio input: use configured dshow device, or silent fallback
       ...(useAudio
@@ -413,6 +517,18 @@ class StreamEngine extends EventEmitter {
         /couldn\'?t capture image/i.test(stderr)) {
       return 'Hint: gdigrab (screen capture) failed to initialize. Check that you have an active desktop session (not locked/RDP), and that display scaling is set to 100%.';
     }
+    // Webcam-specific dshow failures. Separated from the audio-device
+    // branch below because the user intent + recovery differ:
+    // video=... errors mean their configured webcam is unavailable,
+    // audio=... errors mean their mic is.
+    if (/Could not run graph.*?video=|could not find video device|I\/O error|vcap.*?error/i.test(stderr) &&
+        /dshow/i.test(stderr)) {
+      return 'Hint: the selected webcam could not be opened. Most common cause: another app (your web browser, Zoom, OBS, etc.) has the camera locked. Close other camera users and try again, or pick a different camera in Settings > OBS > Video Source.';
+    }
+    if (/video=.*?no such/i.test(stderr) ||
+        /video device.*?not found/i.test(stderr)) {
+      return 'Hint: the webcam named in Settings was not found on this system. Click the "↻" refresh button next to the Webcam dropdown to re-detect devices, then pick one from the list.';
+    }
     if (/dshow.*?(could not|cannot|not found|no such)/i.test(stderr)) {
       return 'Hint: the configured audio input device (dshow) was not found. Pick a different microphone in Settings > OBS, or set it to "None" to stream with silent audio.';
     }
@@ -522,9 +638,7 @@ class StreamEngine extends EventEmitter {
     const useAudio = settings.audioDevice && settings.audioDevice.trim() !== '';
 
     const args = [
-      '-f', 'gdigrab',
-      '-framerate', String(fps),
-      '-i', 'desktop',
+      ...this._videoInputArgs(settings, fps),
       ...(useAudio
         ? ['-f', 'dshow', '-i', `audio=${settings.audioDevice}`]
         : ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']),

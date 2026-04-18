@@ -134,15 +134,24 @@ async function probeEncoderRuntime(ffmpegPath, encoder) {
 function recommendResolution(screenModule) {
   try {
     const primary = screenModule.getPrimaryDisplay();
-    const { width, height } = primary.size;
+    // Electron's display.size returns DIP (device-independent pixels,
+    // "logical" pixels at the current Windows display scaling setting).
+    // For screen capture via gdigrab we want PHYSICAL pixels — so
+    // multiply by scaleFactor. Without this, a 1920x1080 monitor at
+    // 125% display scaling reports as 1536x864 and we stream downscaled
+    // output for no reason.
+    const scale = primary.scaleFactor || 1;
+    const width = Math.round(primary.size.width * scale);
+    const height = Math.round(primary.size.height * scale);
+
     const MAX_H = 1080;
     if (height <= MAX_H) {
       // Snap to common even dimensions (720, 900, 1080) for encoder friendliness
       return { width: Math.round(width / 2) * 2, height: Math.round(height / 2) * 2 };
     }
-    const scale = MAX_H / height;
+    const downScale = MAX_H / height;
     return {
-      width:  Math.round((width * scale) / 2) * 2,
+      width:  Math.round((width * downScale) / 2) * 2,
       height: MAX_H,
     };
   } catch {
@@ -157,11 +166,21 @@ function recommendResolution(screenModule) {
  * Hardware encoders get slightly higher budgets because they handle the
  * extra bits for free (vs x264 burning CPU).
  */
+// Hardware H.264 encoders live on the GPU and are somewhat more
+// bit-efficient than software encoders at the same visual quality — they
+// can get away with lower bitrates for the same apparent output. Any
+// encoder not in this set is software (libopenh264, libx264, h264_mf)
+// and needs more headroom, especially to meet platform minimums.
+const HARDWARE_ENCODERS = new Set(['h264_nvenc', 'h264_qsv', 'h264_amf']);
+
 function recommendBitrate(height, encoder) {
-  const hardware = encoder !== 'libx264';
-  if (height >= 1080) return hardware ? 4000 : 3500;
-  if (height >= 720)  return hardware ? 2800 : 2500;
-  if (height >= 480)  return 1400;
+  const hardware = HARDWARE_ENCODERS.has(encoder);
+  // Software tiers calibrated to Chaturbate's HD recommendations
+  // (3000 min, 4000+ for clean HD). The prior tier table was calibrated
+  // to YouTube/Twitch, which accepted lower bitrates without warnings.
+  if (height >= 1080) return hardware ? 4000 : 4500;
+  if (height >= 720)  return hardware ? 3000 : 3500;
+  if (height >= 480)  return 1800;
   return 1000;
 }
 
@@ -223,6 +242,9 @@ async function detectRecommendedObsSettings({ ffmpegPath, screenModule, videosPa
 module.exports = {
   detectRecommendedObsSettings,
   detectAvailableEncoders,
+  recommendBitrate,
+  recommendResolution,
   ENCODER_LABELS,
   ENCODER_PREFERENCE,
+  HARDWARE_ENCODERS,
 };

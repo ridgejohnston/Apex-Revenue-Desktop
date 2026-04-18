@@ -98,8 +98,15 @@ function OBSProperties() {
   const [selectedFields, setSelectedFields] = useState(new Set());
   const [detecting, setDetecting] = useState(false);
   // Toast state for the encoder-auto-healed notice. Null = hidden,
-  // otherwise holds {requested, resolved, reason} from the main process.
+  // otherwise holds {requested, resolved, reason, bitrateFrom, bitrateTo}
+  // from the main process.
   const [encoderHealedNotice, setEncoderHealedNotice] = useState(null);
+
+  // v3.3.4: webcam device enumeration for the Video Source selector.
+  // Loaded on first render and whenever the user hits the ↻ refresh button.
+  const [webcams, setWebcams] = useState([]);
+  const [loadingWebcams, setLoadingWebcams] = useState(false);
+  const [webcamsLoaded, setWebcamsLoaded] = useState(false);
   const debounceRef = useRef(null);
   const toastRef = useRef(null);
 
@@ -219,6 +226,34 @@ function OBSProperties() {
     });
   };
 
+  // v3.3.4: refresh the webcam device list. Called automatically when
+  // the user switches to Webcam source for the first time, and manually
+  // when they click the ↻ button. Fresh each call so plug/unplug events
+  // reflect without restarting the app.
+  const refreshWebcams = async () => {
+    setLoadingWebcams(true);
+    try {
+      const list = await window.electronAPI.webcam.list();
+      setWebcams(list || []);
+      setWebcamsLoaded(true);
+    } catch (err) {
+      console.error('Failed to list webcams:', err);
+      setWebcams([]);
+      setWebcamsLoaded(true);
+    } finally {
+      setLoadingWebcams(false);
+    }
+  };
+
+  // Lazy-load webcams only when the user actually switches to Webcam
+  // source (avoids running the FFmpeg probe on every mount for users
+  // who only ever stream their screen).
+  useEffect(() => {
+    if (settings?.videoSource === 'webcam' && !webcamsLoaded && !loadingWebcams) {
+      refreshWebcams();
+    }
+  }, [settings?.videoSource, webcamsLoaded, loadingWebcams]);
+
   return (
     <div className="flex-col gap-3">
       {/* Auto-save indicator */}
@@ -253,6 +288,122 @@ function OBSProperties() {
           className="input" style={{ width: '100%', marginBottom: 6 }}
           type="password" value={settings.streamKey} onChange={(e) => updateText('streamKey', e.target.value)}
         />
+      </div>
+
+      {/* Video Source — v3.3.4: pick between full-screen capture (gdigrab)
+          and webcam capture (dshow with named device). Defaults to screen
+          for backward compat with pre-v3.3.4 saved settings. */}
+      <div>
+        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          VIDEO SOURCE
+        </div>
+
+        <div className="flex gap-2" style={{ marginBottom: 8 }}>
+          <button
+            className="btn"
+            onClick={() => update('videoSource', 'screen')}
+            style={{
+              flex: 1,
+              padding: '8px 10px',
+              fontSize: 11,
+              background: (settings.videoSource || 'screen') === 'screen'
+                ? 'var(--accent, #CC0000)' : 'var(--bg-secondary, rgba(255,255,255,0.04))',
+              color: (settings.videoSource || 'screen') === 'screen'
+                ? '#fff' : 'var(--text-secondary)',
+              border: '1px solid ' + ((settings.videoSource || 'screen') === 'screen'
+                ? 'var(--accent, #CC0000)' : 'var(--border, rgba(255,255,255,0.08))'),
+              cursor: 'pointer',
+            }}
+          >
+            🖥  Screen
+          </button>
+          <button
+            className="btn"
+            onClick={() => update('videoSource', 'webcam')}
+            style={{
+              flex: 1,
+              padding: '8px 10px',
+              fontSize: 11,
+              background: settings.videoSource === 'webcam'
+                ? 'var(--accent, #CC0000)' : 'var(--bg-secondary, rgba(255,255,255,0.04))',
+              color: settings.videoSource === 'webcam'
+                ? '#fff' : 'var(--text-secondary)',
+              border: '1px solid ' + (settings.videoSource === 'webcam'
+                ? 'var(--accent, #CC0000)' : 'var(--border, rgba(255,255,255,0.08))'),
+              cursor: 'pointer',
+            }}
+          >
+            📹  Webcam
+          </button>
+        </div>
+
+        {/* Webcam device picker — only visible when Webcam source is selected */}
+        {settings.videoSource === 'webcam' && (
+          <div style={{ marginBottom: 8 }}>
+            <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
+              <label style={{ fontSize: 9, color: 'var(--text-dim)' }}>Camera Device</label>
+              <button
+                className="btn btn-sm"
+                onClick={refreshWebcams}
+                disabled={loadingWebcams}
+                title="Re-scan for connected cameras"
+                style={{ fontSize: 9, padding: '1px 6px' }}
+              >
+                {loadingWebcams ? '⏳' : '↻'} {loadingWebcams ? 'Scanning...' : 'Refresh'}
+              </button>
+            </div>
+
+            {webcams.length > 0 ? (
+              <select
+                className="input"
+                style={{ width: '100%' }}
+                value={settings.webcamDevice || ''}
+                onChange={(e) => update('webcamDevice', e.target.value)}
+              >
+                <option value="">-- Select camera --</option>
+                {webcams.map((cam) => (
+                  <option key={cam.name} value={cam.name}>{cam.name}</option>
+                ))}
+              </select>
+            ) : (
+              <div style={{
+                fontSize: 10,
+                color: 'var(--text-dim)',
+                padding: '10px 12px',
+                background: 'var(--bg-secondary, rgba(255,255,255,0.03))',
+                border: '1px dashed var(--border, rgba(255,255,255,0.1))',
+                borderRadius: 4,
+                lineHeight: 1.5,
+              }}>
+                {loadingWebcams ? 'Scanning for cameras...' :
+                 webcamsLoaded ? (
+                   <>
+                     No cameras detected. Plug in a webcam or close other apps
+                     that may have the camera locked (browser, Zoom, Teams),
+                     then click Refresh.
+                   </>
+                 ) : 'Loading...'}
+              </div>
+            )}
+
+            {/* Device-in-use heads-up. Most common failure mode: user is
+                trying to stream from their webcam while a browser tab has
+                the getUserMedia lock. FFmpeg dshow will hard-fail silently
+                on that path, so we proactively warn. */}
+            {settings.webcamDevice && (
+              <div style={{
+                fontSize: 9,
+                color: 'var(--text-dim)',
+                marginTop: 6,
+                lineHeight: 1.4,
+              }}>
+                💡 If Start Stream fails, check that no other app (browser,
+                Zoom, OBS) has <strong>{settings.webcamDevice}</strong> open —
+                Windows only lets one app capture a camera at a time.
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Video Settings */}
@@ -298,8 +449,18 @@ function OBSProperties() {
             </div>
             <div style={{ color: 'var(--text-secondary)', lineHeight: 1.5, paddingRight: 12 }}>
               {encoderHealedNotice.reason} Your saved settings have been updated so
-              streaming works on your hardware. You can change this anytime in the
-              Encoder dropdown below.
+              streaming works on your hardware.
+              {encoderHealedNotice.bitrateFrom != null &&
+                encoderHealedNotice.bitrateTo != null &&
+                encoderHealedNotice.bitrateFrom !== encoderHealedNotice.bitrateTo && (
+                <>
+                  {' '}Bitrate also raised from{' '}
+                  <strong>{encoderHealedNotice.bitrateFrom} kbps</strong> to{' '}
+                  <strong>{encoderHealedNotice.bitrateTo} kbps</strong> to match
+                  the software encoder's quality target.
+                </>
+              )}
+              {' '}You can change either value in the fields below.
             </div>
           </div>
         )}

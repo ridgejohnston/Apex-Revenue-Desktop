@@ -378,6 +378,21 @@ ipcMain.handle('obs-settings:apply-detected', async (_, payload) => {
   return merged;
 });
 
+// Enumerate DirectShow video input devices — webcams, HDMI capture
+// cards, OBS/XSplit virtual cameras, etc. Fresh probe every call so
+// plug/unplug changes are visible without restarting the app. Requires
+// FFmpeg to be installed; returns [] if not (renderer can show an
+// appropriate empty-state).
+ipcMain.handle('webcam:list', async () => {
+  try {
+    await ensureFFmpegInstalled();
+    return await streamEngine.detectWebcams();
+  } catch (err) {
+    console.warn('[webcam:list] Failed:', err.message);
+    return [];
+  }
+});
+
 ipcMain.handle('stream:start', async (_, config) => {
   await ensureFFmpegInstalled();
   const settings = { ...store.get('obsSettings'), ...config };
@@ -575,23 +590,37 @@ app.whenReady().then(async () => {
   // renderer so the UI can refresh + toast.
   streamEngine.on('encoder-auto-changed', ({ requested, resolved, reason }) => {
     const current = store.get('obsSettings') || {};
+
+    // Bitrate must also be recomputed when the encoder class changes.
+    // Hardware encoders (NVENC/QSV/AMF) are more bit-efficient and can
+    // stream clean HD at 3000-4000 kbps; software encoders (libopenh264/
+    // libx264) need 3500-4500 for equivalent quality on a cam platform.
+    // Falling back from hardware to software without bumping bitrate is
+    // what triggered Chaturbate's "bitrate much lower than recommended"
+    // warning for Ridge on v3.3.3 → fixed here in v3.3.4.
+    const height = current.resolution?.height || 1080;
+    const newBitrate = autoconfig.recommendBitrate(height, resolved);
+
     const updated = {
       ...current,
       videoEncoder: resolved,
+      videoBitrate: newBitrate,
       _encoderAutoHealedAt: new Date().toISOString(),
       _encoderAutoHealedFrom: requested,
+      _bitrateAutoAdjustedFrom: current.videoBitrate,
     };
     store.set('obsSettings', updated);
-    console.log(`[Apex] Encoder auto-healed: ${requested} → ${resolved}. Reason: ${reason}`);
+    console.log(`[Apex] Encoder auto-healed: ${requested} → ${resolved}. Bitrate: ${current.videoBitrate} → ${newBitrate}. Reason: ${reason}`);
     mainWindow?.webContents.send('obs-settings:encoder-auto-healed', {
       requested,
       resolved,
       reason,
+      bitrateFrom: current.videoBitrate,
+      bitrateTo: newBitrate,
     });
-    // Also fire the existing auto-refresh event so the OBS panel's
-    // useEffect re-reads settings and the dropdown shows the new value.
     mainWindow?.webContents.send('obs-settings:auto-refreshed', {
       encoder: resolved,
+      videoBitrate: newBitrate,
     });
   });
 

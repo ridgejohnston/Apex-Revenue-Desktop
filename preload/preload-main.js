@@ -28,6 +28,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onEncoderAutoHealed: (cb) => ipcRenderer.on('obs-settings:encoder-auto-healed', (_, data) => cb(data)),
   },
 
+  // v3.3.4: webcam device enumeration for the Video Source selector.
+  // Returns array of { name, alternativeName } — webcam devices only,
+  // no audio devices (those remain under settings.audioDevice).
+  webcam: {
+    list: () => ipcRenderer.invoke('webcam:list'),
+  },
+
   // ─── Window Controls ─────────────────────────────────
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),
