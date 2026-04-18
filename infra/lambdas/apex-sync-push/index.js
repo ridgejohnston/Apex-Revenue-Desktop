@@ -1,52 +1,15 @@
-/**
- * apex-sync-push
- *
- * POST /sync/push
- * Authorization: Bearer <Cognito ID token>  (validated by API Gateway authorizer)
- *
- * Request body: { kind, payload }
- *
- * Supported kinds:
- *   'whale.upsert'       payload: { platform, username, cumulative_tokens?, tier?,
- *                                    last_tip_at?, session_count?, notes? }
- *   'whale.delete'       payload: { platform, username }
- *   'prompt.upsert'      payload: { id?, category, text, tone?, tts_voice?,
- *                                    physical_reaction_required?, enabled? }
- *   'prompt.delete'      payload: { id }
- *   'preference.set'     payload: { key, value }
- *   'thresholds.update'  payload: { whaleMin?, bigTipperMin?, tipperMin? }
- *
- * Idempotent by design. Runs UPSERTs on natural keys so the Desktop's offline
- * push queue can retry without creating duplicates.
- */
+// ApexRevenue — apex-sync-push
+// POST /sync/push — applies a single mutation { kind, payload } to cloud state.
+// Idempotent where the natural key allows (whale upserts, preferences, thresholds).
 
-const { Client } = require('pg');
-const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+const { query, respond, handleCors, getUserFromToken, parseBody } = require('./shared');
 
-const sm = new SecretsManagerClient({});
-let cachedSecret = null;
-
-async function getDbConfig() {
-  if (cachedSecret) return cachedSecret;
-  const { SecretString } = await sm.send(new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN }));
-  cachedSecret = JSON.parse(SecretString);
-  return cachedSecret;
-}
-
-function respond(statusCode, body) {
-  return {
-    statusCode,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  };
-}
-
-async function applyMutation(client, sub, kind, payload) {
+async function applyMutation(sub, kind, payload) {
   switch (kind) {
     case 'whale.upsert': {
       const { platform, username, cumulative_tokens, tier, last_tip_at, session_count, notes } = payload;
       if (!platform || !username) throw new Error('platform and username required');
-      await client.query(
+      await query(
         `INSERT INTO performer_whales
            (performer_sub, platform, username, cumulative_tokens, tier, last_tip_at, session_count, notes, first_seen, last_seen)
          VALUES ($1, $2, $3, COALESCE($4, 0), $5, $6, COALESCE($7, 0), $8, NOW(), NOW())
@@ -65,7 +28,7 @@ async function applyMutation(client, sub, kind, payload) {
     case 'whale.delete': {
       const { platform, username } = payload;
       if (!platform || !username) throw new Error('platform and username required');
-      await client.query(
+      await query(
         `DELETE FROM performer_whales
           WHERE performer_sub = $1 AND platform = $2 AND username = $3`,
         [sub, platform, username],
@@ -77,7 +40,7 @@ async function applyMutation(client, sub, kind, payload) {
       const { id, category, text, tone, tts_voice, physical_reaction_required, enabled } = payload;
       if (!category || !text) throw new Error('category and text required');
       if (id) {
-        await client.query(
+        await query(
           `UPDATE performer_prompts
               SET category = $3, text = $4, tone = $5, tts_voice = $6,
                   physical_reaction_required = COALESCE($7, physical_reaction_required),
@@ -87,7 +50,7 @@ async function applyMutation(client, sub, kind, payload) {
           [id, sub, category, text, tone, tts_voice, physical_reaction_required, enabled],
         );
       } else {
-        await client.query(
+        await query(
           `INSERT INTO performer_prompts
              (performer_sub, category, text, tone, tts_voice, physical_reaction_required, enabled)
            VALUES ($1, $2, $3, $4, $5, COALESCE($6, TRUE), COALESCE($7, TRUE))`,
@@ -100,7 +63,7 @@ async function applyMutation(client, sub, kind, payload) {
     case 'prompt.delete': {
       const { id } = payload;
       if (!id) throw new Error('id required');
-      await client.query(
+      await query(
         `DELETE FROM performer_prompts WHERE id = $1 AND performer_sub = $2`,
         [id, sub],
       );
@@ -110,7 +73,7 @@ async function applyMutation(client, sub, kind, payload) {
     case 'preference.set': {
       const { key, value } = payload;
       if (!key) throw new Error('key required');
-      await client.query(
+      await query(
         `INSERT INTO performer_preferences (performer_sub, key, value_json, updated_at)
          VALUES ($1, $2, $3::jsonb, NOW())
          ON CONFLICT (performer_sub, key) DO UPDATE
@@ -123,7 +86,7 @@ async function applyMutation(client, sub, kind, payload) {
 
     case 'thresholds.update': {
       const { whaleMin, bigTipperMin, tipperMin } = payload;
-      await client.query(
+      await query(
         `INSERT INTO performer_signal_thresholds (performer_sub, whale_min, big_tipper_min, tipper_min, updated_at)
          VALUES ($1, COALESCE($2, 200), COALESCE($3, 50), COALESCE($4, 10), NOW())
          ON CONFLICT (performer_sub) DO UPDATE
@@ -142,43 +105,26 @@ async function applyMutation(client, sub, kind, payload) {
 }
 
 exports.handler = async (event) => {
-  const claims = event.requestContext && event.requestContext.authorizer && event.requestContext.authorizer.claims;
-  const sub = claims && claims.sub;
-  if (!sub) return respond(401, { error: 'unauthenticated' });
+  const cors = handleCors(event);
+  if (cors) return cors;
 
-  let body;
-  try {
-    body = JSON.parse(event.body || '{}');
-  } catch {
-    return respond(400, { error: 'invalid_json' });
-  }
+  const user = getUserFromToken(event);
+  if (!user) return respond(401, { error: 'Unauthorized' });
 
+  const body = parseBody(event);
   const { kind, payload } = body;
   if (!kind || !payload) return respond(400, { error: 'kind and payload required' });
 
-  const cfg = await getDbConfig();
-  const client = new Client({
-    host: cfg.host,
-    port: cfg.port,
-    user: cfg.user,
-    password: cfg.password,
-    database: cfg.dbname,
-    connectionTimeoutMillis: 3000,
-    ssl: { rejectUnauthorized: false },
-  });
-
   try {
-    await client.connect();
-    const result = await applyMutation(client, sub, kind, payload);
+    const result = await applyMutation(user.id, kind, payload);
     return respond(200, result);
   } catch (err) {
     console.error('[apex-sync-push]', kind, err);
-    return respond(err.message && err.message.endsWith('required') ? 400 : 500, {
+    const is400 = err.message && err.message.endsWith('required');
+    return respond(is400 ? 400 : 500, {
       error: 'mutation_failed',
       kind,
       detail: err.message,
     });
-  } finally {
-    await client.end().catch(() => {});
   }
 };

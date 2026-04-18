@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS performer_sessions (
 CREATE INDEX IF NOT EXISTS idx_performer_sessions_sub_started
   ON performer_sessions (performer_sub, started_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_performer_sessions_recent
-  ON performer_sessions (performer_sub, ended_at DESC)
-  WHERE ended_at >= NOW() - INTERVAL '30 days';
+-- Plain (non-partial) index on ended_at. Postgres rejects partial indexes
+-- with predicates referencing volatile functions like NOW(), so we use a
+-- full index and let query-time filtering narrow to the 30-day window.
+CREATE INDEX IF NOT EXISTS idx_performer_sessions_ended_at
+  ON performer_sessions (performer_sub, ended_at DESC);

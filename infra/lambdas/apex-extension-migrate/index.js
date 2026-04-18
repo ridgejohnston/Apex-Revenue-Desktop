@@ -1,105 +1,42 @@
-/**
- * apex-extension-migrate
- *
- * POST /extension/migrate
- * Authorization: Bearer <Cognito ID token>  (validated by API Gateway authorizer)
- *
- * Called by the last Chrome extension release when the performer clicks
- * "Migrate to Desktop." Bulk-imports the extension's local state into RDS
- * under the authenticated Cognito sub. Idempotent — safe to run multiple times.
- *
- * Request body (extension payload):
- *   {
- *     extensionVersion: string,
- *     exportedAt: number,
- *     whales: [
- *       { platform, username, cumulative_tokens, tier?, notes?,
- *         first_seen?, last_seen?, last_tip_at?, session_count? }
- *     ],
- *     customPrompts: [
- *       { category, text, tone?, enabled? }
- *     ],
- *     preferences: { [key]: value },
- *     thresholds: { whaleMin?, bigTipperMin?, tipperMin? }
- *   }
- *
- * Returns:
- *   {
- *     migrated: { whales: N, prompts: N, preferences: N, thresholds: boolean },
- *     migratedAt: <server ms>,
- *     idempotencyKey: <hash> — future migrations with same key are no-ops
- *   }
- *
- * Idempotency: each extension payload generates a hash key. If the same
- * performer submits the same payload twice within 24h, the second call
- * short-circuits to success. Stored in performer_preferences under key
- * '_migration.extension'.
- */
+// ApexRevenue — apex-extension-migrate
+// POST /extension/migrate — one-time bulk import from sunsetting Chrome extension.
+// Idempotent (24h replay window) via SHA-256 hash of the submitted payload.
 
 const crypto = require('crypto');
-const { Client } = require('pg');
-const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
-
-const sm = new SecretsManagerClient({});
-let cachedSecret = null;
-
-async function getDbConfig() {
-  if (cachedSecret) return cachedSecret;
-  const { SecretString } = await sm.send(new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN }));
-  cachedSecret = JSON.parse(SecretString);
-  return cachedSecret;
-}
-
-function respond(statusCode, body) {
-  return {
-    statusCode,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  };
-}
+const { getPool, respond, handleCors, getUserFromToken, parseBody } = require('./shared');
 
 function payloadHash(p) {
   const canonical = JSON.stringify({
-    w: (p.whales || []).map((x) => [x.platform, x.username, x.cumulative_tokens]).sort(),
+    w:  (p.whales || []).map((x) => [x.platform, x.username, x.cumulative_tokens]).sort(),
     pr: (p.customPrompts || []).map((x) => [x.category, x.text]).sort(),
     pf: Object.keys(p.preferences || {}).sort().map((k) => [k, p.preferences[k]]),
-    t: p.thresholds || {},
+    t:  p.thresholds || {},
   });
   return crypto.createHash('sha256').update(canonical).digest('hex');
 }
 
 exports.handler = async (event) => {
-  const claims = event.requestContext && event.requestContext.authorizer && event.requestContext.authorizer.claims;
-  const sub = claims && claims.sub;
-  if (!sub) return respond(401, { error: 'unauthenticated' });
+  const cors = handleCors(event);
+  if (cors) return cors;
 
-  let payload;
-  try {
-    payload = JSON.parse(event.body || '{}');
-  } catch {
-    return respond(400, { error: 'invalid_json' });
-  }
+  const user = getUserFromToken(event);
+  if (!user) return respond(401, { error: 'Unauthorized' });
+  const sub = user.id;
 
-  const whales = Array.isArray(payload.whales) ? payload.whales : [];
-  const prompts = Array.isArray(payload.customPrompts) ? payload.customPrompts : [];
+  const payload = parseBody(event);
+  const whales      = Array.isArray(payload.whales) ? payload.whales : [];
+  const prompts     = Array.isArray(payload.customPrompts) ? payload.customPrompts : [];
   const preferences = payload.preferences || {};
-  const thresholds = payload.thresholds || null;
+  const thresholds  = payload.thresholds || null;
 
   const hash = payloadHash(payload);
-  const cfg = await getDbConfig();
-  const client = new Client({
-    host: cfg.host,
-    port: cfg.port,
-    user: cfg.user,
-    password: cfg.password,
-    database: cfg.dbname,
-    connectionTimeoutMillis: 5000,
-    ssl: { rejectUnauthorized: false },
-  });
+
+  // Bulk import needs a transaction, so we grab a client from the pool
+  // directly rather than using the shared.query() shortcut.
+  const pool = await getPool();
+  const client = await pool.connect();
 
   try {
-    await client.connect();
-
     // Idempotency check
     const prior = await client.query(
       `SELECT value_json FROM performer_preferences
@@ -118,11 +55,9 @@ exports.handler = async (event) => {
       }
     }
 
-    // Transaction wraps the whole migration so a mid-import failure doesn't
-    // leave partial state.
     await client.query('BEGIN');
 
-    // Whales
+    // ── Whales ───────────────────────────────────────
     let whalesMigrated = 0;
     for (const w of whales) {
       if (!w.platform || !w.username) continue;
@@ -151,12 +86,10 @@ exports.handler = async (event) => {
       whalesMigrated += 1;
     }
 
-    // Prompts
+    // ── Prompts (dedupe on natural key) ─────────────
     let promptsMigrated = 0;
     for (const p of prompts) {
       if (!p.category || !p.text) continue;
-      // Dedupe on (performer_sub, category, text) — if the exact prompt already
-      // exists we skip rather than creating a duplicate row.
       const existing = await client.query(
         `SELECT id FROM performer_prompts
            WHERE performer_sub = $1 AND category = $2 AND text = $3
@@ -173,10 +106,10 @@ exports.handler = async (event) => {
       promptsMigrated += 1;
     }
 
-    // Preferences
+    // ── Preferences (skip reserved namespace) ───────
     let preferencesMigrated = 0;
     for (const [key, value] of Object.entries(preferences)) {
-      if (!key || key.startsWith('_migration.')) continue; // reserved namespace
+      if (!key || key.startsWith('_migration.')) continue;
       await client.query(
         `INSERT INTO performer_preferences (performer_sub, key, value_json, updated_at)
          VALUES ($1, $2, $3::jsonb, NOW())
@@ -188,7 +121,7 @@ exports.handler = async (event) => {
       preferencesMigrated += 1;
     }
 
-    // Thresholds
+    // ── Thresholds ──────────────────────────────────
     let thresholdsMigrated = false;
     if (thresholds && (thresholds.whaleMin || thresholds.bigTipperMin || thresholds.tipperMin)) {
       await client.query(
@@ -205,7 +138,7 @@ exports.handler = async (event) => {
       thresholdsMigrated = true;
     }
 
-    // Record idempotency marker
+    // ── Record idempotency marker ───────────────────
     const counts = {
       whales: whalesMigrated,
       prompts: promptsMigrated,
@@ -234,6 +167,6 @@ exports.handler = async (event) => {
     console.error('[apex-extension-migrate]', err);
     return respond(500, { error: 'migration_failed', detail: err.message });
   } finally {
-    await client.end().catch(() => {});
+    client.release();
   }
 };

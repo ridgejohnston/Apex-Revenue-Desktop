@@ -1,10 +1,11 @@
 {
   "name": "apex-sync-push",
   "version": "1.0.0",
-  "description": "Apex Revenue — push mutation to cloud-synced performer data",
+  "description": "Apex Revenue — apex-sync-push. Uses the repo's shared.js pattern with apexrevenue/config secret for DATABASE_URL.",
   "main": "index.js",
   "dependencies": {
-    "pg": "^8.11.3",
-    "@aws-sdk/client-secrets-manager": "^3.600.0"
-  }
+    "@aws-sdk/client-secrets-manager": "^3.1021.0",
+    "pg": "^8.20.0"
+  },
+  "notes": "Build: cp shared.js into this dir, npm install, zip -r ../bundle.zip . && deploy with VPC config (subnet-03091d5ceffef6b70, subnet-068539aeed7d31ad6, sg-0e1c907af12faa7f2) and role ApexRevenue-Lambda-Role."
 }
