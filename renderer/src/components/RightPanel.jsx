@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 export default function RightPanel({
   activeTab, liveData, streamStatus, platform, user,
   aiPrompt, onDismissPrompt, onAuthClick, activeScene,
-  onToggleSourceVisible,
+  onToggleSourceVisible, onToggleCategory,
 }) {
   const [sessionTimer, setSessionTimer] = useState(0);
   const timerRef = useRef(null);
@@ -45,7 +45,7 @@ export default function RightPanel({
       </div>
 
       <div className="flex-col flex-1" style={{ overflow: 'auto', padding: 8 }}>
-        {activeTab === 'obs' && <OBSProperties activeScene={activeScene} onToggleSourceVisible={onToggleSourceVisible} />}
+        {activeTab === 'obs' && <OBSProperties activeScene={activeScene} onToggleSourceVisible={onToggleSourceVisible} onToggleCategory={onToggleCategory} />}
         {activeTab === 'ai' && <AIPanel user={user} onAuthClick={onAuthClick} liveData={liveData} aiPrompt={aiPrompt} onDismissPrompt={onDismissPrompt} />}
         {activeTab === 'sync' && <SyncPanel />}
         {activeTab === 'live' && (
@@ -86,7 +86,7 @@ export default function RightPanel({
 }
 
 // ─── OBS Properties Sub-panel ───────────────────────────
-function OBSProperties({ activeScene, onToggleSourceVisible }) {
+function OBSProperties({ activeScene, onToggleSourceVisible, onToggleCategory }) {
   const [settings, setSettings] = useState(null);
   const [audioInputs, setAudioInputs] = useState([]);
   const [dshowAudio, setDshowAudio] = useState([]);
@@ -287,16 +287,20 @@ function OBSProperties({ activeScene, onToggleSourceVisible }) {
         />
       </div>
 
-      {/* Video Source — v3.3.7: two interactive pill buttons on the right
-          that control the corresponding sources in the left sidebar.
-          Clicking Screen finds the scene's screen_capture source and
-          toggles it ON; clicking Webcam finds the webcam source and
-          toggles it ON. App.jsx's handleToggleSourceVisible enforces
-          radio behavior — turning one video-capture source ON auto-
-          turns OFF the others — so the two panels stay in sync without
-          any additional wiring. If a source of the clicked type doesn't
-          exist in the scene yet, the button is disabled with a hint to
-          add one from the Sources panel. */}
+      {/* Video Source — v3.3.8: the Screen and Webcam buttons aggregate
+          ALL sources of their category, not just one. Every screen_capture/
+          window_capture/game_capture source in the scene is controlled by
+          the Screen button. Every webcam source is controlled by the Webcam
+          button. Click a button to toggle its entire category ON/OFF:
+            • Click when category has nothing visible → turn ON every
+              source in this category, turn OFF every source in the OTHER
+              category (cross-category exclusion still applies — FFmpeg
+              streams one input at a time).
+            • Click when category has anything visible → turn OFF every
+              source in this category.
+          The sidebar mirrors every toggle via App.jsx's handleToggleCategory,
+          so adding/removing/reordering sources on the left flows through to
+          the right buttons automatically. */}
       <div>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
           VIDEO SOURCE
@@ -305,25 +309,27 @@ function OBSProperties({ activeScene, onToggleSourceVisible }) {
         {(() => {
           const sources = activeScene?.sources || [];
 
-          // Pick target source for each button. Preference: the visible
-          // one if present (so clicking the active button toggles it
-          // OFF), otherwise the first of its type (so clicking an
-          // inactive button toggles THAT source ON, with radio behavior
-          // in App.jsx turning off the other).
-          const pickTarget = (type) => {
-            const visible = sources.find((s) => s.type === type && s.visible);
-            if (visible) return visible;
-            return sources.find((s) => s.type === type) || null;
-          };
-          const screenSource = pickTarget('screen_capture');
-          const webcamSource = pickTarget('webcam');
+          // Category assignments mirror App.jsx VIDEO_CATEGORY_MAP.
+          // screen_capture, window_capture, and game_capture all
+          // belong to the "screen" category and are aggregated by the
+          // Screen button. webcam is its own category.
+          const screenCategoryTypes = new Set(['screen_capture', 'window_capture', 'game_capture']);
+          const webcamCategoryTypes = new Set(['webcam']);
 
-          const screenActive = !!(screenSource && screenSource.visible);
-          const webcamActive = !!(webcamSource && webcamSource.visible);
+          const screenSources = sources.filter((s) => screenCategoryTypes.has(s.type));
+          const webcamSources = sources.filter((s) => webcamCategoryTypes.has(s.type));
 
-          // Button style helper — accent red when active, neutral when
-          // available but inactive, dimmed when no source of that type
-          // exists in the scene (button is disabled).
+          const screenVisible = screenSources.filter((s) => s.visible);
+          const webcamVisible = webcamSources.filter((s) => s.visible);
+
+          const screenActive = screenVisible.length > 0;
+          const webcamActive = webcamVisible.length > 0;
+          const screenAvailable = screenSources.length > 0;
+          const webcamAvailable = webcamSources.length > 0;
+
+          // Button style — accent red when the category has any visible
+          // source, neutral when the category has sources but none visible,
+          // dimmed when the scene has no sources of that category at all.
           const buttonStyle = (active, available) => ({
             flex: 1,
             padding: '10px 10px',
@@ -340,11 +346,13 @@ function OBSProperties({ activeScene, onToggleSourceVisible }) {
               : available
               ? 'var(--text-secondary)'
               : 'var(--text-dim)',
-            border: '1px solid ' + (active
-              ? 'var(--accent, #CC0000)'
-              : available
-              ? 'var(--border, rgba(255,255,255,0.08))'
-              : 'rgba(255,255,255,0.05)'),
+            border:
+              '1px solid ' +
+              (active
+                ? 'var(--accent, #CC0000)'
+                : available
+                ? 'var(--border, rgba(255,255,255,0.08))'
+                : 'rgba(255,255,255,0.05)'),
             borderRadius: 4,
             cursor: available ? 'pointer' : 'not-allowed',
             opacity: available ? 1 : 0.55,
@@ -353,23 +361,46 @@ function OBSProperties({ activeScene, onToggleSourceVisible }) {
             flexDirection: 'column',
             alignItems: 'center',
             gap: 4,
+            position: 'relative',
           });
+
+          // Count badge shown on buttons where category has multiple
+          // sources. Helps the user see at a glance when a single click
+          // will fan out to more than one source.
+          const countBadge = (visibleCount, totalCount) => {
+            if (totalCount <= 1) return null;
+            return (
+              <span style={{
+                position: 'absolute', top: 4, right: 6,
+                fontSize: 9, fontWeight: 700,
+                padding: '1px 5px',
+                borderRadius: 8,
+                background: 'rgba(0,0,0,0.35)',
+                color: 'inherit',
+                border: '1px solid rgba(255,255,255,0.15)',
+                lineHeight: 1.3,
+              }}>
+                {visibleCount}/{totalCount}
+              </span>
+            );
+          };
 
           return (
             <>
               <div className="flex gap-2" style={{ marginBottom: 6 }}>
                 <button
-                  style={buttonStyle(screenActive, !!screenSource)}
-                  onClick={() => screenSource && onToggleSourceVisible?.(screenSource.id)}
-                  disabled={!screenSource}
+                  style={buttonStyle(screenActive, screenAvailable)}
+                  onClick={() => screenAvailable && onToggleCategory?.('screen')}
+                  disabled={!screenAvailable}
                   title={
-                    !screenSource
-                      ? 'No Screen Capture source in this scene. Add one from the Sources panel on the left.'
+                    !screenAvailable
+                      ? 'No screen/window/game capture sources in this scene. Add one from the Sources panel on the left.'
                       : screenActive
-                      ? 'Turn Screen Capture off'
-                      : 'Turn Screen Capture on (will turn off the active video source)'
+                      ? `Turn off all ${screenVisible.length} screen source${screenVisible.length === 1 ? '' : 's'}`
+                      : `Turn on all ${screenSources.length} screen source${screenSources.length === 1 ? '' : 's'} (will turn off webcam sources)`
                   }
                 >
+                  {countBadge(screenVisible.length, screenSources.length)}
                   <span style={{ fontSize: 18, lineHeight: 1 }}>🖥️</span>
                   <span>Screen</span>
                   {screenActive && (
@@ -380,17 +411,18 @@ function OBSProperties({ activeScene, onToggleSourceVisible }) {
                 </button>
 
                 <button
-                  style={buttonStyle(webcamActive, !!webcamSource)}
-                  onClick={() => webcamSource && onToggleSourceVisible?.(webcamSource.id)}
-                  disabled={!webcamSource}
+                  style={buttonStyle(webcamActive, webcamAvailable)}
+                  onClick={() => webcamAvailable && onToggleCategory?.('webcam')}
+                  disabled={!webcamAvailable}
                   title={
-                    !webcamSource
-                      ? 'No Webcam source in this scene. Add one from the Sources panel on the left.'
+                    !webcamAvailable
+                      ? 'No webcam sources in this scene. Add one from the Sources panel on the left.'
                       : webcamActive
-                      ? 'Turn Webcam off'
-                      : 'Turn Webcam on (will turn off the active video source)'
+                      ? `Turn off all ${webcamVisible.length} webcam source${webcamVisible.length === 1 ? '' : 's'}`
+                      : `Turn on all ${webcamSources.length} webcam source${webcamSources.length === 1 ? '' : 's'} (will turn off screen sources)`
                   }
                 >
+                  {countBadge(webcamVisible.length, webcamSources.length)}
                   <span style={{ fontSize: 18, lineHeight: 1 }}>📷</span>
                   <span>Webcam</span>
                   {webcamActive && (
@@ -401,22 +433,31 @@ function OBSProperties({ activeScene, onToggleSourceVisible }) {
                 </button>
               </div>
 
-              {/* Active source details — shows the name + device for the
-                  currently visible video source, if any. For webcam this
-                  is the camera name, for screen_capture the display number. */}
+              {/* Streaming-from line — names the source that the FFmpeg
+                  pipeline will actually pipe. When multiple sources in
+                  the active category are visible, the engine picks the
+                  first by list order; if there's more than one, the line
+                  also mentions the extras. */}
               {(() => {
-                const active = sources.find(
+                const allActiveVideo = [...screenVisible, ...webcamVisible];
+                if (allActiveVideo.length === 0) return null;
+                // Use list order from the original sources array so the
+                // displayed "streaming" matches what the engine picks.
+                const primary = sources.find(
                   (s) =>
                     s.visible &&
-                    ['webcam', 'screen_capture', 'window_capture', 'game_capture'].includes(s.type)
+                    (screenCategoryTypes.has(s.type) || webcamCategoryTypes.has(s.type))
                 );
-                if (!active) return null;
+                if (!primary) return null;
                 const deviceDetail =
-                  active.type === 'webcam'
-                    ? active.properties?.deviceLabel || active.properties?.deviceName || 'Default camera'
-                    : active.type === 'screen_capture'
-                    ? `Display ${(active.properties?.displayIndex ?? 0) + 1}`
+                  primary.type === 'webcam'
+                    ? primary.properties?.deviceLabel ||
+                      primary.properties?.deviceName ||
+                      'Default camera'
+                    : primary.type === 'screen_capture'
+                    ? `Display ${(primary.properties?.displayIndex ?? 0) + 1}`
                     : null;
+                const extras = allActiveVideo.length - 1;
                 return (
                   <div style={{
                     fontSize: 9,
@@ -424,14 +465,23 @@ function OBSProperties({ activeScene, onToggleSourceVisible }) {
                     padding: '6px 2px',
                     lineHeight: 1.4,
                   }}>
-                    Streaming from: <strong style={{ color: 'var(--text-secondary)' }}>{active.name}</strong>
+                    Streaming from:{' '}
+                    <strong style={{ color: 'var(--text-secondary)' }}>{primary.name}</strong>
                     {deviceDetail ? <> · {deviceDetail}</> : null}
+                    {extras > 0 && (
+                      <>
+                        {' '}
+                        <span style={{ opacity: 0.7 }}>
+                          (+{extras} other{extras === 1 ? '' : 's'} visible — stream uses first source)
+                        </span>
+                      </>
+                    )}
                   </div>
                 );
               })()}
 
-              {/* If neither source type exists, prompt to add one */}
-              {!screenSource && !webcamSource && (
+              {/* Empty-state prompt — neither category has any source */}
+              {!screenAvailable && !webcamAvailable && (
                 <div style={{
                   padding: '10px 12px',
                   marginTop: 4,
@@ -453,8 +503,9 @@ function OBSProperties({ activeScene, onToggleSourceVisible }) {
         <div style={{
           fontSize: 9, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.4,
         }}>
-          💡 These buttons control sources in the <strong>Sources</strong> panel on the left.
-          Only one video source streams at a time.
+          💡 These buttons control every source in their category. Any number of
+          sources per category is supported — the stream uses the first visible
+          source in the active category.
         </div>
       </div>
 

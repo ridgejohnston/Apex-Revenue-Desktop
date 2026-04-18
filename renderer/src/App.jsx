@@ -237,30 +237,102 @@ export default function App() {
     // Auto-activate immediately after adding
     activateSource(source);
 
-    // v3.3.6: if the newly added source is a video-capture type, sync
-    // obsSettings so Start Stream picks it up immediately. Mirrors the
-    // logic in handleToggleSourceVisible so both entry points converge
-    // on the same settings state.
-    const VIDEO_CAPTURE_TYPES = new Set([
-      'webcam', 'screen_capture', 'window_capture', 'game_capture',
-    ]);
-    if (VIDEO_CAPTURE_TYPES.has(source.type)) {
+    // If the newly added source is a video-capture type, do two things:
+    //   1. Cross-category exclusion: turn off any visible sources in the
+    //      OPPOSITE video category, since FFmpeg can only stream one
+    //      category at a time. Sources in the SAME category as the new
+    //      one stay visible.
+    //   2. Sync obsSettings so Start Stream picks it up immediately.
+    //      The new source is appended to the list, so existing earlier
+    //      sources in the same category will still be "first visible"
+    //      and drive the stream — respect that unless the new source is
+    //      the only one visible in its category.
+    const newSourceCategory = getVideoCategory(source.type);
+    if (newSourceCategory) {
+      const scene = scenes.find((s) => s.id === activeSceneId);
+      const sources = scene?.sources || [];
+
+      // Turn off everything in the other video category
+      const otherCategoryVisible = sources.filter(
+        (s) =>
+          s.visible &&
+          s.id !== source.id &&
+          getVideoCategory(s.type) &&
+          getVideoCategory(s.type) !== newSourceCategory
+      );
+      await Promise.all(
+        otherCategoryVisible.map((s) => api.sources.toggleVisible(activeSceneId, s.id))
+      );
+
+      // Sync obsSettings. If there were no earlier visible sources in
+      // this category, the new source becomes the stream input;
+      // otherwise, the first already-visible source in the category
+      // remains the stream input (don't disrupt a live setup).
+      const visibleInCategory = sources.filter(
+        (s) => s.visible && getVideoCategory(s.type) === newSourceCategory
+      );
+      const streamSource = visibleInCategory.length > 0 ? visibleInCategory[0] : source;
       const current = (await api.store.get('obsSettings')) || {};
-      const patch = source.type === 'webcam'
-        ? {
-            videoSource: 'webcam',
-            webcamDevice: source.properties?.deviceLabel || source.properties?.deviceName || '',
-          }
-        : { videoSource: 'screen' };
+      const patch =
+        streamSource.type === 'webcam'
+          ? {
+              videoSource: 'webcam',
+              webcamDevice:
+                streamSource.properties?.deviceLabel ||
+                streamSource.properties?.deviceName ||
+                '',
+            }
+          : { videoSource: 'screen' };
       await api.store.set('obsSettings', { ...current, ...patch });
     }
-  }, [activeSceneId, activateSource]);
+  }, [activeSceneId, activateSource, scenes]);
 
   const handleRemoveSource = useCallback(async (sourceId) => {
     if (!activeSceneId) return;
     deactivateSource(sourceId);
     await api.sources.remove(activeSceneId, sourceId);
   }, [activeSceneId, deactivateSource]);
+
+  // v3.3.8: Video capture sources group into TWO mutually-exclusive
+  // categories — 'webcam' and 'screen'. Multiple sources can live
+  // within the same category (e.g. two webcams, or a screen_capture
+  // + a window_capture). The stream engine's FFmpeg pipeline still
+  // reads only one -i video input at a time, so when multiple
+  // sources in the active category are visible, the engine picks the
+  // first visible one (by list order) to actually stream.
+  //
+  // Right-panel Screen/Webcam buttons aggregate everything in their
+  // category — see handleToggleCategory below.
+  const VIDEO_CATEGORY_MAP = {
+    webcam: 'webcam',
+    screen_capture: 'screen',
+    window_capture: 'screen',
+    game_capture: 'screen',
+  };
+  const getVideoCategory = (sourceType) => VIDEO_CATEGORY_MAP[sourceType] || null;
+
+  // Build the obsSettings patch that matches what the stream engine
+  // would feed FFmpeg given a target visible-sources array. The engine
+  // picks the first visible video source for its single FFmpeg input,
+  // so the store must agree on which source that is.
+  const computeStreamPatchFromSources = (sourcesAfterToggle) => {
+    const firstVisibleVideo = sourcesAfterToggle.find(
+      (s) => s.visible && getVideoCategory(s.type)
+    );
+    if (!firstVisibleVideo) {
+      return { videoSource: 'screen' }; // safe default
+    }
+    if (firstVisibleVideo.type === 'webcam') {
+      return {
+        videoSource: 'webcam',
+        webcamDevice:
+          firstVisibleVideo.properties?.deviceLabel ||
+          firstVisibleVideo.properties?.deviceName ||
+          '',
+      };
+    }
+    return { videoSource: 'screen' };
+  };
 
   const handleToggleSourceVisible = useCallback(async (sourceId) => {
     if (!activeSceneId) return;
@@ -272,59 +344,113 @@ export default function App() {
       return;
     }
 
-    // v3.3.6: video-capture sources are mutually exclusive. FFmpeg's
-    // input pipeline can only read one -i video source at a time, so
-    // the sidebar ON toggle behaves as a radio for this category.
-    // Toggling a video source ON automatically turns OFF every other
-    // video source in the scene. Non-video sources (overlays, audio,
-    // text, browser, alerts) keep their independent ON/OFF behavior.
-    const VIDEO_CAPTURE_TYPES = new Set([
-      'webcam', 'screen_capture', 'window_capture', 'game_capture',
-    ]);
-    const isVideoCapture = VIDEO_CAPTURE_TYPES.has(target.type);
+    const targetCategory = getVideoCategory(target.type);
     const goingVisible = !target.visible;
 
-    if (isVideoCapture && goingVisible) {
-      // Turn off every OTHER video-capture source that's currently on.
-      // Run these in parallel — scene-manager debounces its writes so
-      // the batch is safe.
+    // Cross-category exclusion only. Turning ON a Webcam source turns
+    // OFF everything in the Screen category, and vice versa. Within
+    // the same category, multiple sources can be visible at once and
+    // we don't cascade anything.
+    if (targetCategory && goingVisible) {
       const others = (scene.sources || []).filter(
-        (s) => s.id !== sourceId && s.visible && VIDEO_CAPTURE_TYPES.has(s.type)
+        (s) =>
+          s.id !== sourceId &&
+          s.visible &&
+          getVideoCategory(s.type) &&
+          getVideoCategory(s.type) !== targetCategory
       );
-      await Promise.all(others.map((s) => api.sources.toggleVisible(activeSceneId, s.id)));
+      await Promise.all(
+        others.map((s) => api.sources.toggleVisible(activeSceneId, s.id))
+      );
     }
 
     // Toggle the target source itself
     await api.sources.toggleVisible(activeSceneId, sourceId);
 
-    // Sync obsSettings.videoSource / webcamDevice to match what the
-    // stream engine will actually capture from. The stream engine reads
-    // obsSettings directly at startStream time, so these fields need to
-    // be up-to-date the moment the user hits Start Stream.
-    if (isVideoCapture) {
-      const current = (await api.store.get('obsSettings')) || {};
-      let patch;
-      if (goingVisible) {
-        if (target.type === 'webcam') {
-          patch = {
-            videoSource: 'webcam',
-            // AddSourceModal saves the dshow-compatible label as
-            // properties.deviceLabel; prefer it over deviceId (which is
-            // a getUserMedia hash that FFmpeg can't resolve).
-            webcamDevice: target.properties?.deviceLabel || target.properties?.deviceName || '',
-          };
-        } else {
-          // screen_capture, window_capture, game_capture — all route
-          // through gdigrab for now. window/game capture specialization
-          // is a future enhancement; today they fall back to full desktop.
-          patch = { videoSource: 'screen' };
+    // Sync obsSettings to whatever the stream engine should consume.
+    // We compute the post-toggle scene state locally since React state
+    // won't have updated yet when this function resolves.
+    if (targetCategory) {
+      const sourcesAfter = (scene.sources || []).map((s) => {
+        if (s.id === sourceId) return { ...s, visible: goingVisible };
+        if (
+          goingVisible &&
+          s.visible &&
+          getVideoCategory(s.type) &&
+          getVideoCategory(s.type) !== targetCategory
+        ) {
+          return { ...s, visible: false };
         }
-      } else {
-        // User turned OFF the currently-active video source. Fall back
-        // to 'screen' as the safe default so Start Stream doesn't fail
-        // with an empty/invalid config.
-        patch = { videoSource: 'screen' };
-      }
+        return s;
+      });
+      const current = (await api.store.get('obsSettings')) || {};
+      const patch = computeStreamPatchFromSources(sourcesAfter);
+      await api.store.set('obsSettings', { ...current, ...patch });
+    }
+  }, [activeSceneId, scenes]);
+
+  // Right-panel Screen/Webcam buttons call this. Toggles an entire
+  // video category at once:
+  //   • If any sources of the category are visible → turn ALL of them OFF
+  //     (the whole category goes dark).
+  //   • Otherwise → turn ALL sources in this category ON, and turn OFF
+  //     every source in the OTHER video category (cross-category
+  //     exclusion). Sources that were already OFF in this category
+  //     become visible together.
+  // After the toggle, obsSettings.videoSource/webcamDevice are patched
+  // to whatever the stream engine should stream (first visible source
+  // in the newly-active category).
+  const handleToggleCategory = useCallback(async (category) => {
+    if (!activeSceneId) return;
+    const scene = scenes.find((s) => s.id === activeSceneId);
+    if (!scene) return;
+    const sources = scene.sources || [];
+
+    const inCategory = sources.filter((s) => getVideoCategory(s.type) === category);
+    if (inCategory.length === 0) return; // nothing to toggle
+
+    const anyVisible = inCategory.some((s) => s.visible);
+
+    if (anyVisible) {
+      // Turn the whole category off
+      await Promise.all(
+        inCategory
+          .filter((s) => s.visible)
+          .map((s) => api.sources.toggleVisible(activeSceneId, s.id))
+      );
+      const current = (await api.store.get('obsSettings')) || {};
+      await api.store.set('obsSettings', { ...current, videoSource: 'screen' });
+    } else {
+      // Turn OFF every visible source in the OTHER category
+      const otherCategoryVisible = sources.filter(
+        (s) =>
+          s.visible &&
+          getVideoCategory(s.type) &&
+          getVideoCategory(s.type) !== category
+      );
+      await Promise.all(
+        otherCategoryVisible.map((s) => api.sources.toggleVisible(activeSceneId, s.id))
+      );
+      // Turn ON every source in THIS category that isn't already on
+      await Promise.all(
+        inCategory
+          .filter((s) => !s.visible)
+          .map((s) => api.sources.toggleVisible(activeSceneId, s.id))
+      );
+
+      // Stream from the first source in this category (list order).
+      const first = inCategory[0];
+      const current = (await api.store.get('obsSettings')) || {};
+      const patch =
+        first.type === 'webcam'
+          ? {
+              videoSource: 'webcam',
+              webcamDevice:
+                first.properties?.deviceLabel ||
+                first.properties?.deviceName ||
+                '',
+            }
+          : { videoSource: 'screen' };
       await api.store.set('obsSettings', { ...current, ...patch });
     }
   }, [activeSceneId, scenes]);
@@ -506,6 +632,7 @@ export default function App() {
           onAuthClick={() => setShowAuth(true)}
           activeScene={activeScene}
           onToggleSourceVisible={handleToggleSourceVisible}
+          onToggleCategory={handleToggleCategory}
         />
       </div>
 
