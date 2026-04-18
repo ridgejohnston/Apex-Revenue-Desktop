@@ -9,6 +9,32 @@ module.exports = {
   // Cognito
   COGNITO_USER_POOL_ID: 'us-east-1_EjYUEgmKm',
   COGNITO_CLIENT_ID: '5f93lsurdb1lmcg8egasdcab2j',
+  COGNITO_HOSTED_UI_DOMAIN: 'apex-revenue-auth.auth.us-east-1.amazoncognito.com',
+  COGNITO_REDIRECT_URI: 'apexrevenue://auth/callback',
+  COGNITO_LOGOUT_URI:   'apexrevenue://auth/signout',
+  COGNITO_OAUTH_SCOPES: 'openid email profile',
+
+  // Subscription / billing
+  SUBSCRIPTION_OFFLINE_GRACE_MS: 3 * 24 * 60 * 60 * 1000,   // 3 days
+  SUBSCRIPTION_CHECK_INTERVAL_MS: 60 * 60 * 1000,           // hourly re-check
+  EXPIRY_WARNING_HOURS: [72, 24],                           // notification triggers
+
+  // Cognito Hosted UI (OAuth 2.0 Authorization Code + PKCE)
+  HOSTED_UI_DOMAIN:   'https://apex-revenue-auth.auth.us-east-1.amazoncognito.com',
+  OAUTH_REDIRECT_URI: 'apexrevenue://auth/callback',
+  OAUTH_LOGOUT_URI:   'apexrevenue://auth/signout',
+  OAUTH_SCOPES:       ['email', 'openid', 'profile'],
+  CUSTOM_PROTOCOL:    'apexrevenue',
+
+  // Tier & billing
+  // Offline grace: if /check-subscription is unreachable, keep serving the
+  // last-known plan for up to this duration past the last successful check.
+  OFFLINE_GRACE_MS:           3 * 24 * 60 * 60 * 1000, // 3 days
+  // Expiry warning thresholds (ms before current_period_end)
+  EXPIRY_WARN_72H_MS:         72 * 60 * 60 * 1000,
+  EXPIRY_WARN_24H_MS:         24 * 60 * 60 * 1000,
+  // How often main.js re-evaluates tier/expiry state
+  TIER_CHECK_INTERVAL_MS:     60 * 60 * 1000,          // 1 hour
 
   // API Gateway
   API_ENDPOINT: 'https://7g6qsxoos3.execute-api.us-east-1.amazonaws.com/prod',

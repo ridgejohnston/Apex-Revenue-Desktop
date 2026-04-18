@@ -1,6 +1,22 @@
 import React, { useState, useRef, useEffect } from 'react';
 
-export default function Titlebar({ user, streamStatus, platform, updateStatus, onAuthClick, onSettingsClick, onSignOut, onS3Backup }) {
+export default function Titlebar({
+  user,
+  streamStatus,
+  platform,
+  updateStatus,
+  onAuthClick,
+  onSettingsClick,
+  onSignOut,
+  onS3Backup,
+  // Tier / admin toggle
+  effectivePlan,       // 'free' | 'platinum'
+  billingSource,       // 'admin' | 'beta' | 'stripe' | 'admin-toggle' | 'offline' | ...
+  adminToggle,         // 'free' | 'platinum' | null
+  onAdminToggleChange, // (tier) => void
+  subscriptionOffline, // boolean
+  graceRemainingMs,    // number | null
+}) {
   const [appMenuOpen, setAppMenuOpen] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const menuRef = useRef(null);
@@ -151,6 +167,16 @@ export default function Titlebar({ user, streamStatus, platform, updateStatus, o
           <span className="badge badge-accent">{platform.toUpperCase()}</span>
         )}
 
+        {/* Tier badge — color-coded by billing source */}
+        {user && effectivePlan && (
+          <TierBadge
+            plan={effectivePlan}
+            source={billingSource}
+            offline={subscriptionOffline}
+            graceRemainingMs={graceRemainingMs}
+          />
+        )}
+
         {renderUpdateBadge()}
       </div>
 
@@ -163,6 +189,15 @@ export default function Titlebar({ user, streamStatus, platform, updateStatus, o
 
       {/* Right: User + Controls */}
       <div className="flex items-center gap-2 no-drag">
+        {/* Admin Dev Access — Free ⇄ Platinum tier toggle.
+            Only visible when the signed-in user is in the `admins` Cognito group. */}
+        {user?.isAdmin && (
+          <AdminTierToggle
+            value={adminToggle}
+            onChange={onAdminToggleChange}
+          />
+        )}
+
         <button className="btn btn-sm" onClick={onS3Backup} title="Backup to S3">💾</button>
         <button className="btn btn-sm" onClick={onSettingsClick} title="Settings">⚙️</button>
 
@@ -243,3 +278,109 @@ export default function Titlebar({ user, streamStatus, platform, updateStatus, o
     </div>
   );
 }
+
+// ─── Tier Badge ───────────────────────────────────────────
+//
+// Shows the current effective plan with color coding:
+//   • Platinum (admin)       — gold, "ADMIN"
+//   • Platinum (admin-toggle)— gold with 🔧, "DEV"
+//   • Platinum (beta)        — magenta, "BETA"
+//   • Platinum (stripe)      — purple, "PLATINUM"
+//   • Platinum (offline)     — amber, "OFFLINE [countdown]"
+//   • Free                   — gray, "FREE"
+function TierBadge({ plan, source, offline, graceRemainingMs }) {
+  let label, bg, color, border, icon = null;
+
+  if (plan === 'platinum') {
+    if (source === 'admin')          { label = 'ADMIN';    bg = 'rgba(250, 204, 21, 0.15)'; color = '#fbbf24'; border = 'rgba(250, 204, 21, 0.5)'; }
+    else if (source === 'admin-toggle') { label = 'DEV PLATINUM'; icon = '🔧'; bg = 'rgba(250, 204, 21, 0.15)'; color = '#fbbf24'; border = 'rgba(250, 204, 21, 0.5)'; }
+    else if (source === 'beta')      { label = 'BETA';     bg = 'rgba(236, 72, 153, 0.15)'; color = '#f472b6'; border = 'rgba(236, 72, 153, 0.5)'; }
+    else if (offline)                { label = 'PLATINUM (OFFLINE)'; bg = 'rgba(251, 146, 60, 0.15)'; color = '#fb923c'; border = 'rgba(251, 146, 60, 0.5)'; }
+    else                             { label = 'PLATINUM'; bg = 'rgba(139, 92, 246, 0.15)'; color = '#a78bfa'; border = 'rgba(139, 92, 246, 0.5)'; }
+  } else {
+    if (source === 'admin-toggle')   { label = 'DEV FREE'; icon = '🔧'; bg = 'rgba(156, 163, 175, 0.15)'; color = '#9ca3af'; border = 'rgba(156, 163, 175, 0.5)'; }
+    else                             { label = 'FREE';     bg = 'rgba(156, 163, 175, 0.15)'; color = '#9ca3af'; border = 'rgba(156, 163, 175, 0.5)'; }
+  }
+
+  const graceDays = offline && graceRemainingMs != null
+    ? Math.max(0, Math.ceil(graceRemainingMs / (24 * 60 * 60 * 1000)))
+    : null;
+
+  return (
+    <span
+      style={{
+        fontSize: 9,
+        padding: '2px 8px',
+        borderRadius: 3,
+        fontWeight: 700,
+        letterSpacing: 0.5,
+        background: bg,
+        color,
+        border: `1px solid ${border}`,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+      }}
+      title={
+        source === 'admin'         ? 'Admin bypass — all Platinum features unlocked' :
+        source === 'admin-toggle'  ? 'Dev Access — tier override active for QA' :
+        source === 'beta'          ? 'Beta Platinum — free access while in the Cognito beta group' :
+        offline                    ? `Offline — using cached tier (grace: ${graceDays}d remaining)` :
+        source === 'stripe'        ? 'Platinum via Stripe subscription' :
+        'Current plan'
+      }
+    >
+      {icon && <span>{icon}</span>}
+      <span>{label}</span>
+      {graceDays != null && <span style={{ opacity: 0.7 }}>· {graceDays}d</span>}
+    </span>
+  );
+}
+
+// ─── Admin Dev Access: Free ⇄ Platinum tier toggle ────────
+//
+// Only rendered for admins. Clicking cycles through three states so admins
+// can return to "live" tier resolution (null → free → platinum → null).
+// The "LIVE" state means: no override, resolve tier from subscription as
+// a non-admin user would see it.
+function AdminTierToggle({ value, onChange }) {
+  const states = [
+    { key: null,        label: 'LIVE',     color: '#60a5fa', desc: 'Use real tier' },
+    { key: 'free',      label: 'FREE',     color: '#9ca3af', desc: 'Force free view' },
+    { key: 'platinum',  label: 'PLATINUM', color: '#a78bfa', desc: 'Force platinum view' },
+  ];
+  const currentIdx = states.findIndex((s) => s.key === value);
+  const current = states[currentIdx === -1 ? 0 : currentIdx];
+
+  const cycle = () => {
+    const next = states[(currentIdx + 1) % states.length];
+    onChange?.(next.key);
+  };
+
+  return (
+    <div
+      onClick={cycle}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '3px 10px',
+        fontSize: 9,
+        fontWeight: 700,
+        letterSpacing: 0.5,
+        borderRadius: 4,
+        cursor: 'pointer',
+        background: 'rgba(250, 204, 21, 0.08)',
+        color: current.color,
+        border: '1px solid rgba(250, 204, 21, 0.4)',
+        userSelect: 'none',
+      }}
+      title={`Dev Access (admin-only): ${current.desc}. Click to cycle.`}
+    >
+      <span style={{ color: '#fbbf24' }}>🔧 DEV</span>
+      <span style={{ opacity: 0.5 }}>|</span>
+      <span>{current.label}</span>
+    </div>
+  );
+}
+

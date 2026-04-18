@@ -3,7 +3,7 @@
  * Combines Creator Intelligence Engine with full OBS-style streaming platform
  */
 
-const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, desktopCapturer, session, screen, protocol, dialog, shell, clipboard } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, Notification, desktopCapturer, session, screen, protocol, dialog, shell, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -643,6 +643,256 @@ ipcMain.handle('aws:s3-backup', async () => {
   } catch (e) { console.error('S3 backup error:', e); return false; }
 });
 
+// ─── Auth + Subscription state ──────────────────────────
+//
+// `apexSession`        — persisted Hosted UI tokens + groups
+// `apexSubscription`   — last successful /check-subscription result (cached
+//                        for 3-day offline grace)
+// `expiryWarningLedger`— { `${periodEnd}:${hours}`: firedAt } so we don't
+//                        re-fire warnings on every tick
+// `adminTierToggle`    — 'free' | 'platinum' | null (session-only UI override)
+//
+let pendingAuthRequest = null; // { verifier, state, resolve, reject, timeout }
+let subscriptionInterval = null;
+let adminTierToggle = null; // not persisted — resets each launch
+
+const hostedUiAuth = require('../shared/hosted-ui-auth');
+const billingManager = require('../shared/billing-manager');
+const {
+  SUBSCRIPTION_CHECK_INTERVAL_MS,
+} = require('../shared/aws-config');
+
+// ─── Auth IPC handlers ──────────────────────────────────
+
+/**
+ * Kick off the Hosted UI flow. Opens Cognito's authorize URL in the
+ * system browser and waits for the custom-protocol callback to deliver
+ * an authorization code back to the running app instance.
+ *
+ * Resolves with { success, email, groups } once tokens are exchanged.
+ */
+ipcMain.handle('auth:hosted-ui-signin', async () => {
+  // Cancel any in-flight request (user clicked twice, etc.)
+  if (pendingAuthRequest) {
+    clearTimeout(pendingAuthRequest.timeout);
+    pendingAuthRequest.reject(new Error('cancelled'));
+    pendingAuthRequest = null;
+  }
+
+  const { verifier, challenge } = hostedUiAuth.generatePkcePair();
+  const state = require('crypto').randomBytes(16).toString('hex');
+  const url = hostedUiAuth.buildAuthorizeUrl(challenge, state);
+
+  // Open Cognito Hosted UI in the user's default browser
+  shell.openExternal(url);
+
+  // Wait up to 5 minutes for the deep-link callback
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      if (pendingAuthRequest) {
+        pendingAuthRequest = null;
+        resolve({ success: false, error: 'Sign-in timed out. Please try again.' });
+      }
+    }, 5 * 60 * 1000);
+
+    pendingAuthRequest = {
+      verifier,
+      state,
+      timeout,
+      resolve: (session) => {
+        clearTimeout(timeout);
+        pendingAuthRequest = null;
+        resolve({
+          success: true,
+          email:   session.email,
+          groups:  session.groups,
+          isAdmin: session.isAdmin,
+          isBeta:  session.isBeta,
+        });
+        // Kick off immediate subscription fetch now that we have a token
+        refreshSubscription().catch(() => {});
+      },
+      reject: (err) => {
+        clearTimeout(timeout);
+        pendingAuthRequest = null;
+        resolve({ success: false, error: err.message || 'Sign-in failed' });
+      },
+    };
+  });
+});
+
+ipcMain.handle('auth:get-session', async () => {
+  const sess = store.get('apexSession');
+  if (!sess) return null;
+
+  // Refresh if the ID token is close to expiring
+  if (hostedUiAuth.needsRefresh(sess)) {
+    try {
+      const refreshed = await hostedUiAuth.refreshTokens(sess.refreshToken);
+      store.set('apexSession', refreshed);
+      return {
+        email:   refreshed.email,
+        groups:  refreshed.groups,
+        isAdmin: refreshed.isAdmin,
+        isBeta:  refreshed.isBeta,
+      };
+    } catch (e) {
+      // Refresh failed — tokens invalid, clear the session
+      store.delete('apexSession');
+      return null;
+    }
+  }
+
+  if (!hostedUiAuth.isSessionValid(sess)) return null;
+  return {
+    email:   sess.email,
+    groups:  sess.groups  || [],
+    isAdmin: !!sess.isAdmin,
+    isBeta:  !!sess.isBeta,
+  };
+});
+
+ipcMain.handle('auth:sign-out', async () => {
+  store.delete('apexSession');
+  store.delete('apexSubscription');
+  store.delete('expiryWarningLedger');
+  adminTierToggle = null;
+  // Opening the Cognito logout URL clears the Hosted UI session cookie
+  try { await shell.openExternal(hostedUiAuth.buildLogoutUrl()); } catch {}
+  return true;
+});
+
+// Back-compat shims — older renderer code paths may still call these.
+// Both now proxy to the Hosted UI versions.
+ipcMain.handle('aws:get-session', async () => {
+  const sess = store.get('apexSession');
+  if (!sess || !hostedUiAuth.isSessionValid(sess)) return null;
+  return { email: sess.email };
+});
+ipcMain.handle('aws:sign-out', async () => {
+  store.delete('apexSession');
+  store.delete('apexSubscription');
+  store.delete('expiryWarningLedger');
+  adminTierToggle = null;
+  return true;
+});
+
+// ─── Subscription IPC handlers ──────────────────────────
+
+async function refreshSubscription() {
+  const sess = store.get('apexSession');
+  if (!sess?.idToken) return null;
+
+  // Ensure token is fresh before calling the API
+  let idToken = sess.idToken;
+  if (hostedUiAuth.needsRefresh(sess)) {
+    try {
+      const refreshed = await hostedUiAuth.refreshTokens(sess.refreshToken);
+      store.set('apexSession', refreshed);
+      idToken = refreshed.idToken;
+    } catch {
+      // Stale session — caller will handle via auth:get-session
+    }
+  }
+
+  const cached = store.get('apexSubscription') || null;
+  const sub = await billingManager.fetchSubscription(idToken, cached);
+
+  // Only persist successful checks — failed calls just return the cache
+  // enriched with offline/grace info; we don't want to overwrite cache
+  // with stale data on every offline tick.
+  if (!sub.offline) {
+    store.set('apexSubscription', {
+      plan:          sub.plan,
+      expiresAt:     sub.expiresAt,
+      billingSource: sub.billingSource,
+      groups:        sub.groups,
+      features:      sub.features,
+      featureMap:    sub.featureMap,
+      checkedAt:     sub.checkedAt,
+    });
+  }
+
+  // Fire expiry warnings (72h, 24h) if we've crossed into a window
+  const ledger = store.get('expiryWarningLedger') || {};
+  const { toFire, ledger: nextLedger } = billingManager.computeExpiryWarnings(sub, ledger);
+  if (toFire.length) {
+    store.set('expiryWarningLedger', nextLedger);
+    for (const warning of toFire) fireExpiryNotification(warning);
+  }
+
+  // Broadcast soft-expire so the renderer can show the re-subscribe banner
+  if (sub.softExpired) {
+    mainWindow?.webContents.send('subscription:soft-expired', {
+      plan:      sub.plan,
+      checkedAt: sub.checkedAt,
+    });
+  }
+
+  // Always push the latest tier to the renderer
+  mainWindow?.webContents.send('subscription:updated', sub);
+
+  return sub;
+}
+
+ipcMain.handle('subscription:get', async (_, { force } = {}) => {
+  if (force) return refreshSubscription();
+  const cached = store.get('apexSubscription') || null;
+  if (cached) return cached;
+  return refreshSubscription();
+});
+
+ipcMain.handle('subscription:refresh', () => refreshSubscription());
+
+// Admin Dev Access toggle — only takes effect if the signed-in user is
+// actually in the `admins` Cognito group. Session-only (resets on quit).
+ipcMain.handle('admin:set-tier-toggle', (_, tier) => {
+  const sess = store.get('apexSession');
+  if (!sess?.isAdmin) return { ok: false, error: 'not_admin' };
+  if (tier !== 'free' && tier !== 'platinum' && tier !== null) {
+    return { ok: false, error: 'invalid_tier' };
+  }
+  adminTierToggle = tier;
+  mainWindow?.webContents.send('admin:tier-toggle-changed', { tier });
+  return { ok: true, tier };
+});
+ipcMain.handle('admin:get-tier-toggle', () => adminTierToggle);
+
+// ─── Expiry notifications ───────────────────────────────
+function fireExpiryNotification({ hours, expiresAt }) {
+  try {
+    const title = hours >= 48
+      ? '⚡ Apex Revenue — Platinum expires in 3 days'
+      : '⚡ Apex Revenue — Platinum expires in 24 hours';
+    const body = hours >= 48
+      ? `Your Platinum subscription ends ${new Date(expiresAt).toLocaleString()}. Renew now to keep AI prompts, whale alerts, and cloud sync active.`
+      : `Last chance — Platinum expires in 24 hours. Without renewal, AI prompts and premium features will be disabled.`;
+
+    if (!Notification.isSupported()) {
+      // No native notifications — fall back to an in-app toast via IPC
+      mainWindow?.webContents.send('subscription:expiry-warning', { hours, expiresAt });
+      return;
+    }
+
+    const n = new Notification({
+      title, body,
+      icon: path.join(__dirname, '../assets/icons/icon.ico'),
+      urgency: hours <= 24 ? 'critical' : 'normal',
+    });
+    n.on('click', () => {
+      mainWindow?.show();
+      mainWindow?.focus();
+      shell.openExternal('https://apexrevenue.works/billing');
+    });
+    n.show();
+
+    // Also notify the renderer so the in-app banner updates immediately
+    mainWindow?.webContents.send('subscription:expiry-warning', { hours, expiresAt });
+  } catch (e) {
+    console.error('[expiry-notification]', e);
+  }
+}
+
 ipcMain.handle('aws:sign-in', async (_, email, password) => {
   const auth = require('../shared/auth');
   try {
@@ -650,18 +900,6 @@ ipcMain.handle('aws:sign-in', async (_, email, password) => {
     store.set('apexSession', session);
     return { success: true, email: session.claims?.email };
   } catch (e) { return { success: false, error: e.message || 'Sign in failed' }; }
-});
-
-ipcMain.handle('aws:get-session', () => {
-  const auth = require('../shared/auth');
-  const sess = store.get('apexSession');
-  if (!sess || !auth.isSessionValid(sess)) return null;
-  return { email: auth.getEmail(sess) };
-});
-
-ipcMain.handle('aws:sign-out', () => {
-  store.delete('apexSession');
-  return true;
 });
 
 // ─── AI Trigger Detection ───────────────────────────────
@@ -735,6 +973,105 @@ protocol.registerSchemesAsPrivileged([
     },
   },
 ]);
+
+// ─── Hosted UI deep-link: apexrevenue:// ────────────────
+//
+// Cognito redirects to `apexrevenue://auth/callback?code=...` after sign-in.
+// Register this app as the OS handler for the scheme so Chrome (or whatever
+// browser the user completed the Hosted UI flow in) can hand the URL back.
+//
+// We also need a single-instance lock: if the user clicks a magic link
+// while the app is already running, Electron would normally spawn a second
+// instance and the callback would land in the fresh process (with no
+// pending PKCE verifier). Acquiring the lock forces that second launch to
+// forward its argv (Windows/Linux) or `open-url` event (macOS) to the
+// running instance via the `second-instance` event.
+if (process.defaultApp) {
+  // During `npm start` we need to pass argv[1] so Electron knows which
+  // script to hand the deep-link to.
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('apexrevenue', process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient('apexrevenue');
+}
+
+function handleAuthCallbackUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return;
+  if (!rawUrl.startsWith('apexrevenue://')) return;
+
+  // Normalize: `apexrevenue://auth/callback?code=...&state=...`
+  let parsed;
+  try { parsed = new URL(rawUrl); }
+  catch { return; }
+
+  const host = parsed.hostname; // 'auth'
+  const segment = (parsed.pathname || '').replace(/^\//, '');
+
+  // Sign-out callback — just surface the event; state is already cleared
+  if (host === 'auth' && segment === 'signout') {
+    mainWindow?.webContents.send('auth:signed-out-remote');
+    return;
+  }
+
+  // Sign-in callback — exchange code for tokens
+  if (host === 'auth' && segment === 'callback') {
+    const code  = parsed.searchParams.get('code');
+    const state = parsed.searchParams.get('state');
+    const error = parsed.searchParams.get('error');
+
+    if (!pendingAuthRequest) {
+      // No request in flight — ignore (browser bookmarked the callback, etc.)
+      return;
+    }
+    if (error) {
+      pendingAuthRequest.reject(new Error(parsed.searchParams.get('error_description') || error));
+      return;
+    }
+    if (state !== pendingAuthRequest.state) {
+      pendingAuthRequest.reject(new Error('OAuth state mismatch'));
+      return;
+    }
+    if (!code) {
+      pendingAuthRequest.reject(new Error('No authorization code in callback'));
+      return;
+    }
+
+    hostedUiAuth.exchangeCodeForTokens(code, pendingAuthRequest.verifier)
+      .then((session) => {
+        store.set('apexSession', session);
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+        pendingAuthRequest.resolve(session);
+      })
+      .catch((err) => pendingAuthRequest.reject(err));
+  }
+}
+
+// Windows / Linux: second launch → forward argv to primary instance
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    // Find the deep-link argument (Windows appends it to argv)
+    const deepLink = argv.find((arg) => arg && arg.startsWith('apexrevenue://'));
+    if (deepLink) handleAuthCallbackUrl(deepLink);
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
+// macOS: system fires 'open-url' instead of re-launching
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleAuthCallbackUrl(url);
+});
 
 // ─── App Lifecycle ──────────────────────────────────────
 app.whenReady().then(async () => {
@@ -1020,6 +1357,27 @@ app.whenReady().then(async () => {
       console.warn('[CloudSync] bootstrap failed, continuing with local cache:', e.message);
     }
   })();
+
+  // ─── Subscription polling (tier + offline grace + expiry warnings) ──
+  // Kick off an immediate refresh so the renderer gets tier data as soon
+  // as it mounts, then poll hourly. The poller handles offline gracefully
+  // via the 3-day grace window in billing-manager.
+  (async () => {
+    try {
+      const sess = store.get('apexSession');
+      if (sess?.idToken && hostedUiAuth.isSessionValid(sess)) {
+        refreshSubscription().catch(() => {});
+      }
+    } catch (e) {
+      console.warn('[Subscription] initial refresh failed:', e.message);
+    }
+  })();
+
+  if (subscriptionInterval) clearInterval(subscriptionInterval);
+  subscriptionInterval = setInterval(() => {
+    const sess = store.get('apexSession');
+    if (sess?.idToken) refreshSubscription().catch(() => {});
+  }, SUBSCRIPTION_CHECK_INTERVAL_MS);
 
   // ─── Auto-Updater ────────────────────────────────────
   setupAutoUpdater();
@@ -1672,6 +2030,7 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   isQuitting = true;
   if (cwInterval) clearInterval(cwInterval);
+  if (subscriptionInterval) clearInterval(subscriptionInterval);
   streamEngine.cleanup();
 });
 

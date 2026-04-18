@@ -167,6 +167,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onBackupDone: (cb) => ipcRenderer.on('aws:backup-done', (_, data) => cb(data)),
   },
 
+  // ─── Auth (Cognito Hosted UI + PKCE) ─────────────────
+  auth: {
+    hostedUiSignIn: () => ipcRenderer.invoke('auth:hosted-ui-signin'),
+    signOut:        () => ipcRenderer.invoke('auth:sign-out'),
+    getSession:     () => ipcRenderer.invoke('auth:get-session'),
+    onSignedOutRemote: (cb) => ipcRenderer.on('auth:signed-out-remote', () => cb()),
+  },
+
+  // ─── Subscription / Billing ──────────────────────────
+  subscription: {
+    get:     (opts = {}) => ipcRenderer.invoke('subscription:get', opts),
+    refresh: () => ipcRenderer.invoke('subscription:refresh'),
+    onUpdated:        (cb) => ipcRenderer.on('subscription:updated',        (_, data) => cb(data)),
+    onSoftExpired:    (cb) => ipcRenderer.on('subscription:soft-expired',   (_, data) => cb(data)),
+    onExpiryWarning:  (cb) => ipcRenderer.on('subscription:expiry-warning', (_, data) => cb(data)),
+  },
+
+  // ─── Admin Dev Access (tier toggle) ──────────────────
+  admin: {
+    setTierToggle: (tier) => ipcRenderer.invoke('admin:set-tier-toggle', tier),
+    getTierToggle: () => ipcRenderer.invoke('admin:get-tier-toggle'),
+    onTierToggleChanged: (cb) => ipcRenderer.on('admin:tier-toggle-changed', (_, data) => cb(data)),
+  },
+
   // ─── Live Data ───────────────────────────────────────
   onLiveUpdate: (cb) => ipcRenderer.on('live-update', (_, data) => cb(data)),
 

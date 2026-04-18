@@ -102,6 +102,10 @@ export default function App() {
   const [streamStatus, setStreamStatus] = useState({ streaming: false, recording: false, virtualCam: false });
   const [platform, setPlatform] = useState(null);
   const [user, setUser] = useState(null);
+  const [subscription, setSubscription] = useState(null);  // { plan, billingSource, expiresAt, offline, softExpired, graceRemainingMs, ... }
+  const [adminTierToggle, setAdminTierToggle] = useState(null); // 'free' | 'platinum' | null
+  const [showSoftExpireBanner, setShowSoftExpireBanner] = useState(false);
+  const [expiryWarning, setExpiryWarning] = useState(null); // { hours, expiresAt } | null
   const [aiPrompt, setAiPrompt] = useState(null);
   const [showAuth, setShowAuth] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -153,9 +157,21 @@ export default function App() {
         }
       }
 
-      // Check auth
-      const session = await api.aws.getSession();
-      if (session) setUser(session);
+      // Check auth — Hosted UI session (falls back to legacy aws.getSession for back-compat)
+      const session = await (api.auth?.getSession ? api.auth.getSession() : api.aws.getSession());
+      if (session) {
+        setUser(session);
+        // Pull the cached subscription immediately — paints the tier badge without waiting for network
+        const sub = await api.subscription?.get?.({ force: false });
+        if (sub) setSubscription(sub);
+        // Then kick off a fresh check in the background
+        api.subscription?.refresh?.().then((fresh) => fresh && setSubscription(fresh)).catch(() => {});
+        // Hydrate admin toggle
+        if (session.isAdmin && api.admin?.getTierToggle) {
+          const t = await api.admin.getTierToggle();
+          setAdminTierToggle(t);
+        }
+      }
 
       // Get stream status
       const status = await api.stream.getStatus();
@@ -205,6 +221,20 @@ export default function App() {
     });
 
     api.updates.onStatus((status) => setUpdateStatus(status));
+
+    // ─── Subscription + admin-toggle events ─────────────
+    api.subscription?.onUpdated?.((sub) => {
+      setSubscription(sub);
+      if (sub.softExpired) setShowSoftExpireBanner(true);
+    });
+    api.subscription?.onSoftExpired?.(() => setShowSoftExpireBanner(true));
+    api.subscription?.onExpiryWarning?.((w) => setExpiryWarning(w));
+    api.admin?.onTierToggleChanged?.((d) => setAdminTierToggle(d.tier));
+    api.auth?.onSignedOutRemote?.(() => {
+      setUser(null);
+      setSubscription(null);
+      setAdminTierToggle(null);
+    });
   }, []);
 
   // Global keyboard shortcut: Ctrl+Shift+D (Cmd+Shift+D on macOS)
@@ -757,19 +787,46 @@ export default function App() {
   }, []);
 
   // ─── Auth ─────────────────────────────────────────────
-  const handleSignIn = useCallback(async (email, password) => {
-    const result = await api.aws.signIn(email, password);
-    if (result.success) {
-      setUser({ email: result.email });
+  // Hosted UI flow: the AuthModal triggers api.auth.hostedUiSignIn() itself;
+  // once it resolves, we just pull the session in and stash it in state.
+  const handleAuthStarted = useCallback(async () => {
+    const session = await api.auth.getSession();
+    if (session) {
+      setUser(session);
+      const sub = await api.subscription?.refresh?.();
+      if (sub) setSubscription(sub);
+      if (session.isAdmin) {
+        const t = await api.admin.getTierToggle();
+        setAdminTierToggle(t);
+      }
       setShowAuth(false);
     }
-    return result;
   }, []);
 
   const handleSignOut = useCallback(async () => {
-    await api.aws.signOut();
+    await api.auth.signOut();
     setUser(null);
+    setSubscription(null);
+    setAdminTierToggle(null);
+    setShowSoftExpireBanner(false);
+    setExpiryWarning(null);
   }, []);
+
+  const handleAdminToggleChange = useCallback(async (tier) => {
+    const res = await api.admin.setTierToggle(tier);
+    if (res?.ok) setAdminTierToggle(res.tier);
+  }, []);
+
+  // ─── Derived: effective plan ──────────────────────────
+  // Admin toggle wins, then subscription plan. Non-admins never see the toggle.
+  const effectivePlan =
+    (user?.isAdmin && (adminTierToggle === 'free' || adminTierToggle === 'platinum'))
+      ? adminTierToggle
+      : (subscription?.plan || 'free');
+  const effectiveBillingSource =
+    (user?.isAdmin && (adminTierToggle === 'free' || adminTierToggle === 'platinum'))
+      ? 'admin-toggle'
+      : (subscription?.billingSource || 'unknown');
 
   // ─── Derived State ────────────────────────────────────
   const activeScene = scenes.find((s) => s.id === activeSceneId) || scenes[0];
@@ -779,6 +836,83 @@ export default function App() {
     <div className="flex-col" style={{ width: '100%', height: '100%' }}>
       {/* Hidden audio player for Polly */}
       <audio ref={audioRef} style={{ display: 'none' }} />
+
+      {/* Soft-expire banner — appears when Platinum has lapsed and the 3-day
+          offline grace has expired, OR when the backend explicitly reports a
+          cancelled/ended subscription. Prompts re-subscription. */}
+      {user && showSoftExpireBanner && (
+        <div style={{
+          background: '#451a03', borderBottom: '1px solid #f97316',
+          padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 10,
+          fontSize: 11, color: '#fed7aa', flexShrink: 0,
+        }}>
+          <span style={{ fontSize: 14 }}>⚠️</span>
+          <span style={{ flex: 1 }}>
+            <strong style={{ color: '#fff' }}>Platinum access ended.</strong>{' '}
+            Your subscription has expired and the 3-day grace period has passed. Premium features are now disabled.
+          </span>
+          <button
+            onClick={() => window.open('https://apexrevenue.works/billing', '_blank')}
+            style={{
+              padding: '4px 12px', background: '#f97316', color: '#fff',
+              border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 600,
+            }}
+          >
+            Resubscribe
+          </button>
+          <button
+            onClick={() => setShowSoftExpireBanner(false)}
+            style={{
+              padding: '4px 10px', background: 'transparent', color: '#fed7aa',
+              border: '1px solid #f97316', borderRadius: 4, cursor: 'pointer', fontSize: 11,
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Expiry warning — fires at T-72h and T-24h before subscription end.
+          Different from soft-expire: this is pre-expiry, Platinum still active. */}
+      {user && expiryWarning && !showSoftExpireBanner && (
+        <div style={{
+          background: expiryWarning.hours <= 24 ? '#422006' : '#1e3a8a',
+          borderBottom: `1px solid ${expiryWarning.hours <= 24 ? '#f59e0b' : '#3b82f6'}`,
+          padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 10,
+          fontSize: 11, color: expiryWarning.hours <= 24 ? '#fde68a' : '#bfdbfe', flexShrink: 0,
+        }}>
+          <span style={{ fontSize: 14 }}>{expiryWarning.hours <= 24 ? '🔔' : '⏰'}</span>
+          <span style={{ flex: 1 }}>
+            <strong style={{ color: '#fff' }}>
+              Platinum expires in {expiryWarning.hours <= 24 ? '24 hours' : '3 days'}.
+            </strong>{' '}
+            Renew now to keep AI prompts, whale alerts, and cloud sync active past{' '}
+            {new Date(expiryWarning.expiresAt).toLocaleDateString()}.
+          </span>
+          <button
+            onClick={() => window.open('https://apexrevenue.works/billing', '_blank')}
+            style={{
+              padding: '4px 12px',
+              background: expiryWarning.hours <= 24 ? '#f59e0b' : '#3b82f6',
+              color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer',
+              fontSize: 11, fontWeight: 600,
+            }}
+          >
+            Manage Billing
+          </button>
+          <button
+            onClick={() => setExpiryWarning(null)}
+            style={{
+              padding: '4px 10px', background: 'transparent',
+              color: expiryWarning.hours <= 24 ? '#fde68a' : '#bfdbfe',
+              border: `1px solid ${expiryWarning.hours <= 24 ? '#f59e0b' : '#3b82f6'}`,
+              borderRadius: 4, cursor: 'pointer', fontSize: 11,
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* FFmpeg Install Banner */}
       {ffmpegStatus && !ffmpegStatus.installed && (
@@ -828,6 +962,12 @@ export default function App() {
         onSettingsClick={() => setShowSettings(true)}
         onSignOut={handleSignOut}
         onS3Backup={() => api.aws.s3Backup()}
+        effectivePlan={effectivePlan}
+        billingSource={effectiveBillingSource}
+        adminToggle={adminTierToggle}
+        onAdminToggleChange={handleAdminToggleChange}
+        subscriptionOffline={subscription?.offline}
+        graceRemainingMs={subscription?.graceRemainingMs}
       />
 
       {/* Main content area */}
@@ -888,7 +1028,7 @@ export default function App() {
 
       {/* Modals */}
       {showAuth && (
-        <AuthModal onSignIn={handleSignIn} onClose={() => setShowAuth(false)} />
+        <AuthModal onAuthStarted={handleAuthStarted} onClose={() => setShowAuth(false)} />
       )}
       {showSettings && (
         <SettingsModal onClose={() => setShowSettings(false)} />
