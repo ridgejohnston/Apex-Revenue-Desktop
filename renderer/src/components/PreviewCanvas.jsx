@@ -490,58 +490,6 @@ export default function PreviewCanvas({ scene, streamStatus, sourceStreams = {} 
         </div>
       )}
 
-      {/*
-        Preview-paused overlay. Streaming a webcam requires FFmpeg to
-        hold the DirectShow streaming pin exclusively — Windows doesn't
-        allow two processes to pull frames from the same camera at the
-        same time. The v3.3.19 release handshake stops the renderer's
-        getUserMedia handle before FFmpeg spawns so the outbound stream
-        actually gets video (previously: audio flowed but zero frames,
-        Chaturbate reset after 30s). Tradeoff: the in-app preview
-        canvas goes dark until Stop Stream restores the handle.
-
-        This overlay makes the dark canvas legible rather than looking
-        broken. Shown only when the scene has at least one webcam
-        source and we're actively streaming — screen/window/game
-        capture don't hit the exclusive-pin issue and render normally.
-      */}
-      {streamStatus.streaming && (() => {
-        const hasWebcam = (scene?.sources || []).some(
-          (s) => s.type === 'webcam' && s.visible
-        );
-        if (!hasWebcam) return null;
-        return (
-          <div
-            style={{
-              position: 'absolute',
-              top: '50%',
-              left: '50%',
-              transform: 'translate(-50%, -50%)',
-              padding: '20px 28px',
-              background: 'rgba(10, 10, 14, 0.85)',
-              border: '1px solid var(--live-red)',
-              borderRadius: 6,
-              zIndex: 11,
-              textAlign: 'center',
-              pointerEvents: 'none',
-              maxWidth: '80%',
-            }}
-          >
-            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--live-red)', letterSpacing: 1, marginBottom: 6 }}>
-              ● STREAMING LIVE
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--text-primary)', marginBottom: 4 }}>
-              Your webcam is going out to the destination
-            </div>
-            <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.4 }}>
-              Windows camera drivers only allow one process to read frames<br/>
-              at a time, so the in-app preview pauses while you're live.<br/>
-              Stop Stream to bring it back.
-            </div>
-          </div>
-        );
-      })()}
-
       <canvas
         ref={canvasRef}
         width={canvasSize.width}

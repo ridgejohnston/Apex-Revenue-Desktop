@@ -1099,6 +1099,243 @@ class StreamEngine extends EventEmitter {
     }
   }
 
+  // ─── Pipe-Input Streaming (renderer owns the camera) ─────
+  //
+  // Web-research architecture (Mux blog, Facebook Canvas-Streaming
+  // Example): instead of FFmpeg opening the DirectShow webcam pin
+  // exclusively, the RENDERER owns the camera via getUserMedia and
+  // feeds FFmpeg WebM chunks from MediaRecorder over stdin. This
+  // frees the renderer to show a live preview canvas (same stream
+  // that feeds the recorder) while streaming — zoom/pan/tilt
+  // transforms all work through canvas manipulation.
+  //
+  // FFmpeg args breakdown:
+  //   -f matroska -i pipe:0       video input from stdin (WebM/Matroska)
+  //   -f dshow -i audio=<mic>     audio input (separate mic device)
+  //   -map 0:v:0 -map 1:a:0       explicit mux: video from input 0,
+  //                               audio from input 1
+  //   -c:v <encoder>              re-encode video. Even if MediaRecorder
+  //                               emitted H.264, we re-encode to honor
+  //                               user-selected resolution/bitrate and
+  //                               guarantee consistent keyframe interval
+  //                               for RTMP servers that need it.
+  //   -c:a aac                    re-encode audio (FLV requires AAC)
+  //   -f flv <rtmp>               RTMP output
+  //
+  // The 'matroska' demuxer handles both pure WebM (VP8/VP9/Opus) and
+  // WebM-with-H264 variants Chromium emits. Using -f matroska rather
+  // than -f webm lets FFmpeg parse whatever MediaRecorder chose.
+  //
+  // No -re: we're reading from a live source that's already arriving
+  // at real-time pace. -re would add 1x delay and sawtooth the
+  // timestamps against RTMP's clock.
+  async startStreamFromPipe(settings) {
+    if (this.streamProcess) throw new Error('Stream already running');
+
+    // Reset diag for this attempt
+    this._routingDiag = [];
+    this._diag('route: pipe (MediaRecorder -> stdin -> FFmpeg)');
+
+    const resolvedPath = findFFmpegPath();
+    if (!resolvedPath) {
+      const err = new Error('FFmpeg is not installed. Open Settings -> Streaming and click "Install FFmpeg".');
+      err.code = 'FFMPEG_NOT_INSTALLED';
+      throw err;
+    }
+    this.ffmpegPath = resolvedPath;
+
+    const {
+      streamUrl, streamKey, videoBitrate,
+      audioBitrate, resolution, fps,
+    } = settings;
+
+    const encoder = this._detectH264Encoder(settings.videoEncoder);
+    if (settings.videoEncoder && encoder !== settings.videoEncoder) {
+      this.emit('encoder-auto-changed', {
+        requested: settings.videoEncoder,
+        resolved: encoder,
+        reason: `"${settings.videoEncoder}" is not usable on this machine. Falling back to "${encoder}".`,
+      });
+    }
+
+    const rtmpUrl = `${(streamUrl || '').replace(/\/$/, '')}/${streamKey || ''}`;
+    if (!streamUrl || !streamKey) {
+      const err = new Error('Stream URL and key are required.');
+      err.code = 'STREAM_CONFIG_MISSING';
+      throw err;
+    }
+
+    this._diag(`encoder: ${encoder}`);
+    this._diag(`bitrate: ${videoBitrate}k video / ${audioBitrate}k audio`);
+    this._diag(`resolution: ${resolution} @ ${fps} fps`);
+
+    // Audio input args — same sanitizer as the direct path. dshow for
+    // a real device, lavfi silence as fallback.
+    const audioInputArgs = this._audioInputArgs(settings);
+    const audioFromSeparateInput = audioInputArgs[0] === '-f' && audioInputArgs[1] === 'dshow';
+    this._diag(`audio source: ${audioFromSeparateInput ? 'dshow mic (input 1)' : 'silent lavfi'}`);
+
+    // Build full args array
+    const args = [
+      // Video input: matroska/webm from stdin
+      '-f', 'matroska',
+      '-i', 'pipe:0',
+
+      // Audio input (dshow device or anullsrc)
+      ...audioInputArgs,
+
+      // Explicit mapping: video from pipe (input 0), audio from input 1
+      '-map', '0:v:0',
+      '-map', '1:a:0',
+
+      // Video encode — re-use per-encoder args from the direct path
+      ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
+
+      // Audio encode
+      '-c:a', 'aac',
+      '-b:a', `${audioBitrate}k`,
+      '-ar', '44100',
+
+      // Output
+      '-f', 'flv',
+      '-flvflags', 'no_duration_filesize',
+      rtmpUrl,
+    ];
+
+    this._diag(`spawning ffmpeg with ${args.length} args`);
+    console.log('[StreamEngine] Spawning FFmpeg (pipe mode) with args:', args.map((a) =>
+      a.includes(streamKey || 'no-key') ? '<REDACTED>' : a
+    ).join(' '));
+
+    let stderrBuf = '';
+
+    this.streamProcess = spawn(this.ffmpegPath, args, {
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    this.streamProcess.stderr.on('data', (chunk) => {
+      stderrBuf += chunk.toString();
+      if (stderrBuf.length > 12000) stderrBuf = stderrBuf.slice(-8000);
+      this._parseProgressLine(chunk.toString());
+    });
+
+    // stdin errors (e.g. EPIPE when FFmpeg exits while we're still
+    // writing chunks) shouldn't crash the whole process. Log and
+    // swallow — the close handler will do the real cleanup.
+    this.streamProcess.stdin.on('error', (err) => {
+      if (err.code === 'EPIPE') {
+        // FFmpeg closed stdin. Normal at end of stream.
+        return;
+      }
+      console.warn('[StreamEngine] stdin error:', err.message);
+    });
+
+    this._uptimeStart = Date.now();
+    this._uptimeInterval = setInterval(() => {
+      this.status.streamUptime = Math.floor((Date.now() - this._uptimeStart) / 1000);
+      this.emit('status', { ...this.status });
+    }, 1000);
+
+    this.status.streaming = true;
+    this.status.errorReason = null;
+    this.status.errorLogPath = null;
+    this.emit('status', { ...this.status });
+
+    this.streamProcess.on('close', (code) => {
+      if (this._uptimeInterval) clearInterval(this._uptimeInterval);
+      this.status.streaming = false;
+      this.status.streamUptime = 0;
+
+      let errorReason = null;
+      let logPath = null;
+      if (code !== 0 && code !== null && stderrBuf) {
+        const lines = stderrBuf.split('\n').filter((l) => l.trim());
+        const errorLine = lines.reverse().find((l) =>
+          /error|failed|invalid|refused|not found|cannot|unable|no such/i.test(l)
+        );
+        errorReason = errorLine
+          ? errorLine.replace(/^\d{4}-\d{2}-\d{2}.*?error:/i, '').trim()
+          : `FFmpeg exited with code ${code}`;
+
+        const hint = this._diagnosticHint(stderrBuf);
+        if (hint) errorReason = `${errorReason}\n\n${hint}`;
+
+        logPath = this._writeStreamLog({
+          mode: 'stream-pipe',
+          args,
+          rtmpUrl,
+          streamKey: settings.streamKey,
+          exitCode: code,
+          stderr: stderrBuf,
+          errorLine,
+        });
+        if (logPath) errorReason = `${errorReason}\n\nFull log: ${logPath}`;
+
+        console.error('[StreamEngine] Pipe stream stopped unexpectedly:', errorReason);
+        console.error('[StreamEngine] Full stderr tail:\n', stderrBuf.slice(-2000));
+      }
+
+      this.status.errorReason = errorReason;
+      this.status.errorLogPath = logPath;
+      this.emit('status', { ...this.status });
+      this.streamProcess = null;
+      this._cleanupTempFiles();
+    });
+
+    this.streamProcess.on('error', (err) => {
+      console.error('[StreamEngine] Pipe spawn error:', err);
+      this.status.streaming = false;
+      this.status.errorReason = err.message;
+      this.emit('status', { ...this.status });
+      this.streamProcess = null;
+      this._cleanupTempFiles();
+    });
+
+    return true;
+  }
+
+  // Forward a video chunk from the renderer's MediaRecorder to FFmpeg's
+  // stdin. Called by the main-process IPC handler at ~4 Hz (every 250ms
+  // of MediaRecorder output). Returns false if the pipe is closed so
+  // the caller can stop sending.
+  writeChunk(buffer) {
+    if (!this.streamProcess || !this.streamProcess.stdin) return false;
+    if (this.streamProcess.stdin.destroyed) return false;
+    try {
+      return this.streamProcess.stdin.write(buffer);
+    } catch (err) {
+      // EPIPE / "write after end" land here. Logged by stdin error
+      // handler above; nothing more to do.
+      return false;
+    }
+  }
+
+  // Gracefully end the pipe stream. Closing stdin sends EOF to FFmpeg
+  // which flushes its buffers and writes the RTMP trailer before
+  // exiting — cleaner than SIGTERM. Followed by a 3s safety timeout
+  // in case FFmpeg hangs on the RTMP server's FIN-ACK.
+  stopStreamFromPipe() {
+    if (this.streamProcess) {
+      try {
+        if (this.streamProcess.stdin && !this.streamProcess.stdin.destroyed) {
+          this.streamProcess.stdin.end();
+        }
+      } catch (err) {
+        console.warn('[StreamEngine] stdin.end() failed:', err.message);
+      }
+      setTimeout(() => {
+        if (this.streamProcess) {
+          this.streamProcess.kill('SIGTERM');
+          this.streamProcess = null;
+        }
+      }, 3000);
+    }
+    this.status.streaming = false;
+    if (this._uptimeInterval) clearInterval(this._uptimeInterval);
+    this.emit('status', { ...this.status });
+  }
+
   stopStream() {
     if (this.streamProcess) {
       this.streamProcess.stdin.write('q');

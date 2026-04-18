@@ -463,45 +463,45 @@ ipcMain.handle('stream:start', async (_, config) => {
   await ensureFFmpegInstalled();
   const settings = { ...store.get('obsSettings'), ...config };
 
-  // DirectShow webcam pins are effectively exclusive. If the renderer is
-  // holding a getUserMedia handle on the same camera FFmpeg is about to
-  // open, FFmpeg will spawn successfully (the device enumerates and
-  // connects) but will never receive video frames — we saw exactly this
-  // on v3.3.18 with the HP TrueVision: stream ran 31 seconds producing
-  // audio only, zero video frames, then Chaturbate RTMP reset.
-  //
-  // Ask the renderer to release ALL webcam-type source streams BEFORE we
-  // spawn FFmpeg. FFmpeg becomes the authoritative consumer for the
-  // duration of the stream. When stream:stop fires we ask the renderer
-  // to re-acquire the handles so the preview canvas comes back.
-  //
-  // Best-effort with a 2s timeout — if the renderer doesn't respond
-  // we proceed anyway rather than blocking the user from streaming.
-  if (settings.videoSource === 'webcam' && mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      await Promise.race([
-        mainWindow.webContents.executeJavaScript('window.__apexReleaseWebcams && window.__apexReleaseWebcams()'),
-        new Promise((resolve) => setTimeout(resolve, 2000)),
-      ]);
-    } catch (err) {
-      console.warn('[main] Webcam release request failed (non-fatal):', err.message);
-    }
-  }
-
+  // Note: webcam streaming no longer routes through this handler.
+  // The renderer checks settings.videoSource and calls stream:start-pipe
+  // instead when the source is webcam, because DirectShow pins are
+  // exclusive and we need the renderer to keep the camera for preview.
+  // This handler still serves screen/media/image/URL/slideshow sources
+  // which don't have the exclusive-pin issue.
   return streamEngine.startStream(settings);
 });
+
+// Pipe-input streaming: renderer's MediaRecorder pipes WebM chunks to
+// FFmpeg stdin via IPC. Used for webcam sources so the renderer keeps
+// the DirectShow camera handle (and therefore the live preview). The
+// arrangement lets the user zoom/pan/tilt via canvas transforms while
+// streaming — the same stream feeds both the preview and the recorder.
+ipcMain.handle('stream:start-pipe', async (_, config) => {
+  await ensureFFmpegInstalled();
+  const settings = { ...store.get('obsSettings'), ...config };
+  return streamEngine.startStreamFromPipe(settings);
+});
+
+// High-frequency chunk handler — fired by MediaRecorder's
+// dataavailable event, ~4 Hz with a 250ms timeslice. Fire-and-forget
+// (ipcRenderer.send, not invoke) so the renderer doesn't block
+// waiting for an ack on every frame. Returning a value would force
+// an extra IPC roundtrip we don't need.
+ipcMain.on('stream:webm-chunk', (_, buffer) => {
+  if (!buffer || buffer.byteLength === 0) return;
+  // Buffer arrives as an ArrayBuffer/Uint8Array from the renderer.
+  // Node's stream.write wants a Buffer; wrap if needed.
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  streamEngine.writeChunk(buf);
+});
+
+ipcMain.handle('stream:stop-pipe', async () => {
+  return streamEngine.stopStreamFromPipe();
+});
+
 ipcMain.handle('stream:stop', async () => {
-  const result = await streamEngine.stopStream();
-  // Ask the renderer to re-acquire webcam streams so the preview canvas
-  // starts rendering again. Non-blocking — if this fails the user can
-  // toggle the source off/on to manually reactivate.
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.webContents.executeJavaScript('window.__apexRestoreWebcams && window.__apexRestoreWebcams()')
-        .catch(() => {});
-    } catch {}
-  }
-  return result;
+  return streamEngine.stopStream();
 });
 ipcMain.handle('stream:get-status', () => streamEngine.getStatus());
 
@@ -797,28 +797,13 @@ app.whenReady().then(async () => {
     });
   });
 
-  // Stream status updates
-  // Track streaming state so we can auto-restore the renderer's webcam
-  // preview when the stream ends for ANY reason — Stop Stream click,
-  // Chaturbate disconnect, FFmpeg process crash, network drop. The
-  // explicit restore in the stream:stop IPC only fires on user-initiated
-  // stops; without this listener, an unexpected stream death would leave
-  // the preview canvas dark even though FFmpeg has released the camera.
-  let wasStreaming = false;
+  // Stream status updates — forward to the renderer for the LIVE/FPS
+  // badges in the preview header. The v3.3.19-v3.3.20 webcam release
+  // handshake was removed in v3.3.24 because the pipe-streaming path
+  // keeps the camera in the renderer permanently (no more release/
+  // restore dance needed).
   streamEngine.on('status', (status) => {
     mainWindow?.webContents.send('stream:status', status);
-
-    const nowStreaming = !!status.streaming;
-    if (wasStreaming && !nowStreaming) {
-      // Streaming just ended — restore the renderer's webcam preview.
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        try {
-          mainWindow.webContents.executeJavaScript('window.__apexRestoreWebcams && window.__apexRestoreWebcams()')
-            .catch(() => {});
-        } catch {}
-      }
-    }
-    wasStreaming = nowStreaming;
   });
 
   // When the stream engine's runtime encoder probe discovers that the

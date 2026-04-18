@@ -264,76 +264,13 @@ export default function App() {
   const scenesRef = useRef([]);
   useEffect(() => { scenesRef.current = scenes; }, [scenes]);
 
-  // DirectShow webcam pins are effectively exclusive on Windows. If
-  // this renderer holds a getUserMedia handle on the same camera the
-  // FFmpeg streaming process is trying to open, FFmpeg will spawn
-  // without error but never receive video frames — we observed this
-  // on v3.3.18: the stream ran 31 seconds with audio but zero video
-  // before Chaturbate's RTMP server reset the connection.
-  //
-  // main.js invokes these via executeJavaScript at stream:start and
-  // stream:stop. Release stops and drops all webcam-type source
-  // tracks; restore re-invokes activateSource on every webcam source
-  // whose visible flag is true. Other source types (screen, audio)
-  // are left alone since they don't share device pins with FFmpeg.
-  //
-  // released[] tracks which source ids to restore, keyed by the
-  // source id so we don't accidentally reactivate sources that were
-  // toggled off or removed mid-stream.
-  const releasedWebcamsRef = useRef([]);
-  useEffect(() => {
-    window.__apexReleaseWebcams = () => {
-      const toRelease = [];
-      for (const scene of scenesRef.current) {
-        for (const source of scene.sources || []) {
-          if (source.type === 'webcam' && sourceStreamsRef.current[source.id]) {
-            toRelease.push(source.id);
-          }
-        }
-      }
-      releasedWebcamsRef.current = toRelease;
-      console.log(`[Apex] Releasing ${toRelease.length} webcam stream(s) for FFmpeg`);
-      for (const id of toRelease) {
-        const stream = sourceStreamsRef.current[id];
-        if (stream) {
-          stream.getTracks().forEach((t) => t.stop());
-          delete sourceStreamsRef.current[id];
-        }
-      }
-      if (toRelease.length) {
-        setSourceStreams((prev) => {
-          const next = { ...prev };
-          for (const id of toRelease) delete next[id];
-          return next;
-        });
-      }
-      return toRelease.length;
-    };
-
-    window.__apexRestoreWebcams = async () => {
-      const ids = releasedWebcamsRef.current;
-      releasedWebcamsRef.current = [];
-      console.log(`[Apex] Restoring ${ids.length} webcam stream(s)`);
-      for (const id of ids) {
-        // Find the source config in the current scene tree. Done
-        // lookup-style so we pick up any property edits that happened
-        // while the stream was running.
-        let found = null;
-        for (const scene of scenesRef.current) {
-          const s = (scene.sources || []).find((x) => x.id === id);
-          if (s) { found = s; break; }
-        }
-        if (found && found.visible) {
-          activateSource(found);
-        }
-      }
-    };
-
-    return () => {
-      delete window.__apexReleaseWebcams;
-      delete window.__apexRestoreWebcams;
-    };
-  }, [activateSource]);
+  // v3.3.24: the webcam release/restore handshake (v3.3.19) has been
+  // removed. It existed to free the DirectShow camera pin so FFmpeg's
+  // direct dshow input could grab frames — but that fight is now
+  // obsolete because webcam streaming goes through the MediaRecorder
+  // pipe path (handleStartStream below). The renderer owns the camera
+  // permanently, preview keeps rendering during a live stream, and
+  // FFmpeg reads WebM from stdin instead of dshow.
 
   const handleAddSource = useCallback(async (sourceConfig) => {
     if (!activeSceneId) return;
@@ -598,6 +535,34 @@ export default function App() {
     await api.sources.toggleLock(activeSceneId, sourceId);
   }, [activeSceneId]);
 
+  // Ref to the active MediaRecorder for webcam pipe-streaming. Held
+  // in a ref (not state) so stop handlers and cleanup effects can
+  // access it without stale closures.
+  const webcamRecorderRef = useRef(null);
+
+  // Pick the best MediaRecorder mime type the browser supports. H.264
+  // in a matroska container is ideal because the browser's hardware
+  // encoder produces it directly — FFmpeg can accept it without
+  // having to decode VP8/VP9 first. Chromium (and therefore Electron)
+  // has supported this since ~Chrome 52. Fallback chain covers older
+  // or non-accelerated builds.
+  const pickWebmMimeType = () => {
+    const candidates = [
+      'video/x-matroska;codecs=avc1',
+      'video/x-matroska;codecs=h264',
+      'video/webm;codecs=h264',
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm',
+    ];
+    for (const t of candidates) {
+      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) {
+        return t;
+      }
+    }
+    return 'video/webm'; // last-resort default
+  };
+
   // ─── Stream / Record ──────────────────────────────────
   const handleStartStream = useCallback(async () => {
     if (ffmpegStatus && !ffmpegStatus.installed) {
@@ -605,14 +570,104 @@ export default function App() {
       return;
     }
     try {
-      // Pass current obsSettings so stream-engine gets the config
       const settings = await api.store.get('obsSettings');
+
+      // WEBCAM: use the MediaRecorder pipe path so the renderer keeps
+      // the camera handle. Preview canvas keeps rendering during the
+      // stream, which lets the user zoom/pan/tilt via canvas
+      // transforms (the single camera consumer is the browser).
+      //
+      // Web research references:
+      //   • mux.com/blog/the-state-of-going-live-from-a-browser
+      //   • github.com/fbsamples/Canvas-Streaming-Example
+      // Both document the MediaRecorder → stdin → FFmpeg pattern
+      // used here.
+      if (settings.videoSource === 'webcam') {
+        // Find the active webcam source and its live MediaStream.
+        const scene = scenes.find((s) => s.id === activeSceneId);
+        const webcamSource = (scene?.sources || []).find(
+          (s) => s.type === 'webcam' && s.visible
+        );
+        if (!webcamSource) {
+          alert('No visible webcam source in the active scene. Add one from the Sources panel or toggle it on.');
+          return;
+        }
+        const stream = sourceStreamsRef.current[webcamSource.id];
+        if (!stream) {
+          alert('The webcam source has no active video stream yet. Wait a moment for the preview to load and try again.');
+          return;
+        }
+
+        // Ask main to spawn FFmpeg listening on stdin BEFORE we start
+        // the MediaRecorder. If we start the recorder first, the
+        // first chunk or two might arrive before FFmpeg is ready and
+        // get dropped — Matroska parsers are unforgiving about
+        // missing EBML headers.
+        await api.stream.startPipe(settings);
+
+        const mimeType = pickWebmMimeType();
+        console.log('[Apex] Starting webcam pipe-stream, mimeType:', mimeType);
+
+        const recorderOpts = {
+          mimeType,
+          videoBitsPerSecond: (settings.videoBitrate || 3500) * 1000,
+        };
+        if (settings.audioBitrate) {
+          recorderOpts.audioBitsPerSecond = settings.audioBitrate * 1000;
+        }
+
+        const recorder = new MediaRecorder(stream, recorderOpts);
+        recorder.ondataavailable = async (e) => {
+          if (!e.data || e.data.size === 0) return;
+          try {
+            const buf = await e.data.arrayBuffer();
+            // Electron structured clone supports ArrayBuffer over IPC.
+            // .send (fire-and-forget) instead of .invoke avoids an ACK
+            // roundtrip per chunk at ~4 Hz.
+            api.stream.sendWebmChunk(buf);
+          } catch (err) {
+            console.warn('[Apex] chunk send failed:', err.message);
+          }
+        };
+        recorder.onerror = (e) => {
+          console.error('[Apex] MediaRecorder error:', e.error?.message || e);
+        };
+        recorder.onstop = () => {
+          console.log('[Apex] MediaRecorder stopped');
+        };
+
+        // 250ms timeslice — ~4 chunks/sec. Low enough latency for
+        // live chat interaction, high enough that each chunk is a
+        // reasonable container unit (not thousands of 1ms fragments).
+        recorder.start(250);
+        webcamRecorderRef.current = recorder;
+        return;
+      }
+
+      // NON-WEBCAM sources: existing stream-engine path. Screen/window/
+      // game capture uses gdigrab. Media/image/URL/slideshow uses
+      // FFmpeg's built-in decoders. None of these have exclusive-pin
+      // contention with the renderer's preview.
       await api.stream.start(settings);
+    } catch (e) {
+      console.error('Stream start error:', e);
+      alert('Stream failed to start: ' + (e.message || e));
     }
-    catch (e) { console.error('Stream start error:', e); }
-  }, [ffmpegStatus]);
+  }, [ffmpegStatus, scenes, activeSceneId]);
 
   const handleStopStream = useCallback(async () => {
+    // If we're pipe-streaming a webcam, stop the recorder first so
+    // stdin receives a clean EOF after the last chunk flushes. Then
+    // tell main to end the FFmpeg process. Order matters: stopping
+    // FFmpeg first would leave the recorder trying to write to a
+    // closed pipe, spamming EPIPE errors.
+    const recorder = webcamRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      try { recorder.stop(); } catch {}
+      webcamRecorderRef.current = null;
+      await api.stream.stopPipe();
+      return;
+    }
     await api.stream.stop();
   }, []);
 

@@ -111,6 +111,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     stop: () => ipcRenderer.invoke('stream:stop'),
     getStatus: () => ipcRenderer.invoke('stream:get-status'),
     onStatus: (cb) => ipcRenderer.on('stream:status', (_, data) => cb(data)),
+    // Pipe-mode streaming (used for webcam sources). The renderer owns
+    // the camera via getUserMedia, captures WebM chunks with
+    // MediaRecorder, and sends them to FFmpeg over stdin via IPC.
+    // Keeps the camera available to the renderer for preview rendering.
+    startPipe: (config) => ipcRenderer.invoke('stream:start-pipe', config),
+    stopPipe: () => ipcRenderer.invoke('stream:stop-pipe'),
+    sendWebmChunk: (buffer) => ipcRenderer.send('stream:webm-chunk', buffer),
   },
 
   record: {
