@@ -1,0 +1,10 @@
+{
+  "name": "apex-sync-pull",
+  "version": "1.0.0",
+  "description": "Apex Revenue — pull cloud-synced performer data",
+  "main": "index.js",
+  "dependencies": {
+    "pg": "^8.11.3",
+    "@aws-sdk/client-secrets-manager": "^3.600.0"
+  }
+}

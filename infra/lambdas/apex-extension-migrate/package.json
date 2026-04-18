@@ -1,0 +1,10 @@
+{
+  "name": "apex-extension-migrate",
+  "version": "1.0.0",
+  "description": "Apex Revenue — bulk migration from Chrome extension to cloud-synced performer data",
+  "main": "index.js",
+  "dependencies": {
+    "pg": "^8.11.3",
+    "@aws-sdk/client-secrets-manager": "^3.600.0"
+  }
+}

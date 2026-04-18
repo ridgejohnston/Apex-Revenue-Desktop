@@ -16,6 +16,8 @@ const ffmpegInstaller = require('./ffmpeg-installer');
 const { autoUpdater } = require('electron-updater');
 const EarningsTracker = require('../shared/earnings-tracker');
 const { VERSION } = require('../shared/apex-config');
+const signalEngine = require('./signal-engine');
+const cloudSync = require('./cloud-sync');
 
 // ─── Persistent Store ──────────────────────────────────
 const store = new Store({
@@ -374,6 +376,11 @@ app.whenReady().then(async () => {
   createCamView();
   createTray();
 
+  // Phase 0: signal engine wires up IPC listeners ('cam:live-update',
+  // 'signal-engine:set-thresholds', etc.) and emits ranked prompts back to
+  // the renderer on 'signal-engine:update'.
+  signalEngine.attach(mainWindow);
+
   // Load scenes from store
   const savedScenes = store.get('scenes') || [];
   sceneManager.init(savedScenes, store.get('activeSceneId'));
@@ -405,6 +412,33 @@ app.whenReady().then(async () => {
   // Renderer will receive ffmpeg status via 'ffmpeg:check' IPC on load
 
   startHeartbeat();
+
+  // ─── Cloud Sync Bootstrap (Phase 0) ──────────────────
+  // If the performer is signed in, pull whales/prompts/preferences/thresholds
+  // from RDS and seed the signal engine. Safe to skip on first-run or when
+  // offline — the signal engine falls back to DEFAULT_THRESHOLDS and the push
+  // queue holds mutations until the next connection window.
+  (async () => {
+    try {
+      const auth = require('../shared/auth');
+      const sess = store.get('apexSession');
+      if (!sess || !auth.isSessionValid(sess)) return;
+
+      const cache = await cloudSync.pullAll(sess.idToken);
+      if (cache && cache.thresholds) signalEngine.thresholds = cache.thresholds;
+      if (cache && cache.history30d) signalEngine.thirtyDayHistory = cache.history30d;
+
+      // Flush the offline push queue every 60s while signed in.
+      setInterval(() => {
+        const s = store.get('apexSession');
+        if (s && auth.isSessionValid(s)) {
+          cloudSync.flushQueue(s.idToken).catch(() => {});
+        }
+      }, 60000);
+    } catch (e) {
+      console.warn('[CloudSync] bootstrap failed, continuing with local cache:', e.message);
+    }
+  })();
 
   // ─── Auto-Updater ────────────────────────────────────
   setupAutoUpdater();
