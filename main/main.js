@@ -682,6 +682,21 @@ ipcMain.on('updates:install', () => {
   isQuitting = true;
   isUpdating = true; // prevent window-all-closed from calling app.quit() prematurely
 
+  // Write an install log BEFORE we start tearing anything down. If anything
+  // below silently fails, this file is the only surviving evidence of what
+  // the update handler attempted — Ridge (or a future user) can inspect
+  // %APPDATA%/apex-revenue-desktop/logs/update-*.log after a failed update.
+  const logDir = path.join(app.getPath('userData'), 'logs');
+  const logPath = path.join(logDir, `update-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
+  const log = (line) => {
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${line}\n`);
+    } catch {}
+  };
+  log(`updates:install invoked. downloadedInstallerPath=${downloadedInstallerPath}`);
+  log(`pid=${process.pid} platform=${process.platform} app.getVersion=${app.getVersion()}`);
+
   // CRITICAL: app.exit(0) below is a hard exit that bypasses the 'before-quit'
   // event, which is where streamEngine.cleanup() normally kills any FFmpeg
   // child processes. If we don't kill them here explicitly, they survive as
@@ -691,14 +706,17 @@ ipcMain.on('updates:install', () => {
   try {
     if (cwInterval) clearInterval(cwInterval);
     streamEngine.cleanup();
+    log('cleanup: FFmpeg killed + cwInterval cleared');
     console.log('[Updater] Killed FFmpeg + cleared heartbeat before install');
   } catch (e) {
+    log(`cleanup ERROR: ${e.message}`);
     console.error('[Updater] Cleanup error (continuing):', e.message);
   }
 
   if (mainWindow) {
     mainWindow.removeAllListeners('close');
     mainWindow.destroy();
+    log('mainWindow destroyed');
   }
 
   // Give child processes ~500ms to actually die after SIGTERM. Without this
@@ -707,6 +725,7 @@ ipcMain.on('updates:install', () => {
   setTimeout(() => {
     try {
       const installerPath = downloadedInstallerPath;
+      log(`setTimeout fired. installerPath=${installerPath} exists=${installerPath && fs.existsSync(installerPath)}`);
 
       if (installerPath && fs.existsSync(installerPath)) {
         // Use PowerShell to wait for THIS process to fully exit before launching
@@ -714,16 +733,29 @@ ipcMain.on('updates:install', () => {
         // which means the installer starts while our process still has file locks —
         // causing "Failed to uninstall old application files." By waiting for the
         // PID to die first, the installer always finds files fully released.
+        //
+        // NOTE ON NSIS ARGS: our electron-builder config uses oneClick:false, which
+        // produces a full-wizard installer. Passing /S (silent) to that kind of
+        // installer causes it to abort immediately or run in undefined state —
+        // that's the bug behind "I clicked Restart & Update and nothing happened."
+        // With no silent flag, the installer shows its wizard UI (user sees it
+        // actually installing, and any errors surface as real dialogs). The
+        // installer's own NSIS manifest handles UAC elevation — no -Verb RunAs
+        // needed, which also avoids the UAC-prompt-hidden-behind-powershell
+        // edge case on some Windows configs.
         const pid = process.pid;
         const escaped = installerPath.replace(/'/g, "''");
         const psCmd = [
           `$proc = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
-          `if ($proc) { $proc.WaitForExit(15000) }`,
-          // Extra belt-and-suspenders: even if the main process exited, child
-          // ffmpeg.exe procs take a moment to fully release their handles on
-          // Windows. Wait for them too. Ignore errors if none exist.
-          `Get-Process ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*apex*' } | ForEach-Object { $_.WaitForExit(5000) }`,
-          `Start-Process '${escaped}' -ArgumentList '/S' -Verb RunAs`,
+          `if ($proc) { $proc.WaitForExit(8000) }`,
+          // Belt-and-suspenders: even if the main process exited, child
+          // ffmpeg.exe procs take a moment to fully release handles. Wait for
+          // any Apex-owned ffmpeg.exe instances. Ignore errors if none exist.
+          `Get-Process ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*apex*' } | ForEach-Object { $_.WaitForExit(3000) }`,
+          // Launch installer WITHOUT /S — wizard UI is visible so user sees
+          // progress, NSIS manifest self-elevates, runAfterFinish relaunches
+          // the app automatically.
+          `Start-Process '${escaped}'`,
         ].join('; ');
 
         spawn('powershell.exe', [
@@ -732,13 +764,16 @@ ipcMain.on('updates:install', () => {
           '-Command', psCmd,
         ], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 
+        log('PowerShell watcher spawned (detached). Invoking app.exit(0) now.');
         // Exit immediately — PowerShell watcher will launch installer once we're gone
         app.exit(0);
       } else {
+        log('Fallback: no cached installer path — calling autoUpdater.quitAndInstall(true, true)');
         // Fallback: no cached path — use electron-updater's built-in method
         autoUpdater.quitAndInstall(true, true);
       }
     } catch (err) {
+      log(`setTimeout ERROR: ${err.message}\n${err.stack || ''}`);
       console.error('[Updater] Install failed:', err);
       isUpdating = false;
       app.relaunch();
