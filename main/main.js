@@ -510,12 +510,29 @@ ipcMain.on('updates:install', () => {
   isQuitting = true;
   isUpdating = true; // prevent window-all-closed from calling app.quit() prematurely
 
+  // CRITICAL: app.exit(0) below is a hard exit that bypasses the 'before-quit'
+  // event, which is where streamEngine.cleanup() normally kills any FFmpeg
+  // child processes. If we don't kill them here explicitly, they survive as
+  // orphans, keep holding locks on resources\ffmpeg.exe, and NSIS fails with
+  // "Failed to uninstall old application files" during the uninstall phase.
+  // Also kill cwInterval so no stray heartbeats fire during shutdown.
+  try {
+    if (cwInterval) clearInterval(cwInterval);
+    streamEngine.cleanup();
+    console.log('[Updater] Killed FFmpeg + cleared heartbeat before install');
+  } catch (e) {
+    console.error('[Updater] Cleanup error (continuing):', e.message);
+  }
+
   if (mainWindow) {
     mainWindow.removeAllListeners('close');
     mainWindow.destroy();
   }
 
-  setImmediate(() => {
+  // Give child processes ~500ms to actually die after SIGTERM. Without this
+  // the PowerShell watcher may start polling while ffmpeg.exe is still
+  // half-alive and holding the file handle.
+  setTimeout(() => {
     try {
       const installerPath = downloadedInstallerPath;
 
@@ -530,6 +547,10 @@ ipcMain.on('updates:install', () => {
         const psCmd = [
           `$proc = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
           `if ($proc) { $proc.WaitForExit(15000) }`,
+          // Extra belt-and-suspenders: even if the main process exited, child
+          // ffmpeg.exe procs take a moment to fully release their handles on
+          // Windows. Wait for them too. Ignore errors if none exist.
+          `Get-Process ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*apex*' } | ForEach-Object { $_.WaitForExit(5000) }`,
           `Start-Process '${escaped}' -ArgumentList '/S' -Verb RunAs`,
         ].join('; ');
 
@@ -551,7 +572,7 @@ ipcMain.on('updates:install', () => {
       app.relaunch();
       app.exit(0);
     }
-  });
+  }, 500);
 });
 
 // ─── IPC: FFmpeg ─────────────────────────────────────────
