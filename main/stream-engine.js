@@ -425,36 +425,237 @@ class StreamEngine extends EventEmitter {
 
   async _videoInputArgs(settings, fps) {
     const source = settings.videoSource || 'screen';
+    this._diag(`videoSource: ${source}`);
+
+    switch (source) {
+      case 'webcam':
+        return this._buildWebcamInput(settings, fps);
+      case 'media':
+        return this._buildMediaFileInput(settings, fps);
+      case 'video_url':
+        return this._buildVideoUrlInput(settings, fps);
+      case 'image':
+        return this._buildImageFileInput(settings, fps);
+      case 'image_url':
+        return this._buildImageUrlInput(settings, fps);
+      case 'slideshow':
+        return this._buildSlideshowInput(settings, fps);
+      case 'screen':
+      default:
+        this._diag('→ SCREEN (gdigrab)');
+        console.log(`[StreamEngine] Video routing: videoSource=${source} -> SCREEN (gdigrab)`);
+        return [
+          '-f', 'gdigrab',
+          '-framerate', String(fps),
+          '-i', 'desktop',
+        ];
+    }
+  }
+
+  async _buildWebcamInput(settings, fps) {
     const webcamName = settings.webcamDevice;
     const webcamConfigured = webcamName && String(webcamName).trim() !== '';
-
-    this._diag(`videoSource: ${source}`);
     this._diag(`webcamDevice requested: ${webcamConfigured ? JSON.stringify(webcamName) : '(empty)'}`);
+    console.log(`[StreamEngine] Video routing: videoSource=webcam, webcamDevice=${webcamConfigured ? JSON.stringify(webcamName) : 'EMPTY'} -> ${webcamConfigured ? 'WEBCAM (dshow)' : 'SCREEN fallback'}`);
 
-    // Always log the routing decision. When the UI and stream disagree
-    // ("I clicked Webcam but it streamed my screen"), this line in the
-    // stream log pins down which branch we took and why.
-    console.log(`[StreamEngine] Video routing: videoSource=${source}, webcamDevice=${webcamConfigured ? JSON.stringify(webcamName) : 'EMPTY'} -> ${source === 'webcam' && webcamConfigured ? 'WEBCAM (dshow)' : 'SCREEN (gdigrab)'}`);
-
-    if (source === 'webcam' && webcamConfigured) {
-      const deviceName = await this._resolveDshowVideoName(webcamName);
-      this._diag(`final -i video=<arg>: ${JSON.stringify(deviceName)}`);
-      return [
-        '-f', 'dshow',
-        // Some webcams publish MJPEG at the highest FPS and YUY2 at a
-        // lower one. rtbufsize avoids 'real-time buffer too full' warnings
-        // for cameras that emit frames in bursts during autofocus hunt.
-        '-rtbufsize', '256M',
-        '-framerate', String(fps),
-        '-i', `video=${deviceName}`,
-      ];
+    if (!webcamConfigured) {
+      // Pre-flight in startStream already throws WEBCAM_DEVICE_MISSING
+      // before we get here, but defense-in-depth: fall back to screen
+      // rather than letting FFmpeg try to open a nameless dshow device.
+      this._diag('→ SCREEN (gdigrab fallback — webcam not configured)');
+      return ['-f', 'gdigrab', '-framerate', String(fps), '-i', 'desktop'];
     }
-    this._diag('→ SCREEN (gdigrab)');
+
+    const deviceName = await this._resolveDshowVideoName(webcamName);
+    this._diag(`final -i video=<arg>: ${JSON.stringify(deviceName)}`);
     return [
-      '-f', 'gdigrab',
+      '-f', 'dshow',
+      // Some webcams publish MJPEG at the highest FPS and YUY2 at a
+      // lower one. rtbufsize avoids 'real-time buffer too full' warnings
+      // for cameras that emit frames in bursts during autofocus hunt.
+      '-rtbufsize', '256M',
       '-framerate', String(fps),
-      '-i', 'desktop',
+      '-i', `video=${deviceName}`,
     ];
+  }
+
+  // Media source = a local video/audio file played back by FFmpeg.
+  // `-re` reads at native frame rate (otherwise FFmpeg would stream the
+  // whole file as fast as possible, burning through a 2-hour movie in
+  // ~30s). `-stream_loop -1` reloops indefinitely so a 3-minute clip
+  // doesn't end the stream after 3 minutes.
+  _buildMediaFileInput(settings, fps) {
+    const p = settings.mediaPath;
+    if (!p || !String(p).trim()) {
+      const err = new Error('Video File source is selected but no file path is configured. Open the Sources panel and edit the Video File source to set a path.');
+      err.code = 'MEDIA_PATH_MISSING';
+      throw err;
+    }
+    if (!fs.existsSync(p)) {
+      const err = new Error(`Video file not found: ${p}. Open the Sources panel and update the path, or re-add the source pointing to the current file location.`);
+      err.code = 'MEDIA_PATH_NOT_FOUND';
+      throw err;
+    }
+    this._diag(`media file path: ${JSON.stringify(p)}`);
+    this._diag(`→ MEDIA FILE (native-rate loop)`);
+    console.log(`[StreamEngine] Video routing: videoSource=media, path=${p}`);
+    return ['-re', '-stream_loop', '-1', '-i', p];
+  }
+
+  // Video URL = a remote video played back by FFmpeg. MP4, WebM, or HLS
+  // (.m3u8). FFmpeg's protocol handlers cover http(s), rtsp, rtmp, hls.
+  // No stream_loop on URLs — for HLS the server controls the loop, and
+  // for finite MP4 over http stream_loop is unreliable (FFmpeg would have
+  // to re-open the connection each loop which some CDNs treat as abuse).
+  _buildVideoUrlInput(settings, fps) {
+    const url = settings.videoUrl;
+    if (!url || !String(url).trim()) {
+      const err = new Error('Video URL source is selected but no URL is configured. Open the Sources panel and edit the Video URL source to set a URL.');
+      err.code = 'VIDEO_URL_MISSING';
+      throw err;
+    }
+    if (!/^https?:\/\//i.test(url) && !/^rtmps?:\/\//i.test(url)) {
+      const err = new Error(`Video URL must start with http://, https://, or rtmp(s)://. Got: ${url.slice(0, 60)}`);
+      err.code = 'VIDEO_URL_INVALID';
+      throw err;
+    }
+    this._diag(`video URL: ${JSON.stringify(url)}`);
+    this._diag(`→ VIDEO URL (native-rate remote)`);
+    console.log(`[StreamEngine] Video routing: videoSource=video_url, url=${url}`);
+    return ['-re', '-i', url];
+  }
+
+  // Image source = a local static image displayed as video. `-loop 1`
+  // keeps the single-frame decoder feeding the encoder forever. We set
+  // `-framerate` on the input so FFmpeg generates N copies per second
+  // of that one image, producing a valid CBR video stream. Without
+  // these flags the image would decode once and FFmpeg would exit.
+  _buildImageFileInput(settings, fps) {
+    const p = settings.imagePath;
+    if (!p || !String(p).trim()) {
+      const err = new Error('Image source is selected but no file path is configured. Open the Sources panel and edit the Image source to set a path.');
+      err.code = 'IMAGE_PATH_MISSING';
+      throw err;
+    }
+    if (!fs.existsSync(p)) {
+      const err = new Error(`Image file not found: ${p}. Open the Sources panel and update the path.`);
+      err.code = 'IMAGE_PATH_NOT_FOUND';
+      throw err;
+    }
+    this._diag(`image file path: ${JSON.stringify(p)}`);
+    this._diag(`→ IMAGE FILE (loop)`);
+    console.log(`[StreamEngine] Video routing: videoSource=image, path=${p}`);
+    return ['-loop', '1', '-framerate', String(fps), '-i', p];
+  }
+
+  // Image URL = remote static image. Same `-loop 1` semantics as local
+  // images. FFmpeg's image demuxer auto-detects format from magic bytes
+  // even over http, so we don't need to pre-declare -f image2.
+  _buildImageUrlInput(settings, fps) {
+    const url = settings.imageUrl;
+    if (!url || !String(url).trim()) {
+      const err = new Error('Image URL source is selected but no URL is configured.');
+      err.code = 'IMAGE_URL_MISSING';
+      throw err;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      const err = new Error(`Image URL must start with http:// or https://. Got: ${url.slice(0, 60)}`);
+      err.code = 'IMAGE_URL_INVALID';
+      throw err;
+    }
+    this._diag(`image URL: ${JSON.stringify(url)}`);
+    this._diag(`→ IMAGE URL (loop remote)`);
+    console.log(`[StreamEngine] Video routing: videoSource=image_url, url=${url}`);
+    return ['-loop', '1', '-framerate', String(fps), '-i', url];
+  }
+
+  // Slideshow = a folder of images rotated every N seconds. Implemented
+  // via FFmpeg's concat demuxer. We write a temporary playlist file
+  // listing each image with `duration` lines; `-stream_loop -1` cycles
+  // the playlist indefinitely so the slideshow doesn't end.
+  //
+  // The concat demuxer has a well-known quirk: the LAST entry's duration
+  // is ignored unless that entry is duplicated as a trailing `file` line
+  // (without a duration). We handle that below.
+  _buildSlideshowInput(settings, fps) {
+    const folder = settings.slideshowFolder;
+    const interval = Math.max(1, parseInt(settings.slideshowInterval || 5, 10));
+    if (!folder || !String(folder).trim()) {
+      const err = new Error('Slideshow source is selected but no folder path is configured.');
+      err.code = 'SLIDESHOW_FOLDER_MISSING';
+      throw err;
+    }
+    if (!fs.existsSync(folder)) {
+      const err = new Error(`Slideshow folder not found: ${folder}`);
+      err.code = 'SLIDESHOW_FOLDER_NOT_FOUND';
+      throw err;
+    }
+    const imageExts = /\.(png|jpg|jpeg|webp|gif|bmp)$/i;
+    const images = fs.readdirSync(folder)
+      .filter((name) => imageExts.test(name))
+      .sort()
+      .map((name) => path.join(folder, name));
+    if (images.length === 0) {
+      const err = new Error(`Slideshow folder has no images: ${folder}. Supported: PNG, JPG, WebP, GIF, BMP.`);
+      err.code = 'SLIDESHOW_FOLDER_EMPTY';
+      throw err;
+    }
+
+    // Write playlist to userData/tmp/slideshow-<timestamp>.txt. Using a
+    // timestamped name instead of a fixed one avoids collisions if the
+    // user restarts streaming quickly — a stale FFmpeg child might
+    // still hold the old file. The concat demuxer needs absolute paths
+    // in `file` directives when -safe 0 is set (it is, for Windows path
+    // compatibility).
+    const userData = app && typeof app.getPath === 'function' ? app.getPath('userData') : '.';
+    const tmpDir = path.join(userData, 'tmp');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const playlistPath = path.join(tmpDir, `slideshow-${Date.now()}.txt`);
+    const lines = [];
+    for (const img of images) {
+      // Escape single quotes for concat demuxer. FFmpeg concat uses
+      // single-quoted paths; an apostrophe in a filename would break
+      // parsing. Per concat demuxer docs: escape ' as '\''.
+      const escaped = img.replace(/'/g, `'\\''`);
+      lines.push(`file '${escaped}'`);
+      lines.push(`duration ${interval}`);
+    }
+    // Trailing duplicate of the last file. Without this the last image
+    // flashes by in ~40ms because concat ignores the final `duration`.
+    const last = images[images.length - 1].replace(/'/g, `'\\''`);
+    lines.push(`file '${last}'`);
+    fs.writeFileSync(playlistPath, lines.join('\n'), 'utf8');
+
+    // Stash for cleanup on stream end. _cleanupTempFiles called from
+    // the streamProcess 'close' handler below.
+    if (!this._tempFiles) this._tempFiles = [];
+    this._tempFiles.push(playlistPath);
+
+    this._diag(`slideshow folder: ${JSON.stringify(folder)}`);
+    this._diag(`slideshow image count: ${images.length} @ ${interval}s each`);
+    this._diag(`slideshow playlist: ${JSON.stringify(playlistPath)}`);
+    this._diag(`→ SLIDESHOW (concat + stream_loop)`);
+    console.log(`[StreamEngine] Video routing: videoSource=slideshow, folder=${folder}, images=${images.length}`);
+    return [
+      '-stream_loop', '-1',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', playlistPath,
+      // Framerate filter comes from -vf scale on the encode side; here
+      // we just need a sane input framerate for the concat demuxer.
+      '-framerate', '1',
+    ];
+  }
+
+  // Remove any temp files stashed during stream/record setup. Called
+  // from the process 'close' handler so files don't accumulate in
+  // userData/tmp across sessions.
+  _cleanupTempFiles() {
+    if (!this._tempFiles || this._tempFiles.length === 0) return;
+    for (const f of this._tempFiles) {
+      try { fs.unlinkSync(f); } catch {}
+    }
+    this._tempFiles = [];
   }
 
   // Push a diagnostic line to the per-stream routing diag. No-op if
@@ -759,6 +960,7 @@ class StreamEngine extends EventEmitter {
       this.status.errorLogPath = logPath;
       this.emit('status', { ...this.status });
       this.streamProcess = null;
+      this._cleanupTempFiles();
     });
 
     this.streamProcess.on('error', (err) => {
@@ -767,6 +969,7 @@ class StreamEngine extends EventEmitter {
       this.status.errorReason = err.message;
       this.emit('status', { ...this.status });
       this.streamProcess = null;
+      this._cleanupTempFiles();
     });
 
     this.emit('status', { ...this.status });

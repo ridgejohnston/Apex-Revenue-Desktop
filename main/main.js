@@ -3,7 +3,7 @@
  * Combines Creator Intelligence Engine with full OBS-style streaming platform
  */
 
-const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, desktopCapturer, session, screen } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, desktopCapturer, session, screen, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -200,6 +200,28 @@ ipcMain.handle('sources:get-desktop-stream-id', async (_, sourceId) => {
   const all = await desktopCapturer.getSources({ types: ['screen', 'window'] });
   const match = all.find((s) => s.id === sourceId);
   return match ? match.id : null;
+});
+
+// List image files in a folder for image_slideshow sources. Same file
+// extensions the stream engine's _buildSlideshowInput accepts; the two
+// enumerations must agree so the preview shows exactly what would be
+// included in a slideshow broadcast. Returns alphabetically sorted
+// absolute paths.
+ipcMain.handle('slideshow:list-images', async (_, folderPath) => {
+  try {
+    if (!folderPath || typeof folderPath !== 'string') return [];
+    if (!fs.existsSync(folderPath)) return [];
+    const stat = fs.statSync(folderPath);
+    if (!stat.isDirectory()) return [];
+    const imageExts = /\.(png|jpg|jpeg|webp|gif|bmp)$/i;
+    return fs.readdirSync(folderPath)
+      .filter((name) => imageExts.test(name))
+      .sort()
+      .map((name) => path.join(folderPath, name));
+  } catch (err) {
+    console.warn('[main] slideshow:list-images failed:', err.message);
+    return [];
+  }
 });
 
 // ─── Scene Management IPC ───────────────────────────────
@@ -578,8 +600,102 @@ function startHeartbeat() {
   }, CW_HEARTBEAT_INTERVAL_MS);
 }
 
+// Register the apex-file:// privileged scheme BEFORE app.whenReady().
+// This is how the renderer loads user-specified local files (images for
+// image sources, video files for media sources) without disabling
+// webSecurity. The flags:
+//   • standard: lets the scheme behave like http:// for security policy
+//   • secure:   treats responses as coming from a secure origin
+//   • stream:   supports range requests — required by <video> elements
+//               playing long files (seeking, chunked load)
+//   • bypassCSP: render-side Content-Security-Policy doesn't block it
+//   • supportFetchAPI: lets fetch() / Image()  work against the scheme
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'apex-file',
+    privileges: {
+      standard: true,
+      secure: true,
+      stream: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+    },
+  },
+]);
+
 // ─── App Lifecycle ──────────────────────────────────────
 app.whenReady().then(async () => {
+  // Wire the apex-file:// handler. Incoming URLs look like
+  //   apex-file:///C:/Users/Ridge/Pictures/banner.png
+  // which we parse into a native filesystem path via fileURLToPath.
+  // Serves the file back to the renderer with a best-guess Content-Type
+  // based on extension so <img>/<video> decode it correctly.
+  protocol.handle('apex-file', async (req) => {
+    try {
+      const url = new URL(req.url);
+      // pathname on Windows looks like '/C:/Users/...'; strip the leading
+      // slash to get a usable native path.
+      let filePath = decodeURIComponent(url.pathname);
+      if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(filePath)) {
+        filePath = filePath.slice(1);
+      }
+      if (!fs.existsSync(filePath)) {
+        return new Response('Not found', { status: 404 });
+      }
+      const ext = path.extname(filePath).toLowerCase();
+      const contentType = {
+        '.png':  'image/png',
+        '.jpg':  'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.webp': 'image/webp',
+        '.gif':  'image/gif',
+        '.bmp':  'image/bmp',
+        '.mp4':  'video/mp4',
+        '.webm': 'video/webm',
+        '.mov':  'video/quicktime',
+        '.mkv':  'video/x-matroska',
+        '.m4v':  'video/mp4',
+      }[ext] || 'application/octet-stream';
+
+      // Honor Range requests for <video> seeking. Without this, seeking
+      // a long video file would fail because Chromium expects partial
+      // responses and we'd be sending the whole file.
+      const stat = fs.statSync(filePath);
+      const range = req.headers.get('range');
+      if (range) {
+        const match = /bytes=(\d+)-(\d+)?/.exec(range);
+        if (match) {
+          const start = parseInt(match[1], 10);
+          const end = match[2] ? parseInt(match[2], 10) : stat.size - 1;
+          const chunkSize = end - start + 1;
+          const stream = fs.createReadStream(filePath, { start, end });
+          return new Response(stream, {
+            status: 206,
+            headers: {
+              'Content-Type': contentType,
+              'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': String(chunkSize),
+              'Cache-Control': 'no-cache',
+            },
+          });
+        }
+      }
+      const buffer = fs.readFileSync(filePath);
+      return new Response(buffer, {
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': String(stat.size),
+          'Accept-Ranges': 'bytes',
+          'Cache-Control': 'no-cache',
+        },
+      });
+    } catch (err) {
+      console.error('[main] apex-file handler error:', err.message);
+      return new Response('Internal error', { status: 500 });
+    }
+  });
+
   // Auto-approve media permissions (camera, mic, screen) in the renderer.
   // Without this, getUserMedia calls silently fail — the browser prompt
   // never appears in a frameless Electron window.

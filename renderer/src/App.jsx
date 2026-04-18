@@ -432,6 +432,10 @@ export default function App() {
   // would feed FFmpeg given a target visible-sources array. The engine
   // picks the first visible video source for its single FFmpeg input,
   // so the store must agree on which source that is.
+  //
+  // Keyed off the first-visible source's type. Each type contributes
+  // its own property fields (webcamDevice, mediaPath, videoUrl, etc.)
+  // that stream-engine.js reads in its per-type _build*Input methods.
   const computeStreamPatchFromSources = (sourcesAfterToggle) => {
     const firstVisibleVideo = sourcesAfterToggle.find(
       (s) => s.visible && getVideoCategory(s.type)
@@ -439,16 +443,42 @@ export default function App() {
     if (!firstVisibleVideo) {
       return { videoSource: 'screen' }; // safe default
     }
-    if (firstVisibleVideo.type === 'webcam') {
-      return {
-        videoSource: 'webcam',
-        webcamDevice:
-          firstVisibleVideo.properties?.deviceLabel ||
-          firstVisibleVideo.properties?.deviceName ||
-          '',
-      };
+    return buildPatchForSource(firstVisibleVideo);
+  };
+
+  // Pure function: given a scene source, return the obsSettings patch
+  // that configures the stream engine to feed from it. Factored out
+  // so handleToggleCategory and computeStreamPatchFromSources share
+  // one definition.
+  const buildPatchForSource = (source) => {
+    const p = source.properties || {};
+    switch (source.type) {
+      case 'webcam':
+        return {
+          videoSource: 'webcam',
+          webcamDevice: p.deviceLabel || p.deviceName || '',
+        };
+      case 'screen_capture':
+      case 'window_capture':
+      case 'game_capture':
+        return { videoSource: 'screen' };
+      case 'media':
+        return { videoSource: 'media', mediaPath: p.path || '' };
+      case 'video_url':
+        return { videoSource: 'video_url', videoUrl: p.url || '' };
+      case 'image':
+        return { videoSource: 'image', imagePath: p.path || '' };
+      case 'image_url':
+        return { videoSource: 'image_url', imageUrl: p.url || '' };
+      case 'image_slideshow':
+        return {
+          videoSource: 'slideshow',
+          slideshowFolder: p.folderPath || '',
+          slideshowInterval: parseInt(p.interval, 10) || 5,
+        };
+      default:
+        return { videoSource: 'screen' };
     }
-    return { videoSource: 'screen' };
   };
 
   const handleToggleSourceVisible = useCallback(async (sourceId) => {
@@ -558,16 +588,7 @@ export default function App() {
       // Stream from the first source in this category (list order).
       const first = inCategory[0];
       const current = (await api.store.get('obsSettings')) || {};
-      const patch =
-        first.type === 'webcam'
-          ? {
-              videoSource: 'webcam',
-              webcamDevice:
-                first.properties?.deviceLabel ||
-                first.properties?.deviceName ||
-                '',
-            }
-          : { videoSource: 'screen' };
+      const patch = buildPatchForSource(first);
       await api.store.set('obsSettings', { ...current, ...patch });
     }
   }, [activeSceneId, scenes]);

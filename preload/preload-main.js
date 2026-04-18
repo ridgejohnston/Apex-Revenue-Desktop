@@ -70,6 +70,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getDesktopStreamId: (sourceId) => ipcRenderer.invoke('sources:get-desktop-stream-id', sourceId),
   },
 
+  // ─── Slideshow folder enumeration ────────────────────
+  // Used by PreviewCanvas to list image files in a folder for
+  // image_slideshow sources. The stream engine has its own sync
+  // enumeration in _buildSlideshowInput; this IPC exists specifically
+  // to avoid the renderer needing fs access.
+  slideshow: {
+    listImages: (folderPath) => ipcRenderer.invoke('slideshow:list-images', folderPath),
+  },
+
   // ─── FFmpeg ───────────────────────────────────────────
   ffmpeg: {
     check: () => ipcRenderer.invoke('ffmpeg:check'),
