@@ -127,7 +127,7 @@ export default function AddSourceModal({ onAdd, onClose }) {
                     label="Camera Device"
                     devices={cameras}
                     value={properties.deviceId || ''}
-                    onChange={(val, label) => prop('deviceId', val) || prop('deviceLabel', label)}
+                    onChange={(val, label) => { prop('deviceId', val); prop('deviceLabel', label); }}
                     loading={devicesLoading}
                     emptyMsg="No cameras detected"
                   />

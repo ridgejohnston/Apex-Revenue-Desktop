@@ -325,15 +325,16 @@ class StreamEngine extends EventEmitter {
 
   async _videoInputArgs(settings, fps) {
     const source = settings.videoSource || 'screen';
-    if (source === 'webcam' && settings.webcamDevice && settings.webcamDevice.trim() !== '') {
-      // Escape colons in the device name. FFmpeg's dshow input parser
-      // treats ':' as the video/audio separator (format:
-      // video=<name>:audio=<name>), so device names containing colons —
-      // most commonly the USB vendor:product ID shown in parens like
-      // 'HP TrueVision HD Camera (04f2:b75e)' — get misparsed and
-      // trigger 'Malformed dshow input string'. Backslash-escape per
-      // FFmpeg dshow docs.
-      const deviceName = await this._resolveDshowVideoName(settings.webcamDevice);
+    const webcamName = settings.webcamDevice;
+    const webcamConfigured = webcamName && String(webcamName).trim() !== '';
+
+    // Always log the routing decision. When the UI and stream disagree
+    // ("I clicked Webcam but it streamed my screen"), this line in the
+    // stream log pins down which branch we took and why.
+    console.log(`[StreamEngine] Video routing: videoSource=${source}, webcamDevice=${webcamConfigured ? JSON.stringify(webcamName) : 'EMPTY'} -> ${source === 'webcam' && webcamConfigured ? 'WEBCAM (dshow)' : 'SCREEN (gdigrab)'}`);
+
+    if (source === 'webcam' && webcamConfigured) {
+      const deviceName = await this._resolveDshowVideoName(webcamName);
       return [
         '-f', 'dshow',
         // Some webcams publish MJPEG at the highest FPS and YUY2 at a
@@ -438,6 +439,27 @@ class StreamEngine extends EventEmitter {
       throw err;
     }
     this.ffmpegPath = resolvedPath; // refresh in case it was just installed this session
+
+    // v3.3.13: explicit guard against the silent screen-capture fallback.
+    // If the user intended to stream from a webcam (videoSource === 'webcam')
+    // but the stored device name is empty, we'd otherwise fall through to
+    // the gdigrab screen path in _videoInputArgs, producing a successful
+    // stream of the wrong content (user sees "screensharing when I
+    // designated the webcam"). Throw a loud error instead so the UI can
+    // show a toast explaining what's wrong.
+    if (settings.videoSource === 'webcam') {
+      const dev = settings.webcamDevice;
+      if (!dev || String(dev).trim() === '') {
+        const err = new Error(
+          'Webcam source is selected but no device name is configured. ' +
+          'Open the Sources panel on the left, edit the Webcam source ' +
+          '(or delete and re-add it), and pick a specific camera from ' +
+          'the dropdown. If the dropdown is empty, click Refresh.'
+        );
+        err.code = 'WEBCAM_DEVICE_MISSING';
+        throw err;
+      }
+    }
 
     const {
       streamUrl, streamKey, videoBitrate,
