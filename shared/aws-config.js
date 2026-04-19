@@ -43,7 +43,33 @@ module.exports = {
   S3_SESSIONS_BUCKET: 'apex-revenue-sessions-994438967527',
   S3_UPDATES_BUCKET: 'apex-revenue-app-994438967527',
 
-  // Bedrock
+  // ─── Bedrock model selection ────────────────────────────
+  // ALL four AI features (AI Coach, AI Filters/Auto-Beauty,
+  // AI Prompts, Research synthesis) run on Claude 3 Haiku —
+  // not Claude Haiku 4.5, Claude Sonnet, or any other model.
+  // Read this before changing BEDROCK_MODEL_ID.
+  //
+  // Unit economics (measured Apr 2026):
+  //
+  //                          Haiku 3        Haiku 4.5
+  //   AI Filters cost/mo     $16.24         $64.95    (4x)
+  //   AI Coach cost/mo       $5.75          $23.00    (4x)
+  //   Total COGS/mo/model    $29.07         $98.48    (3.4x)
+  //   Req. rev-share @30% margin  1.38%     4.69%     (3.4x)
+  //
+  //   At 5% Platinum / 7.5% Agency published rates:
+  //     Haiku 3:    82% / 85% margin — healthy
+  //     Haiku 4.5:  50% / 55% margin — acceptable but narrow
+  //
+  // Haiku 4.5 is 3-4x more expensive per token. For our use case
+  // (short tactical coaching responses + small-image vision +
+  // 1-2 sentence prompts) the quality delta doesn't justify the
+  // cost. Haiku 3 delivers the product's value proposition with
+  // ~2x the margin headroom.
+  //
+  // If at some point Haiku 4.5 becomes materially cheaper, or
+  // Haiku 3 gets deprecated on Bedrock, revisit this constant.
+  // Until then this is a policy decision, not a default.
   BEDROCK_MODEL_ID: 'anthropic.claude-3-haiku-20240307-v1:0',
   BEDROCK_MAX_TOKENS: 300,
 
