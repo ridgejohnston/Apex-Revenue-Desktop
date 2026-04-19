@@ -27,14 +27,21 @@
 // JavaScript is only pulled into the renderer when the user actually
 // turns on a background effect. On failure we swallow the error and
 // mark the segmenter unavailable.
-const MP_CDN_WASM =
-  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
-const MP_MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite';
+//
+// The WASM binaries and the .tflite model are NOT bundled with the app.
+// Users install them on demand via the Install button in the Filters
+// panel (see mediapipe-installer.js). By default we look for them at
+// the apex-mp:// protocol served from userData/mediapipe/assets/. If
+// the caller hasn't installed and still tries to start segmentation,
+// init() fails cleanly and the filter runs in no-bg mode.
+const DEFAULT_WASM_BASE = 'apex-mp://wasm/';
+const DEFAULT_MODEL_URL = 'apex-mp://models/selfie_segmenter.tflite';
 
 export class SelfieSegmenter {
-  constructor(videoEl) {
+  constructor(videoEl, options = {}) {
     this.video = videoEl;
+    this.wasmBase = options.wasmBase || DEFAULT_WASM_BASE;
+    this.modelPath = options.modelPath || DEFAULT_MODEL_URL;
     this.segmenter = null;
     this.ready = false;
     this._disposed = false;
@@ -57,10 +64,10 @@ export class SelfieSegmenter {
       const { ImageSegmenter, FilesetResolver } =
         await import('@mediapipe/tasks-vision');
 
-      const fileset = await FilesetResolver.forVisionTasks(MP_CDN_WASM);
+      const fileset = await FilesetResolver.forVisionTasks(this.wasmBase);
       this.segmenter = await ImageSegmenter.createFromOptions(fileset, {
         baseOptions: {
-          modelAssetPath: MP_MODEL_URL,
+          modelAssetPath: this.modelPath,
           delegate: 'GPU', // falls back to CPU automatically if unavailable
         },
         runningMode: 'VIDEO',

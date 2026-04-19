@@ -112,6 +112,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onInstalled: (cb) => ipcRenderer.on('ffmpeg:installed', (_, data) => cb(data)),
   },
 
+  // ─── MediaPipe: WASM + model installer ──────────────
+  // Bundled @mediapipe/tasks-vision ships with every app release (it's
+  // in package.json deps), but the ~5 MB WASM + segmentation model are
+  // fetched separately so users who never use background effects don't
+  // pay for them. The Install button in BeautyPanel drives this bridge.
+  mediapipe: {
+    status:      () => ipcRenderer.invoke('mediapipe:status'),
+    install:     () => ipcRenderer.invoke('mediapipe:install'),
+    uninstall:   () => ipcRenderer.invoke('mediapipe:uninstall'),
+    onProgress:  (cb) => {
+      const h = (_, data) => cb(data);
+      ipcRenderer.on('mediapipe:progress', h);
+      return () => ipcRenderer.removeListener('mediapipe:progress', h);
+    },
+  },
+
   // ─── Audio Mixer ─────────────────────────────────────
   audio: {
     getDevices: () => ipcRenderer.invoke('audio:get-devices'),

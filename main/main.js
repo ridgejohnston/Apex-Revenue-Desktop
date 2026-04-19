@@ -13,6 +13,7 @@ const streamEngine = require('./stream-engine');
 const sceneManager = require('./scene-manager');
 const audioMixer = require('./audio-mixer');
 const ffmpegInstaller = require('./ffmpeg-installer');
+const mediapipeInstaller = require('./mediapipe-installer');
 const autoconfig = require('./autoconfig');
 const errorLogger = require('./error-logger');
 const { autoUpdater } = require('electron-updater');
@@ -972,6 +973,19 @@ protocol.registerSchemesAsPrivileged([
       supportFetchAPI: true,
     },
   },
+  {
+    // apex-mp:// serves locally-installed MediaPipe WASM + model assets.
+    // Needs bypassCSP (WebAssembly.instantiateStreaming fetches the .wasm
+    // and must not be blocked by the renderer's CSP) and supportFetchAPI
+    // (MediaPipe's FilesetResolver uses fetch() under the hood).
+    scheme: 'apex-mp',
+    privileges: {
+      standard: true,
+      secure: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+    },
+  },
 ]);
 
 // ─── Hosted UI deep-link: apexrevenue:// ────────────────
@@ -1192,6 +1206,35 @@ app.whenReady().then(async () => {
     } catch (err) {
       console.error('[main] apex-file handler error:', err.message);
       return new Response('Internal error', { status: 500 });
+    }
+  });
+
+  // ─── MediaPipe installer: protocol + IPC ───
+  // Serves installed WASM + model files over apex-mp:// so MediaPipe's
+  // FilesetResolver can load them without network. The installer module
+  // owns all disk layout and lifecycle concerns — main.js just wires IPC.
+  try {
+    mediapipeInstaller.registerProtocol();
+    console.log('[main] apex-mp:// handler registered for MediaPipe assets');
+  } catch (err) {
+    console.error('[main] apex-mp:// registration failed:', err.message);
+  }
+
+  ipcMain.handle('mediapipe:status',    async () => mediapipeInstaller.getStatus());
+  ipcMain.handle('mediapipe:uninstall', async () => mediapipeInstaller.uninstall());
+  ipcMain.handle('mediapipe:install',   async (evt) => {
+    // Stream progress events back to the renderer that initiated the
+    // install. Using sender lets us scope to the right window even if
+    // other BrowserWindows exist.
+    const sender = evt.sender;
+    const onProgress = (p) => {
+      try { sender.send('mediapipe:progress', p); } catch {}
+    };
+    try {
+      const status = await mediapipeInstaller.install({ onProgress });
+      return { ok: true, status };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
     }
   });
 
