@@ -1068,14 +1068,11 @@ class StreamEngine extends EventEmitter {
       let errorReason = null;
       let logPath = null;
       if (code !== 0 && code !== null && stderrBuf) {
-        // Pull the last error line from FFmpeg stderr
-        const lines = stderrBuf.split('\n').filter(l => l.trim());
-        const errorLine = lines.reverse().find(l =>
-          /error|failed|invalid|refused|not found|cannot|unable|no such/i.test(l)
-        );
-        errorReason = errorLine
-          ? errorLine.replace(/^\d{4}-\d{2}-\d{2}.*?error:/i, '').trim()
-          : `FFmpeg exited with code ${code}`;
+        // Pull the most informative error line from FFmpeg stderr.
+        // The helper skips generic boilerplate like "Conversion failed!"
+        // and digs for the specific error that caused the run to fail.
+        const errorLine = this._extractErrorLine(stderrBuf);
+        errorReason = errorLine || `FFmpeg exited with code ${code}`;
 
         // Detect the specific "EINVAL masquerading as output error" pattern
         // and surface a more actionable hint to the renderer.
@@ -1132,6 +1129,67 @@ class StreamEngine extends EventEmitter {
 
     this.emit('status', { ...this.status });
     return true;
+  }
+
+  // Extract the most informative error line from FFmpeg stderr.
+  //
+  // The naive approach — "last line matching /error|failed/i" — picks up
+  // boilerplate summary lines like "Conversion failed!" or "Error while
+  // filtering" that FFmpeg prints on its way out. The ROOT cause is
+  // almost always a more specific line earlier in stderr:
+  //
+  //   [libx264 @ 0x...] Specified frame rate of 60.000 fps is not
+  //     representable in the video codec
+  //   Conversion failed!    <-- what the old extractor picked
+  //
+  // This helper does two passes:
+  //
+  //   Pass 1: find a specific, informative error line. Must match the
+  //           error regex AND NOT be one of the known generic fallbacks.
+  //   Pass 2: if nothing specific was found, fall back to any matching
+  //           line so we still return something.
+  //
+  // The result gets trimmed of FFmpeg's bracketed component prefix
+  // ([libx264 @ 0x1234]) since that's noise for the user.
+  _extractErrorLine(stderr) {
+    if (!stderr) return null;
+    const lines = stderr.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) return null;
+
+    // Lines that FFmpeg prints as summary boilerplate on its way out.
+    // They match the error regex but don't tell us why the run failed.
+    const GENERIC = [
+      /^conversion failed!?\s*$/i,
+      /^error while filtering/i,
+      /^error writing trailer/i,
+      /^error closing file/i,
+      /^exiting\.+\s*$/i,
+      /^received signal/i,
+    ];
+    const isGeneric = (line) => GENERIC.some((re) => re.test(line));
+
+    const matchesErrorRe = (l) =>
+      /error|failed|invalid|refused|not found|cannot|unable|no such/i.test(l);
+
+    // Pass 1: most recent SPECIFIC error line (not in the generic set)
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const l = lines[i];
+      if (matchesErrorRe(l) && !isGeneric(l)) return this._cleanErrorLine(l);
+    }
+    // Pass 2: fall back to most recent matching line (may be generic)
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const l = lines[i];
+      if (matchesErrorRe(l)) return this._cleanErrorLine(l);
+    }
+    return null;
+  }
+
+  _cleanErrorLine(line) {
+    // Strip leading timestamp like "2026-04-19T21:07:45 error:"
+    let out = line.replace(/^\d{4}-\d{2}-\d{2}.*?error:/i, '').trim();
+    // Strip FFmpeg component prefix like "[libx264 @ 0x55b8f3c2d1a0] "
+    out = out.replace(/^\[[^\]]+\]\s*/, '').trim();
+    return out;
   }
 
   // Inspects FFmpeg stderr for known root-cause signatures and returns a
@@ -1217,6 +1275,24 @@ class StreamEngine extends EventEmitter {
     }
     if (/invalid argument/i.test(stderr) && /output/i.test(stderr)) {
       return 'Hint: "Invalid argument" on output is often caused by an input or encoder setup failure. Check the full log for lines before this one to see which component failed to initialize.';
+    }
+    // Non-monotonic DTS / PTS from a pipe input. Usually MediaRecorder's
+    // matroska timestamps going backwards or jumping. v3.4.24+ adds
+    // -fflags +genpts+igndts on pipe inputs which should prevent this;
+    // if a user still hits it, they're probably on a build without
+    // those flags or a custom encoder setup is bypassing them.
+    if (/non[-\s]?monotonic (dts|pts)/i.test(stderr) ||
+        /timestamps are unset in a packet/i.test(stderr) ||
+        /dts < pts/i.test(stderr)) {
+      return 'Hint: the video input is producing out-of-order timestamps (common with browser MediaRecorder output). Try stopping and restarting the stream. If it persists, switch the video encoder in Settings > OBS to "OpenH264 (Software)" which is more tolerant of timestamp irregularities.';
+    }
+    // FFmpeg prints "Conversion failed!" as a last-ditch summary line
+    // when any transcoding step fails AND _extractErrorLine couldn't
+    // find a more informative line earlier in stderr. Typically means
+    // stderr was truncated or the real error went to stdout, not stderr.
+    if (/conversion failed/i.test(stderr) &&
+        !/error number|invalid argument/i.test(stderr)) {
+      return 'Hint: FFmpeg reported a transcoding failure without a specific cause. The full log at the path below contains the complete stderr — the actionable error is usually 10-30 lines above the "Conversion failed!" line. Most common cause on the webcam path is an encoder incompatibility; try switching to "OpenH264 (Software)" in Settings > OBS.';
     }
     return null;
   }
@@ -1393,6 +1469,36 @@ class StreamEngine extends EventEmitter {
     // Build full args array
     const args = [
       // Video input: matroska/webm from stdin
+      //
+      // Three input-hardening flags specific to the MediaRecorder->pipe
+      // path. None of these are needed in the direct-input path (webcam
+      // via dshow) because dshow produces well-formed, monotonic
+      // timestamps. MediaRecorder does not — the browser transcodes
+      // from the camera's native format to WebM on the fly, and the
+      // resulting container timestamps can have these quirks:
+      //
+      //   • Negative or NaN DTS on the first few packets (before the
+      //     encoder has established a baseline). FFmpeg's default
+      //     behavior is to abort transcode with 'non-monotonic DTS'
+      //     or 'Invalid timestamps' — shows up at the user as the
+      //     generic 'Conversion failed!' line with no hint.
+      //   • Gaps in PTS when the browser drops frames under CPU load.
+      //   • Queue overflow when MediaRecorder bursts 4 chunks in 1s
+      //     (the 250ms timeslice) against FFmpeg's default 8-frame
+      //     input queue.
+      //
+      // -fflags +genpts+igndts    Regenerate PTS, ignore DTS entirely.
+      //                           Fixes negative/NaN DTS from MediaRecorder.
+      // -use_wallclock_as_timestamps 1
+      //                           Fallback to wallclock time if container
+      //                           timestamps are broken. Belt-and-
+      //                           suspenders with +genpts.
+      // -thread_queue_size 1024   Raise input queue from 8 to 1024 frames
+      //                           so chunk bursts don't drop frames.
+      //                           Must appear BEFORE -i.
+      '-fflags', '+genpts+igndts',
+      '-use_wallclock_as_timestamps', '1',
+      '-thread_queue_size', '1024',
       '-f', 'matroska',
       '-i', 'pipe:0',
 
@@ -1495,13 +1601,11 @@ class StreamEngine extends EventEmitter {
       let errorReason = null;
       let logPath = null;
       if (code !== 0 && code !== null && stderrBuf) {
-        const lines = stderrBuf.split('\n').filter((l) => l.trim());
-        const errorLine = lines.reverse().find((l) =>
-          /error|failed|invalid|refused|not found|cannot|unable|no such/i.test(l)
-        );
-        errorReason = errorLine
-          ? errorLine.replace(/^\d{4}-\d{2}-\d{2}.*?error:/i, '').trim()
-          : `FFmpeg exited with code ${code}`;
+        // Same extractor used by the direct path. See _extractErrorLine
+        // for why a two-pass approach matters (boilerplate like
+        // "Conversion failed!" must not mask the specific root cause).
+        const errorLine = this._extractErrorLine(stderrBuf);
+        errorReason = errorLine || `FFmpeg exited with code ${code}`;
 
         const hint = this._diagnosticHint(stderrBuf);
         if (hint) errorReason = `${errorReason}\n\n${hint}`;
