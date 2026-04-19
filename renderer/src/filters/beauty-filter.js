@@ -243,15 +243,25 @@ export class BeautyFilter {
       aspect:      gl.getUniformLocation(this.progComposite, 'u_aspect'),
       bgMode:      gl.getUniformLocation(this.progComposite, 'u_bgMode'),
       bgColor:     gl.getUniformLocation(this.progComposite, 'u_bgColor'),
-      // u_bgGradSlots is declared as vec4[5] in the fragment shader. WebGL2
-      // exposes each array element as its own uniform location; we resolve
-      // them up front so the hot path just writes to the stored refs.
-      bgGradSlots: Array.from({ length: GRADIENT_SLOT_COUNT }, (_, i) =>
+      // u_bgGradSlots is declared as vec4[5] in the fragment shader. WebGL
+      // getUniformLocation with the base name (no '[0]' suffix) returns a
+      // single location usable with uniform4fv + a Float32Array(20) to
+      // update all 5 slots in one call. We keep a parallel array of
+      // per-element locations as a fallback in case the driver requires
+      // explicit '[i]' suffixes — some older headless-gl builds do.
+      bgGradSlots: gl.getUniformLocation(this.progComposite, 'u_bgGradSlots'),
+      bgGradSlotsIdx: Array.from({ length: GRADIENT_SLOT_COUNT }, (_, i) =>
         gl.getUniformLocation(this.progComposite, `u_bgGradSlots[${i}]`)
       ),
       bgGradStyle: gl.getUniformLocation(this.progComposite, 'u_bgGradStyle'),
       maskFeather: gl.getUniformLocation(this.progComposite, 'u_maskFeather'),
     };
+
+    // Scratch buffer for gradient slot uniforms. Reused every frame to
+    // avoid per-frame Float32Array allocation (which was ~20 bytes per
+    // frame × 30 fps = 600 bytes/sec of GC churn — small but free to
+    // eliminate). Filled by the hot path.
+    this._gradSlotsBuf = new Float32Array(4 * GRADIENT_SLOT_COUNT);
 
     // WebGL2's single-channel float textures (R32F) require the
     // EXT_color_buffer_float extension to be *written* to as an FBO
@@ -583,23 +593,69 @@ export class BeautyFilter {
     gl.uniform1i(this.locComposite.bgMode,     effectiveBgMode);
     const bgRgb = hexToRgb(c.bgColor ?? '#1a1a22');
     gl.uniform3f(this.locComposite.bgColor,    bgRgb[0], bgRgb[1], bgRgb[2]);
-    // Gradient slots A..E. Each packed as vec4(r, g, b, active) so a slot
-    // set to the 'none' sentinel writes {0,0,0,0} and sampleGradient()
-    // in the shader skips it. Writing zero colors for inactive slots
-    // makes them safe for any default-value fallback path in the shader
-    // (sampleGradient never reads them, but defensive hygiene doesn't
-    // hurt). Always written, even when bgMode !== 3 — the shader's
-    // branch makes them no-ops in other modes, cheaper than a JS if.
+    // Gradient slots A..E. Each packed as vec4(r, g, b, active) into a
+    // flat Float32Array(20); single uniform4fv call updates all 5 slots
+    // in one driver trip. A slot set to the 'none' sentinel writes
+    // (0,0,0,0) so sampleGradient() in the shader skips it. Always
+    // written, even when bgMode !== 3 — the shader's branch makes them
+    // no-ops in other modes, cheaper than a JS conditional.
+    const buf = this._gradSlotsBuf;
+    let anyActive = false;
     for (let i = 0; i < GRADIENT_SLOT_COUNT; i++) {
-      const key  = GRADIENT_SLOT_KEYS[i];
-      const val  = c[key];
+      const key = GRADIENT_SLOT_KEYS[i];
+      const val = c[key];
+      const base = i * 4;
       if (isGradientSlotActive(val)) {
         const [r, g, b] = hexToRgb(val);
-        gl.uniform4f(this.locComposite.bgGradSlots[i], r, g, b, 1.0);
+        buf[base]     = r;
+        buf[base + 1] = g;
+        buf[base + 2] = b;
+        buf[base + 3] = 1.0;
+        anyActive = true;
       } else {
-        gl.uniform4f(this.locComposite.bgGradSlots[i], 0.0, 0.0, 0.0, 0.0);
+        buf[base]     = 0;
+        buf[base + 1] = 0;
+        buf[base + 2] = 0;
+        buf[base + 3] = 0;
       }
     }
+    // Prefer the array-base location (single driver call); fall back to
+    // per-element writes if the driver only exposed explicit indices.
+    if (this.locComposite.bgGradSlots) {
+      gl.uniform4fv(this.locComposite.bgGradSlots, buf);
+    } else {
+      for (let i = 0; i < GRADIENT_SLOT_COUNT; i++) {
+        const loc = this.locComposite.bgGradSlotsIdx[i];
+        if (loc) {
+          const b = i * 4;
+          gl.uniform4f(loc, buf[b], buf[b + 1], buf[b + 2], buf[b + 3]);
+        }
+      }
+    }
+
+    // One-shot (per mode-entry) diagnostic: when the render loop enters
+    // gradient mode from a non-gradient mode, log the full slot state to
+    // DevTools. Lets us verify whether uniforms are reaching the shader
+    // or being optimized out. Only fires on the transition 0/1/2 → 3 so
+    // it doesn't spam the console; re-fires if the user switches modes.
+    if (effectiveBgMode === 3 && this._lastLoggedBgMode !== 3) {
+      this._lastLoggedBgMode = 3;
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[BeautyFilter] gradient mode diagnostic:', {
+          bgMode: effectiveBgMode,
+          slots: GRADIENT_SLOT_KEYS.map((k) => c[k]),
+          anyActive,
+          bgGradSlotsLoc: !!this.locComposite.bgGradSlots,
+          bgGradSlotsIdxNonNull: this.locComposite.bgGradSlotsIdx.filter(Boolean).length,
+          bgGradStyle: c.bgGradientStyle,
+          bufFirstTwoSlots: Array.from(buf.slice(0, 8)),
+        });
+      } catch {}
+    } else if (effectiveBgMode !== 3 && this._lastLoggedBgMode === 3) {
+      this._lastLoggedBgMode = effectiveBgMode;
+    }
+
     gl.uniform1i(this.locComposite.bgGradStyle, (c.bgGradientStyle ?? 0) | 0);
     gl.uniform1f(this.locComposite.maskFeather, this._resolveFeather());
     gl.drawArrays(gl.TRIANGLES, 0, 3);
