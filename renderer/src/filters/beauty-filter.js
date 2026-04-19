@@ -121,6 +121,24 @@ export class BeautyFilter {
       this._failSafe('setup', err);
     }
 
+    // ─── Diagnostic: one-shot state log on construction ───
+    // Prints exactly once per filter lifetime so we can see from the
+    // DevTools console what the filter started with. Invaluable when
+    // users report "background effects don't work" — tells us
+    // immediately whether the config flag reached the filter, whether
+    // passthrough is on, whether the initial config requested bg
+    // effects, and whether segmenter init was kicked off.
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[BeautyFilter] constructed:', {
+        enabled:            !!this.config.enabled,
+        bgMode:             this.config.bgMode ?? 0,
+        mediapipeInstalled: this.config.mediapipeInstalled === true,
+        passthrough:        this._passthrough,
+        autoBeauty:         !!this.config.autoBeauty,
+      });
+    } catch {}
+
     // If the initial config already has bg effects on AND MediaPipe is
     // already installed (user had bg on last session and already ran
     // the installer), start the segmenter immediately rather than
@@ -129,14 +147,39 @@ export class BeautyFilter {
     const wantsBg = (this.config.bgMode ?? 0) > 0;
     const installed = this.config.mediapipeInstalled === true;
     if (wantsBg && installed && !this._passthrough) {
-      this._segmenterInitStarted = true;
-      this._segmenter = new SelfieSegmenter(this.video);
-      // Worker-backed init can reject if the worker fails to spawn or
-      // MediaPipe fails to load. Errors are already logged inside the
-      // segmenter; here we only need to swallow the rejection so it
-      // doesn't surface as an unhandled promise warning.
-      this._segmenter.init().catch(() => {});
+      this._startSegmenter('ctor');
     }
+  }
+
+  /**
+   * Create + init the SelfieSegmenter with full diagnostic logging.
+   * Called from the constructor (if the initial config wants bg) and
+   * from update() (if the user enables bg mid-session). Idempotent —
+   * the init-started flag prevents double-construction.
+   */
+  _startSegmenter(whence) {
+    if (this._segmenterInitStarted || this._segmenter) return;
+    this._segmenterInitStarted = true;
+    // eslint-disable-next-line no-console
+    console.log('[BeautyFilter] starting segmenter init:', { whence });
+    try {
+      this._segmenter = new SelfieSegmenter(this.video);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[BeautyFilter] SelfieSegmenter ctor threw:', err?.message || err);
+      this._segmenter = null;
+      this._segmenterInitStarted = false;
+      return;
+    }
+    this._segmenter.init()
+      .then(() => {
+        // eslint-disable-next-line no-console
+        console.log('[BeautyFilter] segmenter READY');
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[BeautyFilter] segmenter init FAILED:', err?.message || err);
+      });
   }
 
   // ─── Public API ────────────────────────────────────────
@@ -166,6 +209,26 @@ export class BeautyFilter {
       this._autoBeauty.setEnabled(!!this.config.autoBeauty);
     }
 
+    // Diagnostic: log whenever bg-critical config fields change, so
+    // the console trace shows exactly what state the filter had when
+    // a background effect was requested.
+    if (partial && (
+      'bgMode' in partial ||
+      'mediapipeInstalled' in partial ||
+      'enabled' in partial
+    )) {
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[BeautyFilter] update:', {
+          partial,
+          resultingBgMode:    this.config.bgMode ?? 0,
+          resultingInstalled: this.config.mediapipeInstalled === true,
+          segmenterExists:    !!this._segmenter,
+          segmenterReady:     !!(this._segmenter && this._segmenter.ready),
+        });
+      } catch {}
+    }
+
     // Lazy-load the selfie segmenter the first time the user enables any
     // background effect AND the MediaPipe assets are locally installed.
     // If bg is requested but not installed, silently no-op here; the UI
@@ -175,12 +238,7 @@ export class BeautyFilter {
     const wantsSegmentation = (this.config.bgMode ?? 0) > 0;
     const installed = this.config.mediapipeInstalled === true;
     if (wantsSegmentation && installed && !this._segmenter && !this._segmenterInitStarted) {
-      this._segmenterInitStarted = true;
-      this._segmenter = new SelfieSegmenter(this.video);
-      // async; ready flag flips when worker loads MediaPipe. Rejection
-      // is already logged inside the segmenter — swallow here so it
-      // doesn't bubble to an unhandled promise warning.
-      this._segmenter.init().catch(() => {});
+      this._startSegmenter('update');
     }
   }
 
@@ -627,6 +685,25 @@ export class BeautyFilter {
     // shader will see bgMode=0 and skip the mask composite.
     const segReady = !!(this._segmenter && this._segmenter.ready);
     const effectiveBgMode = (bgModeActive && segReady) ? (this.config.bgMode | 0) : 0;
+
+    // Diagnostic: log every state transition in the (requestedBgMode,
+    // effectiveBgMode, segReady) triple so the console shows exactly
+    // when and why the shader chose to composite or skip. Only fires
+    // once per transition — render loop spam is worse than silence.
+    const stateKey = `${this.config.bgMode | 0}-${effectiveBgMode}-${segReady ? 1 : 0}`;
+    if (stateKey !== this._lastBgStateKey) {
+      this._lastBgStateKey = stateKey;
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[BeautyFilter] bg state:', {
+          requestedBgMode: this.config.bgMode | 0,
+          effectiveBgMode,
+          segReady,
+          segmenterExists: !!this._segmenter,
+          mediapipeInstalledFlag: this.config.mediapipeInstalled === true,
+        });
+      } catch {}
+    }
 
     this._bindCompositeTextures(effectiveBgMode);
 

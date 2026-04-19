@@ -73,7 +73,7 @@ export default function BeautyPanel({
             fontSize: 13, fontWeight: 700, color: 'var(--text, #f5f5f5)',
             letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6,
           }}>
-            Beauty & Filters
+            Filters
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-dim, #9ca3af)', lineHeight: 1.5, marginBottom: 14 }}>
             Real-time skin smoothing, color grading, virtual key light, and more — all applied directly to your camera feed. Viewers see the polished you, live.

@@ -48,7 +48,7 @@ export default function ControlsDock({
             style={{ borderRadius: 0, fontSize: 10, textTransform: 'uppercase' }}
             onClick={() => onTabChange(tab)}
           >
-            {tab === 'obs' ? '🎬 OBS' : tab === 'live' ? '📊 Live' : tab === 'fans' ? '👥 Fans' : tab === 'ai' ? '🤖 AI' : tab === 'coach' ? '💬 Coach' : tab === 'sync' ? '🔗 Sync' : '✨ Beauty'}
+            {tab === 'obs' ? '🎬 OBS' : tab === 'live' ? '📊 Live' : tab === 'fans' ? '👥 Fans' : tab === 'ai' ? '🤖 AI' : tab === 'coach' ? '💬 Coach' : tab === 'sync' ? '🔗 Sync' : '✨ Filters'}
           </button>
         ))}
         <div className="flex-1" />

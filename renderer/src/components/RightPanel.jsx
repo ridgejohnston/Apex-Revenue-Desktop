@@ -62,7 +62,7 @@ export default function RightPanel({
       {/* Panel Header */}
       <div className="section-header">
         <span>
-          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI Prompt Engine' : activeTab === 'coach' ? '💬 AI Coach' : activeTab === 'beauty' ? '✨ Beauty Filter' : '🔗 Toy Sync'}
+          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI Prompt Engine' : activeTab === 'coach' ? '💬 AI Coach' : activeTab === 'beauty' ? '✨ Filters' : '🔗 Toy Sync'}
         </span>
       </div>
 
