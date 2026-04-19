@@ -90,6 +90,16 @@ export class BeautyFilter {
     this._prewarmScheduled = false;
     this._frameTimer = null;
 
+    // Blur-stage working resolution. The bilateral and gaussian blur
+    // FBOs are allocated at HALF canvas resolution to cut GPU work
+    // ~4x on the most expensive shader stages. Set in _resizeTo().
+    // See _renderFrame's bilateral/gaussian passes for how this is
+    // used as the viewport while intermediate textures are written.
+    // The composite pass still runs at full canvas resolution so
+    // output quality stays pristine 1080p.
+    this._blurW = 0;
+    this._blurH = 0;
+
     // Auto-Beauty — AI-driven continuous tuning via Bedrock Claude
     // Haiku vision. Every AUTO_TICK_MS (15s) while enabled, samples
     // the RAW video into a JPEG, ships it to main via electronAPI,
@@ -535,16 +545,73 @@ export class BeautyFilter {
   }
 
   _resizeTo(w, h) {
+    // Always update _blurW/_blurH first — even when the canvas is
+    // already at (w, h) and we skip the expensive FBO reallocation,
+    // the blur dims still need to reflect current canvas size. This
+    // matters for the constructor's initial _resizeTo(canvasW, canvasH)
+    // call where canvas is already at the default size and the early
+    // return would otherwise leave _blurW=0, _blurH=0, causing the
+    // first render to hit a zero viewport and draw nothing.
+    const BLUR_DIVISOR = 2;
+    this._blurW = Math.max(1, Math.floor(w / BLUR_DIVISOR));
+    this._blurH = Math.max(1, Math.floor(h / BLUR_DIVISOR));
+
     if (this.canvas.width === w && this.canvas.height === h) return;
     this.canvas.width = w;
     this.canvas.height = h;
     const gl = this.gl;
-    // Re-allocate framebuffer textures at the new size. Both the
-    // bilateral-blur and gaussian-blur pipelines have their own H/V
-    // framebuffer pair so they never stomp each other.
+
+    // ── Blur framebuffer resolution decoupling ──
+    //
+    // The canvas and final composite run at FULL input resolution
+    // (e.g. 1920x1080) so preview and stream output stay sharp.
+    // The bilateral and gaussian blur INTERMEDIATE framebuffers run
+    // at HALF resolution — because the whole point of those passes
+    // is to destroy high-frequency detail. Blurring at 1080p then
+    // downsampling yields a visually identical result to blurring
+    // at 540p then letting the GPU's bilinear texture filter upscale
+    // during composite sampling. We're paying for 4x the fragment
+    // shader work at full-res for output that gets smoothed away.
+    //
+    // Math on a user's AMD iGPU where 1080p blur was GPU-bound at
+    // 13-15 fps:
+    //   Full-res blur:  2 passes × 9 taps × 2.07M px = 37M fetches
+    //   Half-res blur:  2 passes × 9 taps × 0.52M px =  9M fetches
+    //   Composite:                 4 tex × 2.07M px =  8M fetches
+    // Total: 45M -> 17M fetches/frame = ~2.65x speedup on GPU work.
+    // Projected render rate: 13 fps -> ~34 fps at 1080p.
+    //
+    // What the composite shader sees changes zero lines of its own
+    // code — it still samples texSmoothed and texBgBlurred with
+    // `texture(sampler, v_uv)`. The texture unit's built-in linear
+    // filtering handles the 2x upsample into 1080p output pixels.
+    // A bilateral blur already destroys the high-frequency detail
+    // that the 2x upsampling couldn't reconstruct, so no visible
+    // blocking or softness.
+    //
+    // Texel uniform note: the blur shaders use texel = 1/fullW, 1/fullH
+    // (NOT 1/halfW, 1/halfH) even though they write to half-res targets.
+    // This preserves the EFFECTIVE blur radius in source-pixel units.
+    // Each tap offsets by 1/fullW in UV space; when sampling texVideo
+    // (full res) that's 1 source pixel per tap — so a 9-tap kernel
+    // spans 9 source pixels. When the vertical pass samples texHoriz
+    // (half res) at UV step 1/fullH, that's 0.5 half-res pixels per
+    // tap; linear filtering interpolates cleanly, and 9 taps still
+    // cover 9 source-pixel equivalents of blur. Net: same visual blur
+    // strength as the full-res version. Do NOT change texel to
+    // 1/halfW — that would double the effective blur radius.
+    //
+    // If the user has a discrete GPU that handles 1080p blur easily,
+    // we could bump this back to 1.0 via a future "Prefer quality"
+    // setting. Default of 2 (half-res) is the right call for the
+    // integrated-graphics majority.
+
+    // Re-allocate framebuffer textures. Bilateral and gaussian blur
+    // textures use the half-res blur dimensions; only the canvas
+    // (default framebuffer) stays at full w×h.
     for (const t of [this.texHoriz, this.texSmoothed, this.texBgHoriz, this.texBgBlurred]) {
       gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this._blurW, this._blurH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbHoriz);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.texHoriz, 0);
@@ -775,9 +842,16 @@ export class BeautyFilter {
     const sigmaColor = mapSmoothness(this.config.smoothness);
     const texel      = [1.0 / W, 1.0 / H];
 
-    // ─── 2. Horizontal bilateral pass: texVideo → fbHoriz ───
+    // Blur-pass viewport = half resolution (see _resizeTo). The
+    // blur FBO textures were allocated at this._blurW × this._blurH
+    // and the viewport must match so we render to every pixel of the
+    // target. Composite pass below reverts viewport to full W×H.
+    const bw = this._blurW;
+    const bh = this._blurH;
+
+    // ─── 2. Horizontal bilateral pass: texVideo → fbHoriz (half-res) ───
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbHoriz);
-    gl.viewport(0, 0, W, H);
+    gl.viewport(0, 0, bw, bh);
     gl.useProgram(this.progBilateral);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texVideo);
@@ -787,9 +861,9 @@ export class BeautyFilter {
     gl.uniform1f(this.locBilateral.sigmaColor, sigmaColor);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // ─── 3. Vertical bilateral pass: texHoriz → fbSmoothed ───
+    // ─── 3. Vertical bilateral pass: texHoriz → fbSmoothed (half-res) ───
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbSmoothed);
-    gl.viewport(0, 0, W, H);
+    gl.viewport(0, 0, bw, bh);
     gl.bindTexture(gl.TEXTURE_2D, this.texHoriz);
     gl.uniform2f(this.locBilateral.direction,  0.0, 1.0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -798,12 +872,16 @@ export class BeautyFilter {
     // Gaussian runs on the ORIGINAL frame, not the beauty-processed one,
     // so the background stays visually "natural" rather than also being
     // smoothed/color-graded. Matches NVIDIA Broadcast's behavior.
+    // Also runs at half resolution for the same reason bilateral does —
+    // Gaussian blur is even MORE low-frequency-output by nature, so
+    // downsampling is essentially free in visual quality. This is exactly
+    // what AAA engines do for bloom blur pyramids.
     if (bgBlurActive) {
       const bgStrength = Math.max(0, Math.min(100, this.config.bgStrength ?? 60)) / 100;
 
-      // Horizontal: texVideo → fbBgHoriz
+      // Horizontal: texVideo → fbBgHoriz (half-res)
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbBgHoriz);
-      gl.viewport(0, 0, W, H);
+      gl.viewport(0, 0, bw, bh);
       gl.useProgram(this.progGaussian);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.texVideo);
@@ -813,15 +891,23 @@ export class BeautyFilter {
       gl.uniform1f(this.locGaussian.strength,  bgStrength);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-      // Vertical: fbBgHoriz → fbBgBlurred
+      // Vertical: fbBgHoriz → fbBgBlurred (half-res)
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbBgBlurred);
-      gl.viewport(0, 0, W, H);
+      gl.viewport(0, 0, bw, bh);
       gl.bindTexture(gl.TEXTURE_2D, this.texBgHoriz);
       gl.uniform2f(this.locGaussian.direction, 0.0, 1.0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
 
-    // ─── 4. Composite → screen ───
+    // ─── 4. Composite → screen (FULL resolution) ───
+    // Viewport returns to full canvas so the final output hits every
+    // output pixel. Composite samples texSmoothed and texBgBlurred
+    // (both half-res) with linear filtering — the GPU texture unit
+    // handles the bilinear upsample automatically, smoothly, and for
+    // free on a per-fragment basis. Meanwhile texVideo (full-res) is
+    // sampled at full resolution for all color grading operations,
+    // and the mask (full-res) is sampled at full resolution for
+    // pixel-perfect person/background edges.
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
     gl.useProgram(this.progComposite);

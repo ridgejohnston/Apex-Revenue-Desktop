@@ -380,38 +380,17 @@ export default function App() {
         // standard browser audio DSP flags — enable them so the mic
         // sounds reasonable without requiring the user to configure
         // anything.
-        // Request 720p (1280x720), not 1080p. This is a measured
-        // tradeoff: the user's runtime data (v3.4.34 errors.log +
-        // stream-pipe log) showed the BeautyFilter render loop
-        // stalling at 13-15 fps during active streaming at 1920x1080
-        // on the user's iGPU. At that rate Chaturbate kicks because
-        // it's below their ~15 fps ingest threshold.
-        //
-        // Why 720p fixes it: the bilateral blur shader samples ~9
-        // neighbors per pixel across two separable passes, then a
-        // composite pass samples 4 textures with math. Total texture
-        // fetches per frame scale linearly with pixel count:
-        //   1920x1080 = 2.07M px  → ~50M fetches/frame
-        //   1280x720  = 0.92M px  → ~22M fetches/frame
-        // That's a 2.25x GPU work reduction, moving us from 13 fps
-        // to a projected ~29 fps — clearing Chaturbate's threshold
-        // with real headroom.
-        //
-        // Quality impact: FFmpeg is already scaling to 1728x1080
-        // for output anyway (-vf scale=1728:1080), so this shifts
-        // the upscale from the raw camera -> GPU (wasted detail,
-        // we blur it anyway) to GPU -> CPU scaler (cheap, imperceptible
-        // on cam platforms at typical viewing sizes). Chaturbate,
-        // Stripchat, etc. generally re-encode incoming streams at
-        // 720p-900p on their CDN regardless of ingest resolution,
-        // so there is no real user-visible quality loss.
-        //
-        // TODO: when we revisit BeautyFilter perf for discrete-GPU
-        // users, make this a "Prefer quality (1080p)" setting with
-        // a warning about framerate impact on integrated graphics.
+        // Webcam capture resolution: 1080p. Do not sacrifice preview
+        // or output quality for framerate — when GPU throughput on
+        // integrated graphics can't sustain 1080p bilateral blur at
+        // 30 fps, the right fix is to reduce shader work for the
+        // blur PASSES (which produce intentionally-softened output
+        // anyway) rather than downsample the whole capture pipeline.
+        // See _resizeTo in beauty-filter.js for the half-res-blur
+        // framebuffer decoupling that preserves 1080p composite.
         const videoConstraints = properties.deviceId
-          ? { deviceId: { exact: properties.deviceId }, width: 1280, height: 720 }
-          : { width: 1280, height: 720 };
+          ? { deviceId: { exact: properties.deviceId }, width: 1920, height: 1080 }
+          : { width: 1920, height: 1080 };
         const audioConstraints = {
           echoCancellation: true,
           noiseSuppression: true,
