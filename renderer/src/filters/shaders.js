@@ -413,7 +413,35 @@ void main() {
     // boundary AWAY from solid-person confidence and INTO the low-end
     // transition zone, keeping edge pixels as "person" where they
     // belong — no more holes at the silhouette.
-    float raw = texture(u_mask, v_uv).r;
+    //
+    // MOTION TRACKING via MASK DILATION:
+    // MediaPipe inference runs ~40-60ms behind the current video frame,
+    // so when the subject moves fast the mask lags — the bg replacement
+    // shows trailing color behind the "old" silhouette. To make the bg
+    // appear to follow the subject twice as responsively, we dilate the
+    // person region by sampling a 4-point cross around the center pixel
+    // and taking the MAX confidence value. Where ANY neighbor reads as
+    // person, the center also reads as person. Effect: the silhouette
+    // boundary grows outward by the sample offset — so during motion,
+    // the new subject position already sits within the "expanded" mask
+    // from the stale inference result. The visible edge tracks the
+    // subject much closer than a pure per-pixel sample would.
+    //
+    // The offset is measured in UV space, computed from the actual mask
+    // texture dimensions via textureSize() so it works regardless of
+    // whether the mask is 256x144 or 384x216 (cheaper inference paths).
+    // 3 texels outward across a cross pattern is the sweet spot: large
+    // enough to cover typical streaming motion between inference
+    // frames, small enough that the person silhouette doesn't balloon
+    // noticeably on static frames.
+    vec2 maskTexel = 1.0 / vec2(textureSize(u_mask, 0));
+    vec2 dilate   = maskTexel * 3.0;
+    float m0 = texture(u_mask, v_uv).r;
+    float m1 = texture(u_mask, v_uv + vec2( dilate.x, 0.0)).r;
+    float m2 = texture(u_mask, v_uv + vec2(-dilate.x, 0.0)).r;
+    float m3 = texture(u_mask, v_uv + vec2(0.0,  dilate.y)).r;
+    float m4 = texture(u_mask, v_uv + vec2(0.0, -dilate.y)).r;
+    float raw = max(m0, max(max(m1, m2), max(m3, m4)));
     float f   = max(u_maskFeather, 0.01);
     float center = 0.38;
     float personW = smoothstep(center - f, center + f, raw);
