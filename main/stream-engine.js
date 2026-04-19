@@ -1402,15 +1402,16 @@ class StreamEngine extends EventEmitter {
     if (/invalid argument/i.test(stderr) && /output/i.test(stderr)) {
       return 'Hint: "Invalid argument" on output almost always means the Stream URL or Stream Key has a formatting problem (trailing whitespace, wrong protocol, fields swapped, or corrupted paste). Open Settings > Streaming, verify the URL starts with rtmp:// and the Key has no spaces, then retry. If they look right, click the platform preset button (Chaturbate, Stripchat, etc.) to reset the URL cleanly.';
     }
-    // Non-monotonic DTS / PTS from a pipe input. Usually MediaRecorder's
-    // matroska timestamps going backwards or jumping. v3.4.24+ adds
-    // -fflags +genpts+igndts on pipe inputs which should prevent this;
-    // if a user still hits it, they're probably on a build without
-    // those flags or a custom encoder setup is bypassing them.
+    // Non-monotonic DTS / PTS from a pipe input. v3.4.31 added
+    // -af aresample=async=1 which compensates for MediaRecorder's
+    // burst-mode audio delivery, so this hint should rarely fire on
+    // up-to-date installs. It remains as a fallback for edge cases
+    // (custom encoder configs that bypass the resampler, unusual
+    // input sources).
     if (/non[-\s]?monotonic (dts|pts)/i.test(stderr) ||
         /timestamps are unset in a packet/i.test(stderr) ||
         /dts < pts/i.test(stderr)) {
-      return 'Hint: the video input is producing out-of-order timestamps (common with browser MediaRecorder output). Try stopping and restarting the stream. If it persists, switch the video encoder in Settings > OBS to "OpenH264 (Software)" which is more tolerant of timestamp irregularities.';
+      return 'Hint: the stream has out-of-order timestamps, which cam platforms reject. v3.4.31+ normally handles this automatically via an audio resampler. If you keep hitting this, try switching the video encoder in Settings > OBS to "OpenH264 (Software)" which is more tolerant of timestamp irregularities, or restart the stream (MediaRecorder sometimes produces cleaner timestamps on the second attempt).';
     }
     // FFmpeg prints "Conversion failed!" as a last-ditch summary line
     // when any transcoding step fails AND _extractErrorLine couldn't
@@ -1642,34 +1643,44 @@ class StreamEngine extends EventEmitter {
     const args = [
       // Video input: matroska/webm from stdin
       //
-      // Three input-hardening flags specific to the MediaRecorder->pipe
-      // path. None of these are needed in the direct-input path (webcam
-      // via dshow) because dshow produces well-formed, monotonic
-      // timestamps. MediaRecorder does not — the browser transcodes
-      // from the camera's native format to WebM on the fly, and the
-      // resulting container timestamps can have these quirks:
+      // Two input-hardening flags specific to the MediaRecorder->pipe
+      // path. Not needed in the direct-input path (webcam via dshow)
+      // because dshow produces well-formed, monotonic timestamps.
+      // MediaRecorder does not — the browser transcodes from the
+      // camera's native format to WebM on the fly, and the resulting
+      // container timestamps can have these quirks:
       //
       //   • Negative or NaN DTS on the first few packets (before the
-      //     encoder has established a baseline). FFmpeg's default
-      //     behavior is to abort transcode with 'non-monotonic DTS'
-      //     or 'Invalid timestamps' — shows up at the user as the
-      //     generic 'Conversion failed!' line with no hint.
-      //   • Gaps in PTS when the browser drops frames under CPU load.
+      //     encoder has established a baseline). -fflags +igndts
+      //     ignores the broken DTS entirely, +genpts regenerates PTS
+      //     from duration + timebase — together they let FFmpeg accept
+      //     the stream without aborting on 'Invalid timestamps'.
       //   • Queue overflow when MediaRecorder bursts 4 chunks in 1s
       //     (the 250ms timeslice) against FFmpeg's default 8-frame
-      //     input queue.
+      //     input queue — -thread_queue_size 1024 handles that.
+      //
+      // NOT using -use_wallclock_as_timestamps 1 anymore (removed in
+      // v3.4.31). That flag replaces ALL container timestamps with the
+      // wallclock time at packet arrival. For video-only pipes that's
+      // fine. For audio+video pipes (the v3.4.29+ default where the
+      // webcam carries its own mic), it actively BREAKS audio sync:
+      // MediaRecorder delivers a burst of audio packets in a single
+      // chunk, they all get near-identical wallclock timestamps, and
+      // their DTS can end up non-monotonic. The v3.4.30 stream-pipe
+      // log showed hundreds of 'Non-monotonic DTS' warnings on the AAC
+      // output followed by an eventual -10053 kick from Chaturbate's
+      // RTMP validator. Dropping the wallclock flag lets +genpts+igndts
+      // do timestamp cleanup without stomping on the legitimate audio
+      // timing that the matroska container already carries.
       //
       // -fflags +genpts+igndts    Regenerate PTS, ignore DTS entirely.
-      //                           Fixes negative/NaN DTS from MediaRecorder.
-      // -use_wallclock_as_timestamps 1
-      //                           Fallback to wallclock time if container
-      //                           timestamps are broken. Belt-and-
-      //                           suspenders with +genpts.
-      // -thread_queue_size 1024   Raise input queue from 8 to 1024 frames
-      //                           so chunk bursts don't drop frames.
-      //                           Must appear BEFORE -i.
+      //                           Handles bad initial DTS from
+      //                           MediaRecorder without the side
+      //                           effects wallclock had on audio.
+      // -thread_queue_size 1024   Raise input queue from 8 to 1024
+      //                           frames so chunk bursts don't drop
+      //                           frames. Must appear BEFORE -i.
       '-fflags', '+genpts+igndts',
-      '-use_wallclock_as_timestamps', '1',
       '-thread_queue_size', '1024',
       '-f', 'matroska',
       '-i', 'pipe:0',
@@ -1687,6 +1698,22 @@ class StreamEngine extends EventEmitter {
       ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
 
       // Audio encode
+      //
+      // aresample=async=1 is critical when audio comes from the
+      // MediaRecorder pipe (Tier 1 above). The browser delivers audio
+      // in per-chunk bursts where individual sample timestamps within
+      // a burst can arrive out of order — standard behavior, not a bug.
+      // Without compensation, FFmpeg emits 'Non-monotonic DTS' warnings
+      // on every burst, clamps timestamps backward, and produces an
+      // RTMP stream that cam platforms reject with -10053 after a few
+      // seconds. aresample=async=1 stretches/squeezes samples to keep
+      // output DTS monotonic — the industry-standard fix for live
+      // audio from irregular-timestamp sources.
+      //
+      // Harmless on the dshow and lavfi audio paths (their timestamps
+      // are already clean), so we apply it unconditionally for
+      // consistency rather than branching.
+      '-af', 'aresample=async=1',
       '-c:a', 'aac',
       '-b:a', `${audioBitrate}k`,
       '-ar', '44100',
