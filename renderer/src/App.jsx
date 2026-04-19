@@ -312,6 +312,57 @@ export default function App() {
   // Start live capture for a source immediately after it is added
   const activateSource = useCallback(async (source) => {
     const { id, type, properties } = source;
+
+    // GUARD: if this source is already active (stream held in the
+    // ref AND any associated BeautyFilter still alive), bail out.
+    // Without this guard, a second activateSource() call for the
+    // same source spawns an entire second capture pipeline:
+    //   • second getUserMedia call (may prompt again or steal the
+    //     device from the first instance)
+    //   • second BeautyFilter with its own WebGL context + rAF loop
+    //     + segmenter worker
+    //   • second MediaStream track that nobody downstream consumes
+    //
+    // v3.4.33's render-fps diagnostic confirmed this was happening
+    // in a user's live session: every [beauty-filter] breadcrumb
+    // showed up as two identical lines 1ms apart — proof of two
+    // render loops executing concurrently at 1080p. Two loops meant
+    // two WebGL contexts fighting for the same GPU, halving the
+    // effective frame rate to 16-20fps and causing the MediaRecorder
+    // output to fall below Chaturbate's 15fps kick threshold.
+    //
+    // Double-invocation can happen via:
+    //   • React StrictMode's double-mount in dev (not our case, but
+    //     cheap to defend against)
+    //   • The mount useEffect firing activateSource for every visible
+    //     source after scenes.onUpdated re-fires mid-session
+    //   • The effectivePlan-change useEffect bouncing webcam sources
+    //     when the user's tier changes
+    //   • handleAddSource calling activateSource directly when a new
+    //     source is added, while the mount loop also catches it later
+    //
+    // The guard is structural: we can always recover a stale entry
+    // via deactivateSource first, but we don't get to silently
+    // accumulate duplicate pipelines.
+    const existingStream = sourceStreamsRef.current[id];
+    if (existingStream) {
+      const existingFilter = beautyFiltersRef.current[id];
+      const filterHealthy = !existingFilter || !existingFilter._destroyed;
+      const tracks = existingStream.getTracks ? existingStream.getTracks() : [];
+      const anyLive = tracks.some((t) => t.readyState === 'live');
+      if (anyLive && filterHealthy) {
+        // Already active — no-op
+        return;
+      }
+      // Stale entry — clean up before re-activating
+      try { tracks.forEach((t) => t.stop()); } catch {}
+      delete sourceStreamsRef.current[id];
+      if (existingFilter) {
+        try { existingFilter.destroy(); } catch {}
+        delete beautyFiltersRef.current[id];
+      }
+    }
+
     let stream = null;
     try {
       if (type === 'webcam') {
