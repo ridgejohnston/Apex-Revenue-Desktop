@@ -87,6 +87,7 @@ export class BeautyFilter {
     this._lastError   = null;
     this._segmenter = null;
     this._segmenterInitStarted = false;
+    this._prewarmScheduled = false;
 
     // Auto-Beauty — AI-driven continuous tuning via Bedrock Claude
     // Haiku vision. Every AUTO_TICK_MS (15s) while enabled, samples
@@ -148,6 +149,13 @@ export class BeautyFilter {
     const installed = this.config.mediapipeInstalled === true;
     if (wantsBg && installed && !this._passthrough) {
       this._startSegmenter('ctor');
+    } else if (installed && !this._passthrough) {
+      // PREWARM: MediaPipe is installed but the user's session starts
+      // with blur OFF. Defer-schedule the segmenter so it's ready by
+      // the time the user clicks Blur — eliminates the perceptible
+      // 500-2000ms cold-start delay they'd otherwise see on first
+      // toggle. See _schedulePrewarm for the mechanics.
+      this._schedulePrewarm('ctor');
     }
   }
 
@@ -239,6 +247,48 @@ export class BeautyFilter {
     const installed = this.config.mediapipeInstalled === true;
     if (wantsSegmentation && installed && !this._segmenter && !this._segmenterInitStarted) {
       this._startSegmenter('update');
+    }
+
+    // Pre-warm path: if MediaPipe is installed but the user hasn't yet
+    // flipped on a background effect, start the segmenter anyway in the
+    // background. This eliminates the 500-2000ms latency the user would
+    // otherwise see the first time they click Blur — worker spawn, WASM
+    // fetch, model load, and GPU delegate compile all happen now instead
+    // of when the user is waiting. By the time they click Blur, the
+    // segmenter is already ready and the mask pops in on the next frame.
+    //
+    // Deferred via setTimeout so we don't contend with initial UI render
+    // or the first few rAF frames of the video preview — this is
+    // background work. 300ms is short enough that a user who clicks
+    // Blur immediately after opening the app still usually hits the
+    // prewarmed path, but long enough that the render loop gets a clean
+    // first-frame pass without WASM compile jank.
+    if (!wantsSegmentation && installed && !this._segmenter && !this._segmenterInitStarted) {
+      this._schedulePrewarm('update');
+    }
+  }
+
+  _schedulePrewarm(whence) {
+    if (this._prewarmScheduled) return;
+    this._prewarmScheduled = true;
+    const run = () => {
+      if (this._destroyed) return;
+      // Re-check: the user may have toggled bg on (_startSegmenter
+      // already ran) in the interim, or MediaPipe may have become
+      // uninstalled. Both are idempotent no-ops inside _startSegmenter.
+      if (!this._segmenter && !this._segmenterInitStarted &&
+          this.config.mediapipeInstalled === true) {
+        this._startSegmenter(`prewarm:${whence}`);
+      }
+    };
+    // Prefer requestIdleCallback when available so we don't burn the
+    // browser's animation budget during startup. Fall back to
+    // setTimeout on engines without it (Safari < 16.4, etc — not a
+    // factor in Electron/Chromium but cheap to guard).
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(run, { timeout: 1500 });
+    } else {
+      setTimeout(run, 300);
     }
   }
 
