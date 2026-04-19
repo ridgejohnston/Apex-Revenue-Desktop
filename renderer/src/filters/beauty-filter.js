@@ -88,6 +88,7 @@ export class BeautyFilter {
     this._segmenter = null;
     this._segmenterInitStarted = false;
     this._prewarmScheduled = false;
+    this._frameTimer = null;
 
     // Auto-Beauty — AI-driven continuous tuning via Bedrock Claude
     // Haiku vision. Every AUTO_TICK_MS (15s) while enabled, samples
@@ -295,6 +296,10 @@ export class BeautyFilter {
   destroy() {
     this._destroyed = true;
     if (this._rafHandle) cancelAnimationFrame(this._rafHandle);
+    if (this._frameTimer) {
+      clearInterval(this._frameTimer);
+      this._frameTimer = null;
+    }
     if (this._segmenter) {
       try { this._segmenter.destroy(); } catch {}
       this._segmenter = null;
@@ -466,7 +471,51 @@ export class BeautyFilter {
     // silently carries the new content. Resizing the canvas later in
     // _resizeTo() is also fine — captureStream tracks the canvas's
     // current dimensions dynamically.
-    this._outputStream = this.canvas.captureStream(30);
+    // Deterministic 30 fps output to MediaRecorder, decoupled from
+    // the render loop's actual rAF cadence.
+    //
+    // Background: canvas.captureStream(30) asks the browser to emit a
+    // new frame whenever the canvas is redrawn, up to 30 per second.
+    // That sounds fine — and is fine when the render loop is hitting
+    // rAF's natural ~60 fps. But when the loop stalls (segmenter
+    // loading on a mid-tier GPU, heavy bilateral blur at 1080p, whatever),
+    // the canvas gets redrawn at 2-10 fps, captureStream faithfully
+    // emits only that many frames, and MediaRecorder's output matroska
+    // ends up with a trickle of video. The v3.4.31 stream-pipe log
+    // showed exactly this: source reported 30.30 fps, tbr calculated
+    // at 7.33, actual frame count was 8 frames over 4.24 seconds
+    // (1.9 fps). Chaturbate's ingest requires ≥15 fps and kicks
+    // anything lower.
+    //
+    // New approach: capture in MANUAL mode (rate=0 means "emit only
+    // on requestFrame()") and drive frame emission ourselves via
+    // setInterval at 33.33ms. This guarantees a steady 30 fps stream
+    // to MediaRecorder regardless of what the render loop is doing.
+    // If the canvas hasn't been redrawn between ticks, we emit a
+    // repeat of the last content — which MediaRecorder encodes as
+    // a near-zero-cost P-frame or duplicate. Much better than the
+    // server kicking us for under-delivery.
+    //
+    // requestVideoFrameCallback would be the modern alternative but
+    // it fires based on the video element's decoded frames — which
+    // in our pipeline is the input webcam, not the composited canvas.
+    // requestFrame() is the right tool here.
+    this._outputStream = this.canvas.captureStream(0);
+    const [videoTrack] = this._outputStream.getVideoTracks();
+    if (videoTrack && typeof videoTrack.requestFrame === 'function') {
+      this._frameTimer = setInterval(() => {
+        try { videoTrack.requestFrame(); } catch {}
+      }, 1000 / 30);
+    } else {
+      // requestFrame not available — fall back to the old behavior
+      // of letting the browser sample the canvas at 30 fps. Should
+      // never hit this path in Electron/Chromium, but keep the
+      // fallback so the filter still works on exotic environments.
+      // eslint-disable-next-line no-console
+      console.warn('[BeautyFilter] videoTrack.requestFrame unavailable — falling back to rate-based capture');
+      try { videoTrack?.stop(); } catch {}
+      this._outputStream = this.canvas.captureStream(30);
+    }
 
     // canvas.captureStream() only produces a video track. If the input
     // stream carries audio (which, as of v3.4.29, the webcam path
@@ -587,6 +636,21 @@ export class BeautyFilter {
         this._resizeTo(this.video.videoWidth, this.video.videoHeight);
       }
       this._renderFrame();
+
+      // Lightweight render-rate tracker. Logs the measured fps once
+      // every ~5 seconds to the DevTools console so slow renders are
+      // observable without needing a profiler attached. Zero impact
+      // if nobody looks at the console.
+      this._renderFrameCount = (this._renderFrameCount || 0) + 1;
+      const now = performance.now();
+      if (!this._renderFpsStart) this._renderFpsStart = now;
+      if (now - this._renderFpsStart >= 5000) {
+        const fps = (this._renderFrameCount * 1000) / (now - this._renderFpsStart);
+        // eslint-disable-next-line no-console
+        console.log(`[BeautyFilter] render fps (last 5s): ${fps.toFixed(1)}`);
+        this._renderFrameCount = 0;
+        this._renderFpsStart = now;
+      }
     } catch (err) {
       this._failSafe('renderFrame', err);
       return;
