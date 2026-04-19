@@ -471,51 +471,23 @@ export class BeautyFilter {
     // silently carries the new content. Resizing the canvas later in
     // _resizeTo() is also fine — captureStream tracks the canvas's
     // current dimensions dynamically.
-    // Deterministic 30 fps output to MediaRecorder, decoupled from
-    // the render loop's actual rAF cadence.
+    // canvas.captureStream(30) asks Chromium to emit a new frame
+    // whenever the canvas is redrawn, up to 30/sec. This is the
+    // standard pattern and matches MediaRecorder's expectations.
     //
-    // Background: canvas.captureStream(30) asks the browser to emit a
-    // new frame whenever the canvas is redrawn, up to 30 per second.
-    // That sounds fine — and is fine when the render loop is hitting
-    // rAF's natural ~60 fps. But when the loop stalls (segmenter
-    // loading on a mid-tier GPU, heavy bilateral blur at 1080p, whatever),
-    // the canvas gets redrawn at 2-10 fps, captureStream faithfully
-    // emits only that many frames, and MediaRecorder's output matroska
-    // ends up with a trickle of video. The v3.4.31 stream-pipe log
-    // showed exactly this: source reported 30.30 fps, tbr calculated
-    // at 7.33, actual frame count was 8 frames over 4.24 seconds
-    // (1.9 fps). Chaturbate's ingest requires ≥15 fps and kicks
-    // anything lower.
+    // v3.4.32 tried captureStream(0) + a setInterval requestFrame()
+    // driver to decouple capture rate from rAF cadence, reasoning
+    // that it would guarantee 30fps output even when rAF was slow.
+    // That reasoning was wrong — Chromium's requestFrame on a rate-0
+    // capture still dedupes when the canvas hasn't been redrawn, and
+    // the timer-driven approach delivered FEWER frames than the
+    // simpler rate-based version. Reverted in v3.4.33.
     //
-    // New approach: capture in MANUAL mode (rate=0 means "emit only
-    // on requestFrame()") and drive frame emission ourselves via
-    // setInterval at 33.33ms. This guarantees a steady 30 fps stream
-    // to MediaRecorder regardless of what the render loop is doing.
-    // If the canvas hasn't been redrawn between ticks, we emit a
-    // repeat of the last content — which MediaRecorder encodes as
-    // a near-zero-cost P-frame or duplicate. Much better than the
-    // server kicking us for under-delivery.
-    //
-    // requestVideoFrameCallback would be the modern alternative but
-    // it fires based on the video element's decoded frames — which
-    // in our pipeline is the input webcam, not the composited canvas.
-    // requestFrame() is the right tool here.
-    this._outputStream = this.canvas.captureStream(0);
-    const [videoTrack] = this._outputStream.getVideoTracks();
-    if (videoTrack && typeof videoTrack.requestFrame === 'function') {
-      this._frameTimer = setInterval(() => {
-        try { videoTrack.requestFrame(); } catch {}
-      }, 1000 / 30);
-    } else {
-      // requestFrame not available — fall back to the old behavior
-      // of letting the browser sample the canvas at 30 fps. Should
-      // never hit this path in Electron/Chromium, but keep the
-      // fallback so the filter still works on exotic environments.
-      // eslint-disable-next-line no-console
-      console.warn('[BeautyFilter] videoTrack.requestFrame unavailable — falling back to rate-based capture');
-      try { videoTrack?.stop(); } catch {}
-      this._outputStream = this.canvas.captureStream(30);
-    }
+    // The real problem when rAF is slow is rAF itself being slow —
+    // see the render-fps diagnostic below. Fixing that (e.g. shader
+    // work reduction, segmenter priority lowering) is the right
+    // fix; papering over it with a timer driver was the wrong fix.
+    this._outputStream = this.canvas.captureStream(30);
 
     // canvas.captureStream() only produces a video track. If the input
     // stream carries audio (which, as of v3.4.29, the webcam path
@@ -637,19 +609,52 @@ export class BeautyFilter {
       }
       this._renderFrame();
 
-      // Lightweight render-rate tracker. Logs the measured fps once
-      // every ~5 seconds to the DevTools console so slow renders are
-      // observable without needing a profiler attached. Zero impact
-      // if nobody looks at the console.
+      // Render-rate diagnostic. Logs a breadcrumb to errors.log every
+      // 5 seconds so we can see — in a log file uploaded post-hoc —
+      // whether the render loop is hitting 30+ fps or stalling. Also
+      // reports the segmenter state and bgMode at sample time, since
+      // those are the heaviest contributors to slow rendering
+      // (segmenter adds GPU contention during load; bg effects add
+      // mask sampling + composite work per frame).
+      //
+      // Logs ONLY if fps drops below 20 (normal 30-60fps operation
+      // doesn't need to pollute the log). This keeps errors.log
+      // readable during healthy sessions while still capturing the
+      // signal when something's actually wrong.
       this._renderFrameCount = (this._renderFrameCount || 0) + 1;
-      const now = performance.now();
-      if (!this._renderFpsStart) this._renderFpsStart = now;
-      if (now - this._renderFpsStart >= 5000) {
-        const fps = (this._renderFrameCount * 1000) / (now - this._renderFpsStart);
+      const nowTs = performance.now();
+      if (!this._renderFpsStart) this._renderFpsStart = nowTs;
+      const windowMs = nowTs - this._renderFpsStart;
+      if (windowMs >= 5000) {
+        const fps = (this._renderFrameCount * 1000) / windowMs;
+        // Always log to DevTools console — cheap and useful during
+        // interactive debugging
         // eslint-disable-next-line no-console
         console.log(`[BeautyFilter] render fps (last 5s): ${fps.toFixed(1)}`);
+        // Log to errors.log ONLY if the rate is problematically low
+        // (stream would get kicked at <15 fps, so flag below 20).
+        if (fps < 20) {
+          try {
+            window.electronAPI?.errors?.log?.(
+              'warn', 'beauty-filter',
+              `Render loop slow: ${fps.toFixed(1)} fps over last ${(windowMs / 1000).toFixed(1)}s`,
+              {
+                fps: Number(fps.toFixed(2)),
+                frameCount: this._renderFrameCount,
+                windowMs: Math.round(windowMs),
+                canvasW: this.canvas?.width,
+                canvasH: this.canvas?.height,
+                bgMode: this.config?.bgMode ?? 0,
+                filterEnabled: !!this.config?.enabled,
+                segmenterExists: !!this._segmenter,
+                segmenterReady: !!(this._segmenter && this._segmenter.ready),
+                segmenterLoading: !!this._segmenterInitStarted && !(this._segmenter && this._segmenter.ready),
+              }
+            );
+          } catch {}
+        }
         this._renderFrameCount = 0;
-        this._renderFpsStart = now;
+        this._renderFpsStart = nowTs;
       }
     } catch (err) {
       this._failSafe('renderFrame', err);
