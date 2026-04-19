@@ -83,6 +83,51 @@ void main() {
 }
 `;
 
+// ─── Fragment: Gaussian blur (separable) ──────────────────
+// Used to blur the BACKGROUND when background-blur mode is active.
+// Distinct from the bilateral filter: no edge preservation, much
+// stronger kernel — we want a genuine out-of-focus "bokeh" look on
+// whatever's behind the person, not careful feature preservation.
+//
+// Runs twice per frame (when bg blur is on): once horizontal on the
+// original video frame, once vertical on the intermediate result.
+// The resulting texture is sampled in FRAG_COMPOSITE and mixed with
+// the beauty-processed foreground based on the segmentation mask.
+export const FRAG_GAUSSIAN_BLUR = `#version 300 es
+precision highp float;
+
+in  vec2 v_uv;
+out vec4 outColor;
+
+uniform sampler2D u_tex;
+uniform vec2      u_texel;      // (1/width, 1/height)
+uniform vec2      u_direction;  // (1,0) or (0,1)
+uniform float     u_strength;   // 0..1 — scales kernel spread for adjustable blur
+
+const int KERNEL_RADIUS = 12;
+
+void main() {
+  // Kernel radius scales with strength so the user slider maps to a
+  // continuous blur intensity rather than a binary on/off
+  float spread = 1.0 + u_strength * 3.0; // 1..4 pixel multiplier
+  float sigma  = 6.0 * spread;
+  float sInv2  = 1.0 / (2.0 * sigma * sigma);
+
+  vec3  accum = vec3(0.0);
+  float wsum  = 0.0;
+
+  for (int i = -KERNEL_RADIUS; i <= KERNEL_RADIUS; i++) {
+    float fi     = float(i) * spread;
+    vec2  offset = u_direction * u_texel * fi;
+    float w      = exp(-(fi * fi) * sInv2);
+    accum += texture(u_tex, v_uv + offset).rgb * w;
+    wsum  += w;
+  }
+
+  outColor = vec4(accum / wsum, 1.0);
+}
+`;
+
 // ─── Fragment: final composite ─────────────────────────────
 // Runs a pipeline of image-processing stages on the bilateral-blurred
 // frame + original frame. Every stage is additive math against the
@@ -111,6 +156,8 @@ out vec4 outColor;
 
 uniform sampler2D u_original;
 uniform sampler2D u_smoothed;
+uniform sampler2D u_bgBlurred;  // Gaussian-blurred original frame (bg blur mode)
+uniform sampler2D u_mask;       // Segmentation mask: R=person weight (0..1)
 uniform float     u_intensity;   // 0..1 — beauty blend factor
 uniform float     u_warmth;      // -1..+1 — red/blue tonal shift
 uniform float     u_brightness;  // -1..+1 — additive offset
@@ -120,6 +167,9 @@ uniform float     u_saturation;  // -1..+1 — mix toward/away from grayscale
 uniform float     u_lowLight;    // 0..1 — shadow lift via gamma<1
 uniform float     u_radial;      // -1..+1 — vignette / key light
 uniform float     u_aspect;      // width / height for circular radial math
+uniform int       u_bgMode;      // 0=off, 1=blur, 2=color
+uniform vec3      u_bgColor;     // replacement color when u_bgMode == 2
+uniform float     u_maskFeather; // 0..1 — soften mask edges (default 0.15)
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
@@ -175,6 +225,28 @@ void main() {
     lightFactor = mix(1.0 + u_radial * 0.4, 1.0, radial);
   }
   color *= lightFactor;
+
+  // 9. Background composite — uses MediaPipe Selfie Segmentation mask to
+  //    isolate the person and substitute blur / color for the background.
+  //    The mask is a soft confidence map (0 = definite bg, 1 = definite
+  //    person) so edges feather naturally. When u_bgMode == 0 this stage
+  //    is skipped entirely.
+  if (u_bgMode != 0) {
+    // Slight remap tightens the feather zone — without this, MediaPipe's
+    // low-confidence band (≈0.2–0.5 around hair/shoulders) leaves a halo
+    // of the original bg around the subject.
+    float raw = texture(u_mask, v_uv).r;
+    float f   = max(u_maskFeather, 0.01);
+    float personW = smoothstep(0.5 - f, 0.5 + f, raw);
+
+    vec3 bgSource;
+    if (u_bgMode == 1) {
+      bgSource = texture(u_bgBlurred, v_uv).rgb;
+    } else {
+      bgSource = u_bgColor;
+    }
+    color = mix(bgSource, color, personW);
+  }
 
   outColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }

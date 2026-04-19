@@ -17,6 +17,10 @@ const BEAUTY_DEFAULTS = Object.freeze({
   saturation: 0,       // -100..+100 — grayscale ↔ supersaturated
   lowLight:   0,       // 0–100 — shadow lift
   radial:     0,       // -100 vignette .. +100 key light
+  // Background
+  bgMode:     0,       // 0 off | 1 blur | 2 color
+  bgStrength: 60,      // 0–100 — Gaussian blur intensity
+  bgColor:    '#1a1a22', // hex — replacement color
 });
 
 const BEAUTY_BOUNDS = Object.freeze({
@@ -29,6 +33,8 @@ const BEAUTY_BOUNDS = Object.freeze({
   saturation: { min: -100, max: 100 },
   lowLight:   { min: 0,    max: 100 },
   radial:     { min: -100, max: 100 },
+  bgMode:     { min: 0,    max: 2   },
+  bgStrength: { min: 0,    max: 100 },
 });
 
 // Store key used by electron-store in main, and by window.electronAPI.store
@@ -50,6 +56,13 @@ function clampConfig(cfg = {}) {
     if (typeof c[k] === 'number') c[k] = Math.max(min, Math.min(max, c[k]));
   }
   c.enabled = !!c.enabled;
+  // bgMode is an integer 0/1/2 — coerce softly
+  c.bgMode = Math.round(c.bgMode) | 0;
+  if (c.bgMode < 0 || c.bgMode > 2) c.bgMode = 0;
+  // bgColor must stay a valid-looking hex string; otherwise reset
+  if (typeof c.bgColor !== 'string' || !/^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(c.bgColor)) {
+    c.bgColor = '#1a1a22';
+  }
   return c;
 }
 
