@@ -152,12 +152,41 @@ export class SelfieSegmenter {
     this._frameInFlight = true;
     let bitmap = null;
     try {
-      // createImageBitmap from a video element is ~1-2 ms and runs
-      // off the main thread internally. We still await it here so the
-      // transfer argument is valid, but this doesn't block rendering
-      // because the render loop has already completed its draw calls
-      // by the time pushFrame is invoked.
-      bitmap = await createImageBitmap(videoEl);
+      // Downscale the video frame before shipping to the worker. The
+      // MediaPipe selfie_segmenter model runs at 256×256 internally;
+      // feeding it the raw 720p or 1080p webcam output just means it
+      // spends extra cycles resizing before inference AND that
+      // postMessage has to transfer 30× more pixels per frame.
+      //
+      // At 384×216 (a 16:9 downscale that matches typical webcam
+      // aspect ratio), we:
+      //   • Give the model enough signal for clean silhouette edges
+      //     (subject face/torso is still ~100px wide, well above the
+      //     model's effective resolution after internal square-crop).
+      //   • Cut the ImageBitmap transfer from ~2 MB (720p) or ~8 MB
+      //     (1080p) down to ~330 KB. Transfer dominates postMessage
+      //     cost with non-transferable copies; even with the
+      //     transfer-list optimization the underlying GPU-to-CPU
+      //     readback scales with pixel count.
+      //   • Shorten inference latency by roughly the preprocessing
+      //     fraction, which for this model is measurably non-trivial
+      //     on integrated GPUs and low-power iGPUs.
+      //
+      // End result: the mask that the compositor draws against is
+      // fresher relative to the current video frame — directly
+      // addresses the 'background trails subject motion' problem
+      // because shorter inference latency means shorter mask lag.
+      //
+      // createImageBitmap does the resize on the GPU on modern
+      // Chromium (Electron here), so we're not paying a CPU cost.
+      // resizeQuality 'low' uses bilinear downsampling which is fine
+      // for a segmentation model — we don't need fidelity, we need
+      // the right broad strokes for the model to find the subject.
+      bitmap = await createImageBitmap(videoEl, {
+        resizeWidth: 384,
+        resizeHeight: 216,
+        resizeQuality: 'low',
+      });
       if (this._disposed) { try { bitmap.close(); } catch {} return; }
       this._worker.postMessage(
         { type: 'frame', imageBitmap: bitmap, timestamp: performance.now() },
