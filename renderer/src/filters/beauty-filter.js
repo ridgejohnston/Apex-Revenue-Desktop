@@ -468,6 +468,32 @@ export class BeautyFilter {
     // current dimensions dynamically.
     this._outputStream = this.canvas.captureStream(30);
 
+    // canvas.captureStream() only produces a video track. If the input
+    // stream carries audio (which, as of v3.4.29, the webcam path
+    // requests via getUserMedia({audio: true})), we need to attach
+    // those audio tracks to the output stream explicitly — otherwise
+    // the MediaRecorder wired up downstream records silence and
+    // FFmpeg's Matroska pipe input has no audio to map.
+    //
+    // Tracks are added by reference, not cloned. When the input stream
+    // is stopped (activateSource teardown), the tracks naturally end
+    // in the output stream too. When the BeautyFilter is destroyed,
+    // the track.stop() loop in destroy() covers these as well because
+    // they're enumerated via _outputStream.getTracks().
+    try {
+      const audioTracks = this.inputStream && this.inputStream.getAudioTracks
+        ? this.inputStream.getAudioTracks()
+        : [];
+      for (const track of audioTracks) {
+        this._outputStream.addTrack(track);
+      }
+      // eslint-disable-next-line no-console
+      console.log('[BeautyFilter] output stream audio tracks:', audioTracks.length);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[BeautyFilter] failed to attach audio tracks:', e?.message || e);
+    }
+
     // Kick off playback + render loop. When metadata is available, we
     // size the canvas to the real video dimensions and start rAF.
     const start = () => {

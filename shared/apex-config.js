@@ -42,7 +42,7 @@ function tierFromTotal(total, thresholds) {
 module.exports = {
   APP_NAME: 'Apex Revenue',
   EXTENSION_ID: 'desktop',
-  VERSION: '3.4.28',
+  VERSION: '3.4.29',
 
   DEFAULT_PLATFORMS: {
     'Live Cams': [

@@ -1593,11 +1593,50 @@ class StreamEngine extends EventEmitter {
       : String(resolution || '?');
     this._diag(`resolution: ${resText} @ ${fps} fps`);
 
-    // Audio input args — same sanitizer as the direct path. dshow for
-    // a real device, lavfi silence as fallback.
-    const audioInputArgs = this._audioInputArgs(settings);
-    const audioFromSeparateInput = audioInputArgs[0] === '-f' && audioInputArgs[1] === 'dshow';
-    this._diag(`audio source: ${audioFromSeparateInput ? 'dshow mic (input 1)' : 'silent lavfi'}`);
+    // Audio source resolution for pipe mode. Three paths in order of
+    // preference:
+    //
+    //   1. PIPE AUDIO (best): the renderer's getUserMedia captured a
+    //      mic alongside the webcam, BeautyFilter carried the audio
+    //      track through, and MediaRecorder embedded it in the
+    //      Matroska output. FFmpeg sees audio + video in input 0 and
+    //      we just map 0:a:0 — no separate input needed. Signaled by
+    //      the renderer via settings._pipeHasAudio = true.
+    //
+    //   2. DSHOW (explicit override): user has configured a specific
+    //      microphone device in Settings (settings.audioDevice is set).
+    //      Used as input 1. Kept as an option because some users want
+    //      a different mic than the webcam's built-in one (XLR mic via
+    //      audio interface, USB gooseneck mic, etc).
+    //
+    //   3. LAVFI SILENT (last resort): renderer couldn't get mic
+    //      permission AND no dshow device is configured. Produces
+    //      silent audio and the stream will likely get kicked by cam
+    //      platforms within 1-2 seconds. Pre-flight warning in
+    //      handleStartStream is the gate that should have caught this;
+    //      we still support the path so "stream silent anyway" works
+    //      if the user opted to continue.
+    const pipeHasAudio = settings && settings._pipeHasAudio === true;
+    const hasDshowAudio = settings && settings.audioDevice && String(settings.audioDevice).trim() !== '';
+
+    let audioInputArgs = [];
+    let audioMap;
+    let audioSourceLabel;
+    if (pipeHasAudio) {
+      // No extra input — audio rides in with the Matroska pipe
+      audioInputArgs = [];
+      audioMap = '0:a:0';
+      audioSourceLabel = 'webcam mic via pipe (input 0)';
+    } else if (hasDshowAudio) {
+      audioInputArgs = this._audioInputArgs(settings);
+      audioMap = '1:a:0';
+      audioSourceLabel = 'dshow mic (input 1)';
+    } else {
+      audioInputArgs = ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo'];
+      audioMap = '1:a:0';
+      audioSourceLabel = 'silent lavfi (WARNING: cam platforms may kick)';
+    }
+    this._diag(`audio source: ${audioSourceLabel}`);
 
     // Build full args array
     const args = [
@@ -1635,12 +1674,14 @@ class StreamEngine extends EventEmitter {
       '-f', 'matroska',
       '-i', 'pipe:0',
 
-      // Audio input (dshow device or anullsrc)
+      // Audio input (dshow device, lavfi silent, or empty if audio
+      // rides in through the Matroska pipe)
       ...audioInputArgs,
 
-      // Explicit mapping: video from pipe (input 0), audio from input 1
+      // Explicit mapping: video from pipe (input 0), audio from
+      // whichever source was chosen above.
       '-map', '0:v:0',
-      '-map', '1:a:0',
+      '-map', audioMap,
 
       // Video encode — re-use per-encoder args from the direct path
       ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),

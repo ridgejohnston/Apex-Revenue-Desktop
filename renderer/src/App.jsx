@@ -315,13 +315,44 @@ export default function App() {
     let stream = null;
     try {
       if (type === 'webcam') {
-        const constraints = {
-          video: properties.deviceId
-            ? { deviceId: { exact: properties.deviceId }, width: 1920, height: 1080 }
-            : { width: 1920, height: 1080 },
-          audio: false,
+        // Request BOTH video and audio from the browser. The built-in
+        // audio track travels alongside video through MediaRecorder and
+        // into FFmpeg's Matroska pipe — no separate dshow audio input
+        // needed, no silent-lavfi fallback. This was critical to fix:
+        // cam platforms (Chaturbate, Stripchat) kick streams that arrive
+        // with no real audio content within 1-2 seconds of connection.
+        // Apex was previously falling through to anullsrc silent audio
+        // for anyone who hadn't manually configured a dshow mic in
+        // Settings, producing immediate platform kicks.
+        //
+        // echoCancellation + noiseSuppression + autoGainControl are the
+        // standard browser audio DSP flags — enable them so the mic
+        // sounds reasonable without requiring the user to configure
+        // anything.
+        const videoConstraints = properties.deviceId
+          ? { deviceId: { exact: properties.deviceId }, width: 1920, height: 1080 }
+          : { width: 1920, height: 1080 };
+        const audioConstraints = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
         };
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: videoConstraints,
+            audio: audioConstraints,
+          });
+        } catch (audioErr) {
+          // Mic missing, permission denied, or device in use — retry
+          // without audio. Stream will still run but with silent output;
+          // the pre-flight warning in handleStartStream will alert the
+          // user before they hit Start Stream.
+          console.warn('[Apex] Mic capture failed, retrying webcam video-only:', audioErr?.message || audioErr);
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: videoConstraints,
+            audio: false,
+          });
+        }
 
         // Beauty Filter: wrap the raw webcam stream in a WebGL2 bilateral
         // filter before anything else sees it. Preview canvas, stream
@@ -809,12 +840,38 @@ export default function App() {
           return;
         }
 
+        // Does this stream actually carry audio? Determines whether
+        // FFmpeg will map audio from the Matroska pipe (input 0) or
+        // fall back to silent lavfi. Warn the user loudly if we're
+        // about to stream silent audio — cam platforms kick silent
+        // streams within 1-2 seconds, and the user deserves a heads
+        // up before we start. Letting them cancel here is a much
+        // better UX than watching the stream get killed by Chaturbate.
+        const hasAudio = stream.getAudioTracks().length > 0;
+        if (!hasAudio) {
+          const proceed = confirm(
+            'No microphone detected on your webcam stream.\n\n' +
+            'Streaming services like Chaturbate typically disconnect streams within 1–2 seconds ' +
+            'if they receive no audio. Your stream will likely be kicked shortly after it starts.\n\n' +
+            'To fix: make sure a microphone is plugged in and granted permission to this app ' +
+            '(Windows Settings > Privacy & security > Microphone), then remove and re-add the ' +
+            'webcam source in Apex.\n\n' +
+            'Continue streaming silent anyway?'
+          );
+          if (!proceed) return;
+        }
+
         // Ask main to spawn FFmpeg listening on stdin BEFORE we start
         // the MediaRecorder. If we start the recorder first, the
         // first chunk or two might arrive before FFmpeg is ready and
         // get dropped — Matroska parsers are unforgiving about
         // missing EBML headers.
-        await api.stream.startPipe(settings);
+        //
+        // Pass pipeHasAudio through settings so the stream engine
+        // knows whether to map input 0's audio track or use the
+        // silent-lavfi fallback. (Setting a transient field on the
+        // settings object avoids changing the IPC shape.)
+        await api.stream.startPipe({ ...settings, _pipeHasAudio: hasAudio });
 
         const mimeType = pickWebmMimeType();
         console.log('[Apex] Starting webcam pipe-stream, mimeType:', mimeType);
