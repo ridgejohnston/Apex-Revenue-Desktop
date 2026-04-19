@@ -280,12 +280,37 @@ export class BeautyFilter {
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
 
-    // Kick off playback + render loop
+    // Create the output MediaStream SYNCHRONOUSLY, before we wait on
+    // the video's loadedmetadata event.
+    //
+    // Why this matters: activateSource() in App.jsx calls
+    //   new BeautyFilter(stream, ...)
+    //   filteredStream = filter.getStream()
+    //   if (filteredStream !== stream) { stash filter; use filteredStream }
+    //
+    // If _outputStream isn't ready yet, getStream() returns
+    // this.inputStream (the raw stream) as a safety fallback — meaning
+    // the filter is CONSTRUCTED but IMMEDIATELY DISCARDED. The caller
+    // keeps using the raw stream and never stores the filter, so every
+    // subsequent handleBeautyChange iterates an empty map and the
+    // sliders do nothing. This was the cause of the "install runs but
+    // filters don't apply" regression.
+    //
+    // Canvas.captureStream() doesn't need the underlying video to be
+    // playing or sized — it captures whatever the canvas is rendering
+    // right now (initially the 1280×720 blank canvas). Once playback
+    // starts and the render loop draws frames, the same MediaStream
+    // silently carries the new content. Resizing the canvas later in
+    // _resizeTo() is also fine — captureStream tracks the canvas's
+    // current dimensions dynamically.
+    this._outputStream = this.canvas.captureStream(30);
+
+    // Kick off playback + render loop. When metadata is available, we
+    // size the canvas to the real video dimensions and start rAF.
     const start = () => {
       if (this.video.videoWidth && this.video.videoHeight) {
         this._resizeTo(this.video.videoWidth, this.video.videoHeight);
       }
-      this._outputStream = this.canvas.captureStream(30);
       this._renderLoop();
     };
     if (this.video.readyState >= 2) {
