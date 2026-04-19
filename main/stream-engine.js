@@ -206,7 +206,21 @@ class StreamEngine extends EventEmitter {
         // the sensible default for live streaming (matches our CBR-ish
         // -b:v/-maxrate config). Without -rc_mode it may pick quality mode
         // and ignore bitrate entirely.
-        return ['-rc_mode', 'bitrate'];
+        //
+        // -allow_skip_frames 1 is CRITICAL. Without it, libopenh264 prints
+        // the warning "bEnableFrameSkip = 0, bitrate can't be controlled
+        // for RC_QUALITY_MODE, RC_BITRATE_MODE and RC_TIMESTAMP_MODE
+        // without enabling skip frame" and proceeds to IGNORE the
+        // configured bitrate during complex motion — peaks of 6-8 Mbps
+        // have been observed on streams targeting 3.5 Mbps. Cam platforms
+        // (Chaturbate, Stripchat) auto-kick streams that exceed their
+        // bitrate ceiling, so a 3500k-target stream without frame-skip
+        // produces a -10053 disconnect within 1-2 seconds of going live.
+        // With frame-skip enabled the encoder drops the occasional frame
+        // under load rather than busting the bitrate ceiling — a trade
+        // that's strongly preferable on live RTMP where staying connected
+        // matters more than perfect smoothness.
+        return ['-rc_mode', 'bitrate', '-allow_skip_frames', '1'];
       case 'h264_amf':
       case 'h264_mf':
         // AMD AMF and Windows Media Foundation: no portable preset vocab —
@@ -1367,7 +1381,14 @@ class StreamEngine extends EventEmitter {
     // Check BEFORE the more generic branches below so the specific
     // explanation wins.
     if (/error number -10053/i.test(stderr) || /-10053 occurred/i.test(stderr)) {
-      return 'Hint: the stream was running but the connection was aborted (Windows error -10053). Most common causes: the broadcast platform dropped you (stream key revoked, session timed out, or kicked off), Windows Defender / antivirus interfered with the TCP socket, or — if this fired when you pressed Stop Stream — it is harmless (FFmpeg tried to send the RTMP trailer after the server had already closed). If the stream actually ran for a while before this, check your broadcaster page on the platform for any session status and re-copy the stream key.';
+      // The most common cause of -10053 in practice (confirmed via full
+      // FFmpeg stderr captured from a failing v3.4.26 stream) is the
+      // streaming platform kicking the connection seconds after it
+      // opens because the video bitrate exceeded the platform's ceiling.
+      // v3.4.28 fixes this server-side by lowering defaults AND enabling
+      // libopenh264 frame-skip, but a user who restored settings from
+      // backup or manually raised bitrate could still hit it.
+      return 'Hint: the stream connected successfully but was disconnected by the platform shortly after (Windows error -10053). Most common cause: video bitrate exceeds the platform cap — Chaturbate kicks streams over ~4000 kbps at 1080p. Open Settings > Streaming and set Video Bitrate to 3500 (1080p) or 3000 (720p). Less common: the stream key was revoked mid-session, Windows Defender / antivirus interfered, or — if this fired when you pressed Stop Stream — it is harmless. If bitrate is already under the cap, check the Chaturbate broadcaster page for session status and re-copy the stream key.';
     }
     if (/error number -10054/i.test(stderr) || /-10054 occurred/i.test(stderr)) {
       return 'Hint: the broadcast platform forcibly closed your connection (Windows error -10054, connection reset by peer). This usually means the platform revoked your stream key, your account was temporarily banned, or the ingest server restarted. Copy a fresh stream key from your broadcaster page and retry.';
@@ -1563,7 +1584,14 @@ class StreamEngine extends EventEmitter {
     });
     this._diag(`encoder: ${encoder}`);
     this._diag(`bitrate: ${videoBitrate}k video / ${audioBitrate}k audio`);
-    this._diag(`resolution: ${resolution} @ ${fps} fps`);
+    // resolution is typically { width, height } — stringifying the raw
+    // object yields "[object Object]" which is useless in the log.
+    // Format defensively: handle both the object form and the (rare)
+    // string form "1920x1080".
+    const resText = (resolution && typeof resolution === 'object')
+      ? `${resolution.width || '?'}x${resolution.height || '?'}`
+      : String(resolution || '?');
+    this._diag(`resolution: ${resText} @ ${fps} fps`);
 
     // Audio input args — same sanitizer as the direct path. dshow for
     // a real device, lavfi silence as fallback.

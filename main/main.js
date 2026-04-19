@@ -415,7 +415,44 @@ async function maybeFirstRunObsAutoconfig() {
     const current = store.get('obsSettings') || {};
 
     // Already autoconfigured once? Leave user's saved state alone.
-    if (current._autoconfiguredAt) return;
+    if (current._autoconfiguredAt) {
+      // ...BUT run the one-time bitrate-cap migration for users who
+      // were autoconfigured on an older version. v3.4.26 and earlier
+      // set 4000-4500 kbps defaults at 1080p which exceed cam-platform
+      // kick thresholds (Chaturbate's observed ceiling is ~4000; we
+      // target 3500 to leave headroom). Without this migration,
+      // existing installs keep their stored-too-high values even after
+      // the recommendation table is updated — users hit -10053
+      // disconnects and the only hint would be "re-copy your stream
+      // key", which doesn't help when the real problem is bitrate.
+      //
+      // Keyed by a stamp so each user's bitrate is migrated at most
+      // once — if they intentionally crank it higher later, we respect
+      // that choice.
+      if (!current._bitrateCappedAt && typeof current.videoBitrate === 'number') {
+        const h = current.resolution?.height;
+        const overCap =
+          (h >= 1080 && current.videoBitrate > 4000) ||
+          (h >= 720  && h < 1080 && current.videoBitrate > 3500);
+        if (overCap) {
+          const newBitrate = h >= 1080 ? 3500 : 3000;
+          store.set('obsSettings', {
+            ...current,
+            videoBitrate: newBitrate,
+            _bitrateCappedAt: new Date().toISOString(),
+            _bitrateCappedFrom: current.videoBitrate,
+          });
+          console.log(
+            `[Apex] v3.4.28 migration: lowered stored videoBitrate ${current.videoBitrate}k -> ${newBitrate}k (platform cap compliance)`
+          );
+        } else {
+          // Still stamp so we don't re-check every launch for users
+          // whose bitrate was already fine.
+          store.set('obsSettings', { ...current, _bitrateCappedAt: new Date().toISOString() });
+        }
+      }
+      return;
+    }
 
     const { recommendations, specs } = await autoconfig.detectRecommendedObsSettings({
       ffmpegPath: ffmpegInstaller.findFFmpegPath(),
@@ -435,6 +472,7 @@ async function maybeFirstRunObsAutoconfig() {
       audioDevice:  current.audioDevice  || '',
       outputPath:   current.outputPath   || recommendations.outputPath,
       _autoconfiguredAt: new Date().toISOString(),
+      _bitrateCappedAt:  new Date().toISOString(),
       _autoconfigSpecs: specs,
     };
     store.set('obsSettings', merged);

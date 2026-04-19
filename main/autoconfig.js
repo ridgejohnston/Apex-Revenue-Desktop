@@ -175,11 +175,21 @@ const HARDWARE_ENCODERS = new Set(['h264_nvenc', 'h264_qsv', 'h264_amf']);
 
 function recommendBitrate(height, encoder) {
   const hardware = HARDWARE_ENCODERS.has(encoder);
-  // Software tiers calibrated to Chaturbate's HD recommendations
-  // (3000 min, 4000+ for clean HD). The prior tier table was calibrated
-  // to YouTube/Twitch, which accepted lower bitrates without warnings.
-  if (height >= 1080) return hardware ? 4000 : 4500;
-  if (height >= 720)  return hardware ? 3000 : 3500;
+  // Calibrated to the LOWER bound of cam-platform bitrate ceilings, not
+  // the recommended midpoint. Chaturbate's documented 1080p30 max is
+  // 4000 kbps but the server-side kick threshold is lower in practice —
+  // streams hitting 4000-4500 kbps got disconnected with RTMP RST
+  // (Windows WSAECONNABORTED -10053) within 1-2 seconds of going live.
+  // Stripchat and CamSoda have similar behavior with slightly different
+  // thresholds. Targeting 3500k for 1080p software stays comfortably
+  // below every platform's auto-kick line while still producing clean
+  // HD quality. Hardware encoders are more bit-efficient so they get a
+  // little less — same apparent quality, more margin under the cap.
+  //
+  // Software encoders need -allow_skip_frames enabled to actually
+  // honor these numbers under load (see _presetArgsFor for libopenh264).
+  if (height >= 1080) return hardware ? 3200 : 3500;
+  if (height >= 720)  return hardware ? 2500 : 3000;
   if (height >= 480)  return 1800;
   return 1000;
 }
