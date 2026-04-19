@@ -128,6 +128,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // ─── AI Coach: multi-turn chat ──────────────────────
+  // Conversational coach for live cam performers. Companion to the
+  // one-shot AI Prompt Engine (aws.bedrockPrompt) — different UX,
+  // same Bedrock client under the hood.
+  coach: {
+    sendMessage: (text, liveContext) =>
+      ipcRenderer.invoke('coach:send-message', text, liveContext),
+    reset:       () => ipcRenderer.invoke('coach:reset'),
+    history:     () => ipcRenderer.invoke('coach:history'),
+  },
+
   // ─── Audio Mixer ─────────────────────────────────────
   audio: {
     getDevices: () => ipcRenderer.invoke('audio:get-devices'),

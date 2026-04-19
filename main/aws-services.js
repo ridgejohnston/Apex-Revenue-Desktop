@@ -159,4 +159,7 @@ async function publishIoT(topic, payload) {
 module.exports = {
   init, generatePrompt, synthesizeSpeech,
   backupSession, emitHeartbeat, sendTipEvent, publishIoT,
+  // Getter so the AI Coach module can reuse the initialized client
+  // rather than building its own. Returns null until init() runs.
+  getBedrockClient: () => bedrockClient,
 };

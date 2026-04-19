@@ -31,6 +31,7 @@ const {
 const FEATURE_MAP = {
   free: {
     aiPrompts:    false,
+    aiCoach:      false,
     voiceAlerts:  false,
     s3Backup:     false,
     obsStreaming: false,
@@ -41,6 +42,7 @@ const FEATURE_MAP = {
   },
   platinum: {
     aiPrompts:    true,
+    aiCoach:      true,
     voiceAlerts:  true,
     s3Backup:     true,
     obsStreaming: true,

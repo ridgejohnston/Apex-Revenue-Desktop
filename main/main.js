@@ -14,6 +14,7 @@ const sceneManager = require('./scene-manager');
 const audioMixer = require('./audio-mixer');
 const ffmpegInstaller = require('./ffmpeg-installer');
 const mediapipeInstaller = require('./mediapipe-installer');
+const { AiCoach } = require('./ai-coach');
 const autoconfig = require('./autoconfig');
 const errorLogger = require('./error-logger');
 const { autoUpdater } = require('electron-updater');
@@ -642,6 +643,42 @@ ipcMain.handle('aws:s3-backup', async () => {
     mainWindow?.webContents.send('aws:backup-done', { success: true });
     return true;
   } catch (e) { console.error('S3 backup error:', e); return false; }
+});
+
+// ─── AI Coach: multi-turn chat for live cam performers ─────
+//
+// Lazily constructed on first send so we don't touch Bedrock at all
+// for users who never open the Coach. One instance per app process,
+// shared across all renderer windows (there's only one right now).
+// The coach holds conversation state in memory — if the user restarts
+// the app, the conversation is gone.
+let coach = null;
+function getCoach() {
+  if (!coach) {
+    const bedrock = awsServices.getBedrockClient?.();
+    if (!bedrock) throw new Error('Bedrock not initialized — sign in first');
+    coach = new AiCoach(bedrock);
+  }
+  return coach;
+}
+
+ipcMain.handle('coach:send-message', async (_, text, liveContext) => {
+  try {
+    const reply = await getCoach().sendMessage(text, liveContext || {});
+    return { ok: true, reply };
+  } catch (err) {
+    console.error('[coach] send-message error:', err?.message || err);
+    return { ok: false, error: err?.message || String(err) };
+  }
+});
+
+ipcMain.handle('coach:reset', async () => {
+  try { coach?.reset(); } catch {}
+  return { ok: true };
+});
+
+ipcMain.handle('coach:history', async () => {
+  try { return coach?.getHistory?.() || []; } catch { return []; }
 });
 
 // ─── Auth + Subscription state ──────────────────────────
