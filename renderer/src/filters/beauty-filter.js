@@ -100,6 +100,13 @@ export class BeautyFilter {
     this._blurW = 0;
     this._blurH = 0;
 
+    // Unique instance ID. If we ever accidentally spawn two
+    // BeautyFilter instances for the same source, their diagnostic
+    // breadcrumbs will carry distinct IDs so we can tell them apart
+    // in errors.log without relying on frame-count guesswork.
+    if (typeof BeautyFilter._nextId !== 'number') BeautyFilter._nextId = 0;
+    this._instanceId = ++BeautyFilter._nextId;
+
     // Auto-Beauty — AI-driven continuous tuning via Bedrock Claude
     // Haiku vision. Every AUTO_TICK_MS (15s) while enabled, samples
     // the RAW video into a JPEG, ships it to main via electronAPI,
@@ -674,54 +681,105 @@ export class BeautyFilter {
           this.video.videoHeight !== this.canvas.height)) {
         this._resizeTo(this.video.videoWidth, this.video.videoHeight);
       }
+
+      // Detailed per-frame timing. We need to distinguish three
+      // different classes of "slow render":
+      //
+      //   1. GPU-work-bound: _renderFrame itself takes a long time
+      //      (e.g. 40ms+ per call). Fix is less GPU work.
+      //
+      //   2. rAF-throttle-bound: _renderFrame is fast (e.g. 5ms)
+      //      but rAF only fires every 100ms+. Fix is reducing
+      //      system pressure (CPU, encoder, MediaRecorder) that
+      //      causes Chromium to throttle rAF.
+      //
+      //   3. Multi-instance-bound: two or more filter instances
+      //      both fast, but sharing GPU cycles. Fix is stopping
+      //      the duplicate from spawning.
+      //
+      // Previous diagnostics couldn't tell these apart — we saw
+      // "slow fps" and guessed. Now we measure frame cost AND
+      // the gap between rAF fires, AND the instance id is stamped
+      // so multi-instance shows up unambiguously in errors.log.
+      const frameStart = performance.now();
+      if (this._lastRafStart) {
+        this._rafGapSum = (this._rafGapSum || 0) + (frameStart - this._lastRafStart);
+        this._rafGapCount = (this._rafGapCount || 0) + 1;
+      }
+      this._lastRafStart = frameStart;
+
       this._renderFrame();
 
-      // Render-rate diagnostic. Logs a breadcrumb to errors.log every
-      // 5 seconds so we can see — in a log file uploaded post-hoc —
-      // whether the render loop is hitting 30+ fps or stalling. Also
-      // reports the segmenter state and bgMode at sample time, since
-      // those are the heaviest contributors to slow rendering
-      // (segmenter adds GPU contention during load; bg effects add
-      // mask sampling + composite work per frame).
-      //
-      // Logs ONLY if fps drops below 20 (normal 30-60fps operation
-      // doesn't need to pollute the log). This keeps errors.log
-      // readable during healthy sessions while still capturing the
-      // signal when something's actually wrong.
+      const frameEnd = performance.now();
+      const frameMs = frameEnd - frameStart;
+      this._frameMsSum = (this._frameMsSum || 0) + frameMs;
+      this._frameMsMax = Math.max(this._frameMsMax || 0, frameMs);
+
+      // Aggregate over 5-second windows. Only write to errors.log
+      // when fps < 20 (would be kicked by the platform). DevTools
+      // console gets a breadcrumb every window regardless.
       this._renderFrameCount = (this._renderFrameCount || 0) + 1;
-      const nowTs = performance.now();
-      if (!this._renderFpsStart) this._renderFpsStart = nowTs;
-      const windowMs = nowTs - this._renderFpsStart;
+      if (!this._renderFpsStart) this._renderFpsStart = frameStart;
+      const windowMs = frameEnd - this._renderFpsStart;
       if (windowMs >= 5000) {
-        const fps = (this._renderFrameCount * 1000) / windowMs;
-        // Always log to DevTools console — cheap and useful during
-        // interactive debugging
+        const fps          = (this._renderFrameCount * 1000) / windowMs;
+        const avgFrameMs   = this._frameMsSum / this._renderFrameCount;
+        const maxFrameMs   = this._frameMsMax;
+        const avgRafGapMs  = this._rafGapCount > 0
+          ? this._rafGapSum / this._rafGapCount
+          : 0;
+        const idleRatio    = Math.max(0, 1 - (this._frameMsSum / windowMs));
+
         // eslint-disable-next-line no-console
-        console.log(`[BeautyFilter] render fps (last 5s): ${fps.toFixed(1)}`);
-        // Log to errors.log ONLY if the rate is problematically low
-        // (stream would get kicked at <15 fps, so flag below 20).
+        console.log(
+          `[BeautyFilter#${this._instanceId}] fps=${fps.toFixed(1)} ` +
+          `avgFrame=${avgFrameMs.toFixed(1)}ms maxFrame=${maxFrameMs.toFixed(0)}ms ` +
+          `avgRafGap=${avgRafGapMs.toFixed(1)}ms idle=${(idleRatio * 100).toFixed(0)}%`
+        );
+
         if (fps < 20) {
           try {
+            // verdict tag helps humans reading errors.log see the
+            // diagnosis at a glance: GPU_BOUND vs THROTTLED vs OK
+            let verdict;
+            if (avgFrameMs > 30)           verdict = 'GPU_BOUND';
+            else if (avgRafGapMs > 50)     verdict = 'RAF_THROTTLED';
+            else                           verdict = 'UNKNOWN';
+
             window.electronAPI?.errors?.log?.(
               'warn', 'beauty-filter',
-              `Render loop slow: ${fps.toFixed(1)} fps over last ${(windowMs / 1000).toFixed(1)}s`,
+              `Render loop slow [${verdict}]: ${fps.toFixed(1)} fps, ` +
+              `frame=${avgFrameMs.toFixed(1)}ms (max ${maxFrameMs.toFixed(0)}ms), ` +
+              `rafGap=${avgRafGapMs.toFixed(1)}ms, idle=${(idleRatio * 100).toFixed(0)}%`,
               {
-                fps: Number(fps.toFixed(2)),
-                frameCount: this._renderFrameCount,
-                windowMs: Math.round(windowMs),
-                canvasW: this.canvas?.width,
-                canvasH: this.canvas?.height,
-                bgMode: this.config?.bgMode ?? 0,
-                filterEnabled: !!this.config?.enabled,
-                segmenterExists: !!this._segmenter,
-                segmenterReady: !!(this._segmenter && this._segmenter.ready),
+                instanceId:       this._instanceId,
+                verdict,
+                fps:              Number(fps.toFixed(2)),
+                avgFrameMs:       Number(avgFrameMs.toFixed(2)),
+                maxFrameMs:       Number(maxFrameMs.toFixed(0)),
+                avgRafGapMs:      Number(avgRafGapMs.toFixed(2)),
+                idleRatio:        Number(idleRatio.toFixed(3)),
+                frameCount:       this._renderFrameCount,
+                windowMs:         Math.round(windowMs),
+                canvasW:          this.canvas?.width,
+                canvasH:          this.canvas?.height,
+                blurW:            this._blurW,
+                blurH:            this._blurH,
+                bgMode:           this.config?.bgMode ?? 0,
+                filterEnabled:    !!this.config?.enabled,
+                segmenterExists:  !!this._segmenter,
+                segmenterReady:   !!(this._segmenter && this._segmenter.ready),
                 segmenterLoading: !!this._segmenterInitStarted && !(this._segmenter && this._segmenter.ready),
               }
             );
           } catch {}
         }
         this._renderFrameCount = 0;
-        this._renderFpsStart = nowTs;
+        this._renderFpsStart   = frameEnd;
+        this._frameMsSum       = 0;
+        this._frameMsMax       = 0;
+        this._rafGapSum        = 0;
+        this._rafGapCount      = 0;
       }
     } catch (err) {
       this._failSafe('renderFrame', err);
