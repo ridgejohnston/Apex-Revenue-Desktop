@@ -392,12 +392,23 @@ void main() {
   //    1 = definite person) so edges feather naturally. When u_bgMode
   //    == 0 this stage is skipped entirely.
   if (u_bgMode != 0) {
-    // Slight remap tightens the feather zone — without this, MediaPipe's
-    // low-confidence band (≈0.2–0.5 around hair/shoulders) leaves a halo
-    // of the original bg around the subject.
+    // Read mask confidence at this pixel. MediaPipe selfie_segmenter's
+    // confidence distribution is biased:
+    //   • Background: confidence ≈ 0.00..0.15 (tight, most bg pixels)
+    //   • Transition (hair/fabric/shoulder edges): ≈ 0.15..0.60
+    //   • Solid person (torso, cheeks): ≈ 0.70..1.00
+    // The PREVIOUS smoothstep centered at 0.5 put the decision boundary
+    // inside the transition zone, so edge pixels with confidence 0.3–0.5
+    // composed as ~50% background. Result: small "holes" in the person
+    // silhouette where the real bg peeked through, especially on moving
+    // arms/shoulders. Dropping the center to 0.38 pulls the decision
+    // boundary AWAY from solid-person confidence and INTO the low-end
+    // transition zone, keeping edge pixels as "person" where they
+    // belong — no more holes at the silhouette.
     float raw = texture(u_mask, v_uv).r;
     float f   = max(u_maskFeather, 0.01);
-    float personW = smoothstep(0.5 - f, 0.5 + f, raw);
+    float center = 0.38;
+    float personW = smoothstep(center - f, center + f, raw);
 
     vec3 bgSource;
     if (u_bgMode == 1) {

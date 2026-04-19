@@ -100,6 +100,27 @@ export class BeautyFilter {
     this._framesSinceAnalysis = 0;      // frame counter for periodic calibration
     this._lastAnalysis        = null;   // { transitionRatio, rawFeather, ts } — for diagnostics
 
+    // Motion tracking for stale-mask compensation.
+    // MediaPipe inference runs at ~15-25 fps on most machines while the
+    // compositor renders at 30+ fps. Between mask updates, the video
+    // frame changes but the mask doesn't — on fast moves, the subject
+    // drifts ahead of its mask, leaving "ghost trails" of bg color
+    // behind the old silhouette. We detect this by computing the per-
+    // pixel L1 delta between each incoming mask and the previous one.
+    // When delta is high (rapid motion), we transiently widen the
+    // feather so the transition band expands outward to cover the
+    // drift region — turning hard ghost-trails into soft gradients
+    // that the eye barely registers. When motion settles, feather
+    // snaps back to the steady-state auto-calibrated value.
+    this._prevMaskData       = null;   // Float32Array (copied, not shared)
+    this._motionBoost        = 0.0;    // additional feather in [0, 0.15]
+    this._motionDecayFrames  = 0;      // countdown of frames to decay
+    // Generation counter from the segmenter that was last uploaded.
+    // When this doesn't match segmenter._maskGen we have a new mask
+    // to upload. Starting at -1 guarantees the first ready mask always
+    // uploads (segmenter starts at 0).
+    this._lastUploadedMaskGen = -1;
+
     try {
       this._setup();
     } catch (err) {
@@ -452,37 +473,49 @@ export class BeautyFilter {
       this._segmenter.pushFrame(this.video);
     }
 
-    // If the segmenter has a fresh mask, upload it. Happens once per
-    // inference result, independent of render frame rate.
+    // If the segmenter has a fresh mask, upload it. We only re-upload
+    // when the segmenter's _maskGen counter advances past the one we
+    // last uploaded — inference runs at ~15-25 fps while compositing
+    // runs at 30 fps, so without this check we'd re-upload the same
+    // 65k-pixel Float32Array multiple times per second for nothing.
+    // The first mask always uploads because _lastUploadedMaskGen starts
+    // at -1 and _maskGen starts at 0.
     if (bgModeActive && this._segmenter && this._segmenter.ready) {
-      // CRITICAL: the mask must be uploaded with the SAME vertical flip
-      // as the video texture above. Both MediaPipe's mask and the video
-      // arrive in "image coordinates" (top row first, like a raster
-      // scan). We upload the video with UNPACK_FLIP_Y_WEBGL=true so its
-      // top row lands at UV v=1 — matching the standard GL convention
-      // where the shader samples texture(sampler, v_uv) and (0,0) is
-      // bottom-left. The mask needs the identical flip so that when the
-      // composite shader reads texture(u_mask, v_uv), the person's head
-      // at UV v=1 samples the top of the mask (where MediaPipe actually
-      // put the head). Without this flip the mask reads upside-down
-      // relative to the video — the head gets composited with the
-      // mask's bottom-row values (frequently background) and the
-      // torso with the mask's top-row values, producing a blur pattern
-      // that roughly resembles a flipped cutout of the subject. That's
-      // what Ridge's bug screenshot showed.
-      gl.bindTexture(gl.TEXTURE_2D, this.texMask);
-      this._segmenter.uploadMaskTo(gl);
+      const gen = this._segmenter._maskGen | 0;
+      const isNewMask = gen !== this._lastUploadedMaskGen;
+      if (isNewMask) {
+        // CRITICAL: the mask must be uploaded with the SAME vertical flip
+        // as the video texture above. Both MediaPipe's mask and the video
+        // arrive in "image coordinates" (top row first, like a raster
+        // scan). We upload the video with UNPACK_FLIP_Y_WEBGL=true so its
+        // top row lands at UV v=1 — matching the standard GL convention
+        // where the shader samples texture(sampler, v_uv) and (0,0) is
+        // bottom-left. The mask needs the identical flip so that when the
+        // composite shader reads texture(u_mask, v_uv), the person's head
+        // at UV v=1 samples the top of the mask (where MediaPipe actually
+        // put the head). Without this flip the mask reads upside-down
+        // relative to the video.
+        gl.bindTexture(gl.TEXTURE_2D, this.texMask);
+        this._segmenter.uploadMaskTo(gl);
+        this._lastUploadedMaskGen = gen;
 
-      // Auto-feather calibration — once per ~30 frames (roughly 1 sec
-      // at 30 fps), analyze the mask's confidence distribution and
-      // EMA-smooth toward the computed optimum. Running continuously
-      // means we adapt to changing lighting (a lamp flicks on, user
-      // changes posture) instead of baking in a bad first-frame
-      // estimate forever.
-      this._framesSinceAnalysis++;
-      if (this.config.autoFeather && this._framesSinceAnalysis >= 30) {
-        this._framesSinceAnalysis = 0;
-        this._analyzeMaskForHalo();
+        // Motion tracking — compute frame-to-frame delta of the new mask
+        // and adjust the feather uniform based on how much the subject
+        // moved since the previous mask. High motion → widen the feather
+        // transiently to hide the gap between this mask and the 1-2
+        // video frames the compositor drew against its predecessor.
+        this._updateMotionBoost(this._segmenter._maskData);
+
+        // Auto-feather calibration — once per ~30 new masks (≈1 sec at
+        // 30-fps inference), analyze the mask's confidence distribution
+        // and EMA-smooth toward the computed optimum. Running on
+        // per-new-mask cadence (not per-render-frame) means the analysis
+        // isn't wasting work on identical masks.
+        this._framesSinceAnalysis++;
+        if (this.config.autoFeather && this._framesSinceAnalysis >= 30) {
+          this._framesSinceAnalysis = 0;
+          this._analyzeMaskForHalo();
+        }
       }
     } else {
       this._framesSinceAnalysis = 0;
@@ -684,17 +717,89 @@ export class BeautyFilter {
   }
 
   /**
-   * Resolve the u_maskFeather uniform value. In auto mode, returns the
-   * EMA-smoothed value computed from periodic mask analysis. In manual
-   * mode, maps the user's 0..100 slider into the shader's 0.05..0.30
-   * working range.
+   * Resolve the u_maskFeather uniform value. Combines:
+   *   • Base feather — EMA-smoothed auto-value, or user's manual slider
+   *   • Motion boost — transient widening during fast subject motion
+   *                    (see _updateMotionBoost). Helps hide the gap
+   *                    between an incoming mask and the slightly-older
+   *                    frames the compositor is drawing against it.
+   * Clamped to a hard ceiling of 0.40 so the filter can never become
+   * so soft that the subject completely detaches from the bg.
    */
   _resolveFeather() {
+    let base;
     if (this.config.autoFeather !== false) {
-      return this._currentFeather;
+      base = this._currentFeather;
+    } else {
+      const t = Math.max(0, Math.min(100, this.config.manualFeather ?? 50)) / 100;
+      base = 0.05 + t * 0.25; // 0.05..0.30
     }
-    const t = Math.max(0, Math.min(100, this.config.manualFeather ?? 50)) / 100;
-    return 0.05 + t * 0.25;   // 0.05..0.30
+    return Math.min(0.40, base + this._motionBoost);
+  }
+
+  /**
+   * Called when a fresh mask arrives. Computes an L1 distance between
+   * the new mask and the previous one to gauge how fast the subject is
+   * moving, and adjusts _motionBoost accordingly:
+   *
+   *   • High delta (subject moving fast) → boost to ~0.10 extra feather
+   *     so the transition zone widens and hides the gap between the
+   *     new mask and the 1-2 video frames the compositor has already
+   *     drawn against a stale mask.
+   *   • Low delta (subject still) → boost decays to 0 over ~15 frames
+   *     (~0.5 sec at 30fps), returning to the tight steady-state edge.
+   *
+   * The L1 per-pixel comparison is cheap (256×256 = 65k ops, ~300 µs)
+   * and runs only when a new mask lands (≤25 times per second), not
+   * on every render frame.
+   */
+  _updateMotionBoost(maskData) {
+    if (!maskData || !maskData.length) return;
+
+    // First mask ever — just capture it, no motion signal yet.
+    if (!this._prevMaskData || this._prevMaskData.length !== maskData.length) {
+      this._prevMaskData = new Float32Array(maskData);
+      return;
+    }
+
+    // L1 distance, stride-4 subsample for speed. 256×256 mask → 4096
+    // samples. Cheap, statistically stable.
+    let sum = 0;
+    let count = 0;
+    const stride = 4;
+    for (let i = 0; i < maskData.length; i += stride) {
+      sum += Math.abs(maskData[i] - this._prevMaskData[i]);
+      count++;
+    }
+    const avgDelta = sum / Math.max(1, count);
+
+    // Copy current into prev for next comparison. We have to clone
+    // because the Float32Array we just received may be mutated by
+    // the worker next inference.
+    this._prevMaskData.set(maskData);
+
+    // Map average delta → boost amount. Empirically:
+    //   avgDelta < 0.02 → still (no boost)
+    //   avgDelta ~ 0.06 → normal shift (mild boost)
+    //   avgDelta > 0.12 → fast movement (full boost)
+    const MIN_DELTA = 0.02;
+    const MAX_DELTA = 0.12;
+    const MAX_BOOST = 0.10;
+    let targetBoost = 0;
+    if (avgDelta > MIN_DELTA) {
+      const t = Math.min(1, (avgDelta - MIN_DELTA) / (MAX_DELTA - MIN_DELTA));
+      targetBoost = t * MAX_BOOST;
+    }
+
+    // Asymmetric response:
+    //   • Ramp UP fast (attack α=0.7): catch motion immediately so the
+    //     first wide-feather frame is already close to the target.
+    //   • Decay DOWN slow (release α=0.08): ~15-frame decay preserves
+    //     the widened feather for a moment after motion stops, which
+    //     masks the final "settling" frame when MediaPipe's mask
+    //     catches up to the now-stationary subject.
+    const alpha = targetBoost > this._motionBoost ? 0.7 : 0.08;
+    this._motionBoost = (1 - alpha) * this._motionBoost + alpha * targetBoost;
   }
 
   /**
