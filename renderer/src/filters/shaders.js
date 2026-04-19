@@ -302,8 +302,16 @@ vec3 sampleGradient(float t) {
 
   for (int i = 0; i < 5; i++) {
     vec4 slot = u_bgGradSlots[i];
-    bool active = slot.a > 0.5;
-    if (!active) continue;
+    // 'isActive' not 'active' — 'active' is a GLSL reserved word (used
+    // for subroutine qualifiers in desktop GLSL 4.x, reserved across
+    // all GLSL ES versions). Chromium ANGLE's shader validator rejects
+    // it, which causes the whole FRAG_COMPOSITE program to fail to
+    // compile — and since this is the final pass of the pipeline,
+    // a link failure takes down ALL filters (beauty, color, lighting,
+    // bg effects). That regression shipped in v3.4.9 when the 5-slot
+    // gradient was added; fixed in v3.4.14.
+    bool isActive = slot.a > 0.5;
+    if (!isActive) continue;
 
     vec3 col = slot.rgb;
     float a  = anchors[i];
