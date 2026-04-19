@@ -39,9 +39,12 @@ const DEFAULT_CONFIG = {
   lowLight:   0,    // 0–100 — shadow lift (gamma) for dim rooms
   radial:     0,    // -100 (full vignette) .. +100 (full key light)
   // Background
-  bgMode:     0,    // 0=off, 1=blur, 2=color
-  bgStrength: 60,   // 0–100 — Gaussian blur strength when bgMode=1
-  bgColor:    '#1a1a22', // hex — replacement color when bgMode=2
+  bgMode:       0,
+  bgStrength:   60,
+  bgColor:      '#1a1a22',
+  // Mask edge handling
+  autoFeather:  true,     // true → calibrate feather from mask statistics
+  manualFeather: 50,      // 0–100 — user override when autoFeather=false
 };
 
 // Map a 0–100 slider to a bilateral sigma_color in [0.02, 0.25].
@@ -77,6 +80,19 @@ export class BeautyFilter {
     this._lastError   = null;
     this._segmenter = null;
     this._segmenterInitStarted = false;
+
+    // Auto-feather calibration state. u_maskFeather controls how wide
+    // the smoothstep transition zone is around the 0.5 confidence line
+    // in the composite shader. Too tight → halo (original bg bleeds
+    // through around hair). Too wide → hard edge goes soft and the
+    // subject detaches from the bg. The right value depends on subject
+    // edge characteristics (hair/fabric/glasses) and lighting — so we
+    // compute it from the mask's confidence distribution once per
+    // second and smooth it with an EMA.
+    this._currentFeather      = 0.15;   // seed; actual feather shader uniform
+    this._autoFeatherEMA      = 0.15;   // smoothed running value
+    this._framesSinceAnalysis = 0;      // frame counter for periodic calibration
+    this._lastAnalysis        = null;   // { transitionRatio, rawFeather, ts } — for diagnostics
 
     try {
       this._setup();
@@ -395,6 +411,20 @@ export class BeautyFilter {
       gl.bindTexture(gl.TEXTURE_2D, this.texMask);
       this._segmenter.uploadMaskTo(gl);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+      // Auto-feather calibration — once per ~30 frames (roughly 1 sec
+      // at 30 fps), analyze the mask's confidence distribution and
+      // EMA-smooth toward the computed optimum. Running continuously
+      // means we adapt to changing lighting (a lamp flicks on, user
+      // changes posture) instead of baking in a bad first-frame
+      // estimate forever.
+      this._framesSinceAnalysis++;
+      if (this.config.autoFeather && this._framesSinceAnalysis >= 30) {
+        this._framesSinceAnalysis = 0;
+        this._analyzeMaskForHalo();
+      }
+    } else {
+      this._framesSinceAnalysis = 0;
     }
 
     // If filter is disabled, short-circuit: just blit the video straight
@@ -419,7 +449,7 @@ export class BeautyFilter {
       gl.uniform1f(this.locComposite.aspect,     W / Math.max(1, H));
       gl.uniform1i(this.locComposite.bgMode,     0);
       gl.uniform3f(this.locComposite.bgColor,    0, 0, 0);
-      gl.uniform1f(this.locComposite.maskFeather, 0.15);
+      gl.uniform1f(this.locComposite.maskFeather, this._resolveFeather());
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       return;
     }
@@ -502,7 +532,7 @@ export class BeautyFilter {
     gl.uniform1i(this.locComposite.bgMode,     effectiveBgMode);
     const bgRgb = hexToRgb(c.bgColor ?? '#1a1a22');
     gl.uniform3f(this.locComposite.bgColor,    bgRgb[0], bgRgb[1], bgRgb[2]);
-    gl.uniform1f(this.locComposite.maskFeather, 0.15);
+    gl.uniform1f(this.locComposite.maskFeather, this._resolveFeather());
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
@@ -526,6 +556,93 @@ export class BeautyFilter {
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.texMask);
     gl.uniform1i(this.locComposite.mask, 3);
+  }
+
+  /**
+   * Resolve the u_maskFeather uniform value. In auto mode, returns the
+   * EMA-smoothed value computed from periodic mask analysis. In manual
+   * mode, maps the user's 0..100 slider into the shader's 0.05..0.30
+   * working range.
+   */
+  _resolveFeather() {
+    if (this.config.autoFeather !== false) {
+      return this._currentFeather;
+    }
+    const t = Math.max(0, Math.min(100, this.config.manualFeather ?? 50)) / 100;
+    return 0.05 + t * 0.25;   // 0.05..0.30
+  }
+
+  /**
+   * Auto-halo detection. Samples the current mask (owned by the
+   * SelfieSegmenter on the main thread), measures how wide the
+   * transition band is — the fraction of pixels whose confidence
+   * sits between the "definitely bg" and "definitely person" bands.
+   *
+   * Why this works:
+   * • A cleanly-segmented subject on a high-contrast bg produces a
+   *   mask with most pixels near 0 or near 1; the transition band is
+   *   a thin ring around the silhouette. Small transition ratio →
+   *   small feather is enough.
+   * • A fuzzy subject (flyaway hair, fabric, glasses) produces lots
+   *   of mid-confidence pixels. Large transition ratio → needs more
+   *   feather to hide the ambiguity, else we see halo.
+   *
+   * The raw computed feather is EMA-smoothed into _currentFeather so
+   * lighting changes or posture shifts re-settle gradually rather
+   * than jumping the shader uniform.
+   *
+   * Cost: one pass over the mask with stride-2 subsampling. For a
+   * 256×256 MediaPipe mask that's ~16k samples — a few hundred µs on
+   * any hardware, run once per ~30 render frames (≈ once per second).
+   */
+  _analyzeMaskForHalo() {
+    const seg = this._segmenter;
+    if (!seg || !seg._maskData || !seg._maskW || !seg._maskH) return;
+
+    const data = seg._maskData;
+    const w = seg._maskW;
+    const h = seg._maskH;
+
+    let total = 0;
+    let transition = 0;
+
+    // Stride-2 subsample on both axes = 4× speedup, same distribution
+    // shape within statistical noise.
+    const stride = 2;
+    for (let y = 0; y < h; y += stride) {
+      for (let x = 0; x < w; x += stride) {
+        const v = data[y * w + x];
+        total++;
+        if (v > 0.1 && v < 0.9) transition++;
+      }
+    }
+    if (total === 0) return;
+
+    const transitionRatio = transition / total;
+
+    // Linear map from transition-ratio to feather width:
+    //   ≤ 5 % transition → 0.08 (tight/confident segmentation)
+    //   ~15 % transition → ~0.17 (normal cam performer on typical bg)
+    //   ≥ 25 % transition → 0.25 (fuzzy edges, low contrast — max feather)
+    const rawFeather = Math.max(0.05, Math.min(0.25,
+      0.08 + Math.max(0, transitionRatio - 0.05) * 0.9
+    ));
+
+    // EMA toward the new value. alpha=0.25 → ~75 % weight on history,
+    // 25 % on this measurement. With 1-per-second cadence the feather
+    // converges to a steady state within ~4 seconds and won't thrash
+    // under transient changes (the subject briefly turning sideways,
+    // a webcam AE adjustment, etc.).
+    const alpha = 0.25;
+    this._autoFeatherEMA = (1 - alpha) * this._autoFeatherEMA + alpha * rawFeather;
+    this._currentFeather = this._autoFeatherEMA;
+
+    this._lastAnalysis = {
+      transitionRatio,
+      rawFeather,
+      emaFeather: this._currentFeather,
+      ts: performance.now(),
+    };
   }
 
   _failSafe(stage, err) {

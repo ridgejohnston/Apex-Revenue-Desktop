@@ -37,6 +37,8 @@ export default function BeautyPanel({
       bgMode:     0,
       bgStrength: 60,
       bgColor:    '#1a1a22',
+      autoFeather: true,
+      manualFeather: 50,
     });
   }, [config.enabled, onChange]);
 
@@ -157,6 +159,14 @@ export default function BeautyPanel({
                   value={config.bgColor ?? '#1a1a22'}
                   onChange={(v) => set('bgColor', v)} />
               </>
+            )}
+            {(config.bgMode || 0) > 0 && (
+              <EdgeSoftnessRow
+                autoFeather={config.autoFeather !== false}
+                manualFeather={config.manualFeather ?? 50}
+                onAutoChange={(v) => set('autoFeather', v)}
+                onManualChange={(v) => set('manualFeather', v)}
+              />
             )}
             <InstalledFooter
               status={mediapipeStatus}
@@ -523,6 +533,45 @@ function InstalledFooter({ status, onUninstall }) {
       >
         Uninstall
       </button>
+    </div>
+  );
+}
+
+/**
+ * Edge-softness control — governs u_maskFeather in the composite shader.
+ * Default "Auto" uses beauty-filter's halo detector to calibrate from
+ * live mask stats (better for everyday use). Flipping Auto off reveals
+ * a manual slider for performers who want a specific look locked in.
+ */
+function EdgeSoftnessRow({ autoFeather, manualFeather, onAutoChange, onManualChange }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text, #f5f5f5)' }}>
+            Edge Softness
+          </div>
+          <div style={{ fontSize: 9, color: 'var(--text-dim, #9ca3af)', marginTop: 2 }}>
+            {autoFeather
+              ? 'Auto-calibrated to hide halos around hair / fabric'
+              : 'Manual override — wider softens, tighter sharpens'}
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: autoFeather ? 'var(--accent, #cc0000)' : 'var(--text-dim, #9ca3af)' }}>
+            Auto
+          </span>
+          <Switch value={autoFeather} onChange={onAutoChange} />
+        </div>
+      </div>
+      {!autoFeather && (
+        <input
+          type="range"
+          min={0} max={100} value={manualFeather}
+          onChange={(e) => onManualChange(Number(e.target.value))}
+          style={{ width: '100%', accentColor: 'var(--accent, #cc0000)' }}
+        />
+      )}
     </div>
   );
 }
