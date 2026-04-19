@@ -17,6 +17,17 @@ export default function SettingsModal({ onClose }) {
   const [updateCheck, setUpdateCheck] = useState({ state: 'idle' });
   // state: 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'ready' | 'error'
 
+  // ─── AI Services Account (Settings → AWS/AI tab) ─────────
+  // Shows the model's Apex account sign-in status and — when signed in
+  // to a paid tier — confirms AI services are live. This is NOT a
+  // BYOK AWS credential form: under the Apex-hosted architecture,
+  // Bedrock calls are paid by Apex and routed through an Apex-owned
+  // endpoint using the user's Cognito ID token as authorization. The
+  // user never enters AWS Access Keys.
+  const [aiSession, setAiSession] = useState(null);    // { email, ... } | null
+  const [aiPlan, setAiPlan] = useState(null);          // 'free' | 'platinum' | 'agency' | null
+  const [aiBusy, setAiBusy] = useState(false);         // true during sign-in / sign-out
+
   useEffect(() => {
     (async () => {
       const keys = Object.keys(settings);
@@ -27,13 +38,75 @@ export default function SettingsModal({ onClose }) {
       setSettings(loaded);
       const v = await api.getVersion();
       setAppVersion(v);
+
+      // Load the current Apex session + subscription tier for the AI
+      // Services Account section. Both calls are cheap (cached in
+      // electron-store) and tolerate being called with no sign-in.
+      try {
+        const session = await api.auth.getSession?.();
+        setAiSession(session || null);
+      } catch { setAiSession(null); }
+      try {
+        const sub = await api.subscription?.get?.();
+        setAiPlan(sub?.plan || 'free');
+      } catch { setAiPlan(null); }
     })();
 
     // Mirror the global update status into our local state while modal is open
     api.updates.onStatus((status) => {
       setUpdateCheck(status);
     });
+
+    // If another window or a remote revoke fires sign-out, reflect it here.
+    const unbind = api.auth?.onSignedOutRemote?.(() => {
+      setAiSession(null);
+      setAiPlan('free');
+    });
+    return () => { try { unbind?.(); } catch {} };
   }, []);
+
+  // ─── AI Services Account handlers ─────────────────────
+  const handleAiSignIn = async () => {
+    setAiBusy(true);
+    try {
+      await api.auth.hostedUiSignIn();
+      // The Hosted UI flow completes in an external browser then
+      // round-trips back via a deep link. When the main process
+      // finishes processing the callback it updates the session in
+      // electron-store. We poll for up to 60s so the UI reflects
+      // sign-in completion without requiring a manual refresh.
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const session = await api.auth.getSession?.();
+        if (session) {
+          setAiSession(session);
+          try {
+            const sub = await api.subscription?.get?.();
+            setAiPlan(sub?.plan || 'free');
+          } catch { setAiPlan('free'); }
+          break;
+        }
+      }
+    } catch (err) {
+      console.warn('Hosted UI sign-in failed:', err);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const handleAiSignOut = async () => {
+    setAiBusy(true);
+    try {
+      await api.auth.signOut();
+      setAiSession(null);
+      setAiPlan('free');
+    } catch (err) {
+      console.warn('Sign-out failed:', err);
+    } finally {
+      setAiBusy(false);
+    }
+  };
 
   const toggle = async (key) => {
     const newVal = !settings[key];
@@ -160,6 +233,73 @@ export default function SettingsModal({ onClose }) {
 
           {tab === 'aws' && (
             <div className="flex-col gap-3">
+              {/* ── AI Services Account ──────────────────────
+                  User-facing sign-in for Apex-hosted AI services.
+                  Bedrock-powered features (AI Coach, AI Filters,
+                  AI Prompts) are paid by Apex as part of the
+                  Platinum/Agency subscription — users sign in
+                  with their Apex account, not with AWS keys. */}
+              <div style={{
+                padding: '12px 14px',
+                background: 'var(--bg-elevated, #111)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                marginBottom: 4,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 8, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+                  AI Services Account
+                </div>
+
+                {aiSession ? (
+                  <>
+                    {/* Signed-in state */}
+                    <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+                      <div style={{ fontSize: 11, color: 'var(--text, #f5f5f5)' }}>
+                        {aiSession.email || 'Signed in'}
+                      </div>
+                      <AiPlanBadge plan={aiPlan} />
+                    </div>
+
+                    <div style={{ fontSize: 10, color: 'var(--text-dim, #9ca3af)', marginBottom: 10, lineHeight: 1.5 }}>
+                      {aiPlan === 'agency' && (
+                        <>✓ All AI services active — AI Coach, AI Filters, AI Prompts. Inference is covered by your Agency subscription.</>
+                      )}
+                      {aiPlan === 'platinum' && (
+                        <>✓ AI Filters and AI Prompts active. Upgrade to Agency to unlock AI Coach.</>
+                      )}
+                      {(aiPlan === 'free' || !aiPlan) && (
+                        <>Free tier — AI services are locked. Upgrade to Platinum or Agency to enable Bedrock-powered features.</>
+                      )}
+                    </div>
+
+                    <button
+                      className="btn btn-sm"
+                      onClick={handleAiSignOut}
+                      disabled={aiBusy}
+                      style={{ fontSize: 10 }}
+                    >
+                      {aiBusy ? '...' : 'Sign Out'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {/* Signed-out state */}
+                    <div style={{ fontSize: 10, color: 'var(--text-dim, #9ca3af)', marginBottom: 10, lineHeight: 1.5 }}>
+                      Sign in with your Apex Revenue account to activate AI Coach, AI Filters, and AI Prompts. Inference is included in Platinum and Agency subscriptions — no AWS credentials required.
+                    </div>
+                    <button
+                      className="btn btn-sm btn-accent"
+                      onClick={handleAiSignIn}
+                      disabled={aiBusy}
+                      style={{ fontSize: 10, minWidth: 140 }}
+                    >
+                      {aiBusy ? 'Waiting for sign-in…' : 'Sign in to Apex'}
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {/* ── Service toggles (existing) ───────────── */}
               <SettingToggle label="AI Prompts (Bedrock)" value={settings.awsPromptMode === 'bedrock'} onChange={() => toggle('awsPromptMode')} />
               <SettingToggle label="Voice Alerts (Polly)" value={settings.awsVoiceEnabled} onChange={() => toggle('awsVoiceEnabled')} />
               <SettingToggle label="Session Backup (S3)" value={settings.awsBackupEnabled} onChange={() => toggle('awsBackupEnabled')} />
@@ -242,5 +382,40 @@ function HotkeyRow({ label, hotkey }) {
         {hotkey}
       </span>
     </div>
+  );
+}
+
+// Small tier indicator used inside the AI Services Account card. Colors
+// match the Titlebar TierBadge for consistency (gold for Agency, purple
+// for Platinum, gray for Free) but sized down for the tighter Settings
+// layout. Defensive against unknown tier values (treats as Free).
+function AiPlanBadge({ plan }) {
+  const p = (plan || 'free').toLowerCase();
+  let label, bg, color;
+  if (p === 'agency') {
+    label = 'AGENCY';
+    bg = 'rgba(20, 184, 166, 0.15)';
+    color = '#2dd4bf';
+  } else if (p === 'platinum') {
+    label = 'PLATINUM';
+    bg = 'rgba(139, 92, 246, 0.15)';
+    color = '#a78bfa';
+  } else {
+    label = 'FREE';
+    bg = 'rgba(156, 163, 175, 0.15)';
+    color = '#9ca3af';
+  }
+  return (
+    <span style={{
+      fontSize: 9,
+      padding: '2px 8px',
+      borderRadius: 3,
+      fontWeight: 700,
+      letterSpacing: 0.5,
+      background: bg,
+      color,
+    }}>
+      {label}
+    </span>
   );
 }
