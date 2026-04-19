@@ -1379,7 +1379,11 @@ class StreamEngine extends EventEmitter {
     this.streamProcess.stderr.on('data', (chunk) => {
       stderrBuf += chunk.toString();
       if (stderrBuf.length > 12000) stderrBuf = stderrBuf.slice(-8000);
-      this._parseProgressLine(chunk.toString());
+      // Use the same parser the non-pipe stream path uses (line ~1031).
+      // A prior refactor renamed the callsite to _parseProgressLine but
+      // the method was never created — every stderr chunk in pipe mode
+      // would crash with TypeError, which is what Ridge's log showed.
+      this._handleFFmpegOutput(chunk.toString());
     });
 
     // stdin errors (e.g. EPIPE when FFmpeg exits while we're still

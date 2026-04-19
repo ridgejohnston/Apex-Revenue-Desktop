@@ -1587,8 +1587,35 @@ function setupAutoUpdater() {
 }
 
 // ─── IPC: Manual update check + install ─────────────────
-ipcMain.handle('updates:check', () => {
-  return autoUpdater.checkForUpdates().catch((e) => ({ error: e.message }));
+//
+// IMPORTANT: electron-updater's checkForUpdates() resolves to an
+// UpdateCheckResult object that contains non-clonable internals
+// (AbortController, cancellationToken, downloadPromise with native
+// bindings). Returning it raw across the IPC boundary throws
+// "An object could not be cloned" — which is what was showing up in
+// errors.log for every manual update check. We extract just the
+// fields the renderer actually needs.
+ipcMain.handle('updates:check', async () => {
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    if (!result || !result.updateInfo) {
+      return { ok: true, updateInfo: null };
+    }
+    const { version, releaseDate, releaseName, releaseNotes } = result.updateInfo;
+    return {
+      ok: true,
+      updateInfo: {
+        version: version || null,
+        releaseDate: releaseDate || null,
+        releaseName: releaseName || null,
+        // releaseNotes can be a string OR an array of {version,note} objects
+        // depending on the provider; both forms are structured-clone safe.
+        releaseNotes: releaseNotes || null,
+      },
+    };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
 });
 
 ipcMain.on('updates:install', () => {
