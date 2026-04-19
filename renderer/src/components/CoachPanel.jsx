@@ -151,6 +151,13 @@ export default function CoachPanel({ user, liveData, platform, effectivePlan, un
   }
 
   if (!unlocked) {
+    // AI Coach is an Agency-tier (Tier 3) feature. If the user is
+    // Platinum they see "Upgrade to Agency"; if Free they see
+    // "Upgrade to Agency" too (skipping straight past Platinum
+    // for this feature since Platinum doesn't include it). The
+    // upsell landing page explains both tiers.
+    const currentPlanLabel = effectivePlan?.toUpperCase() || 'FREE';
+    const ctaLabel = 'Upgrade to Agency';
     return (
       <div style={{ padding: 16 }}>
         <div style={{
@@ -168,7 +175,7 @@ export default function CoachPanel({ user, liveData, platform, effectivePlan, un
             AI Coach
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-dim, #9ca3af)', lineHeight: 1.5, marginBottom: 14 }}>
-            Ask your coach anything — session strategy, content planning, pacing advice, bad nights. Aware of your live stats, on-call 24/7.
+            Ask your coach anything — session strategy, content planning, pacing advice, bad nights. Aware of your live stats, on-call 24/7. Included in the Agency tier.
           </div>
           <div style={{
             display: 'inline-block',
@@ -179,10 +186,10 @@ export default function CoachPanel({ user, liveData, platform, effectivePlan, un
             borderRadius: 4, cursor: 'pointer',
           }}
                onClick={() => window.open('https://apexrevenue.works/billing', '_blank')}>
-            Upgrade to Platinum
+            {ctaLabel}
           </div>
           <div style={{ fontSize: 9, color: 'var(--text-dim, #6b7280)', marginTop: 10 }}>
-            Currently on: {effectivePlan?.toUpperCase() || 'FREE'}
+            Currently on: {currentPlanLabel}
           </div>
         </div>
       </div>
