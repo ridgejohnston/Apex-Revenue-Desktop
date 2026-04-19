@@ -26,6 +26,12 @@
 
 import { VERT_SRC, FRAG_BILATERAL, FRAG_GAUSSIAN_BLUR, FRAG_COMPOSITE } from './shaders.js';
 import { SelfieSegmenter } from './selfie-segmentation.js';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const {
+  GRADIENT_SLOT_KEYS,
+  GRADIENT_SLOT_COUNT,
+  isGradientSlotActive,
+} = require('../../../shared/beauty-config');
 
 const DEFAULT_CONFIG = {
   enabled:    true,
@@ -237,8 +243,12 @@ export class BeautyFilter {
       aspect:      gl.getUniformLocation(this.progComposite, 'u_aspect'),
       bgMode:      gl.getUniformLocation(this.progComposite, 'u_bgMode'),
       bgColor:     gl.getUniformLocation(this.progComposite, 'u_bgColor'),
-      bgGradA:     gl.getUniformLocation(this.progComposite, 'u_bgGradA'),
-      bgGradB:     gl.getUniformLocation(this.progComposite, 'u_bgGradB'),
+      // u_bgGradSlots is declared as vec4[5] in the fragment shader. WebGL2
+      // exposes each array element as its own uniform location; we resolve
+      // them up front so the hot path just writes to the stored refs.
+      bgGradSlots: Array.from({ length: GRADIENT_SLOT_COUNT }, (_, i) =>
+        gl.getUniformLocation(this.progComposite, `u_bgGradSlots[${i}]`)
+      ),
       bgGradStyle: gl.getUniformLocation(this.progComposite, 'u_bgGradStyle'),
       maskFeather: gl.getUniformLocation(this.progComposite, 'u_maskFeather'),
     };
@@ -573,13 +583,23 @@ export class BeautyFilter {
     gl.uniform1i(this.locComposite.bgMode,     effectiveBgMode);
     const bgRgb = hexToRgb(c.bgColor ?? '#1a1a22');
     gl.uniform3f(this.locComposite.bgColor,    bgRgb[0], bgRgb[1], bgRgb[2]);
-    // Gradient uniforms. These are always written, even when bgMode !== 3 —
-    // the shader's branch makes them no-ops in other modes, and writing
-    // constants is cheaper than a JS conditional. Keeps the hot path simple.
-    const gA = hexToRgb(c.bgGradientA ?? '#1a1a22');
-    const gB = hexToRgb(c.bgGradientB ?? '#cc0000');
-    gl.uniform3f(this.locComposite.bgGradA,    gA[0], gA[1], gA[2]);
-    gl.uniform3f(this.locComposite.bgGradB,    gB[0], gB[1], gB[2]);
+    // Gradient slots A..E. Each packed as vec4(r, g, b, active) so a slot
+    // set to the 'none' sentinel writes {0,0,0,0} and sampleGradient()
+    // in the shader skips it. Writing zero colors for inactive slots
+    // makes them safe for any default-value fallback path in the shader
+    // (sampleGradient never reads them, but defensive hygiene doesn't
+    // hurt). Always written, even when bgMode !== 3 — the shader's
+    // branch makes them no-ops in other modes, cheaper than a JS if.
+    for (let i = 0; i < GRADIENT_SLOT_COUNT; i++) {
+      const key  = GRADIENT_SLOT_KEYS[i];
+      const val  = c[key];
+      if (isGradientSlotActive(val)) {
+        const [r, g, b] = hexToRgb(val);
+        gl.uniform4f(this.locComposite.bgGradSlots[i], r, g, b, 1.0);
+      } else {
+        gl.uniform4f(this.locComposite.bgGradSlots[i], 0.0, 0.0, 0.0, 0.0);
+      }
+    }
     gl.uniform1i(this.locComposite.bgGradStyle, (c.bgGradientStyle ?? 0) | 0);
     gl.uniform1f(this.locComposite.maskFeather, this._resolveFeather());
     gl.drawArrays(gl.TRIANGLES, 0, 3);

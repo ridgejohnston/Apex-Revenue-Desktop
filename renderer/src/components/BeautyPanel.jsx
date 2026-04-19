@@ -1,5 +1,13 @@
 import React, { useCallback } from 'react';
-const { BG_GRADIENT_STYLES, BG_GRADIENT_PRESETS } = require('../../../shared/beauty-config');
+const {
+  BG_GRADIENT_STYLES,
+  BG_GRADIENT_PRESETS,
+  GRADIENT_NONE,
+  GRADIENT_SLOT_KEYS,
+  GRADIENT_SLOT_LABELS,
+  GRADIENT_SLOT_COUNT,
+  isGradientSlotActive,
+} = require('../../../shared/beauty-config');
 
 /**
  * Filter settings panel — lives in the RightPanel ✨ Beauty tab.
@@ -40,6 +48,9 @@ export default function BeautyPanel({
       bgColor:    '#1a1a22',
       bgGradientA: '#1a1a22',
       bgGradientB: '#cc0000',
+      bgGradientC: GRADIENT_NONE,
+      bgGradientD: GRADIENT_NONE,
+      bgGradientE: GRADIENT_NONE,
       bgGradientStyle: 0,
       autoFeather: true,
       manualFeather: 50,
@@ -167,16 +178,17 @@ export default function BeautyPanel({
             )}
             {config.bgMode === 3 && (
               <GradientControls
-                colorA={config.bgGradientA ?? '#1a1a22'}
-                colorB={config.bgGradientB ?? '#cc0000'}
+                slots={GRADIENT_SLOT_KEYS.map((k) => config[k])}
                 style={config.bgGradientStyle ?? 0}
-                onColorAChange={(v) => set('bgGradientA', v)}
-                onColorBChange={(v) => set('bgGradientB', v)}
+                onSlotChange={(i, v) => set(GRADIENT_SLOT_KEYS[i], v)}
                 onStyleChange={(v) => set('bgGradientStyle', v)}
                 onPresetApply={(preset) => onChange({
                   ...config,
                   bgGradientA:     preset.a,
                   bgGradientB:     preset.b,
+                  bgGradientC:     preset.c,
+                  bgGradientD:     preset.d,
+                  bgGradientE:     preset.e,
                   bgGradientStyle: preset.style,
                 })}
               />
@@ -523,65 +535,198 @@ function PresetSwatches({ value, onChange }) {
 }
 
 /**
- * Background → Gradient controls. Shown when bgMode === 3. Three stacked
- * rows so a performer can go from zero to styled background in one tap
- * (presets) or dial in a custom look (A/B pickers + style dropdown):
+ * Background → Gradient controls. Shown when bgMode === 3. Four stacked
+ * regions support going from zero to styled in one tap or dialing in a
+ * custom multi-color gradient:
  *
- *   1. Preset gradients  — 8 curated one-tap combos (Apex brand, Sunset,
- *                          Midnight, Rose Gold, Neon, Ocean, Warm Studio,
- *                          Lavender Dusk). Applies both colors + a style
- *                          that reads best with those colors. User can
- *                          still change style after.
- *   2. Color A + Color B — Native color pickers. Live-update the filter
- *                          on every change; no "apply" button needed.
- *   3. Style selector    — 4×2 grid of the 8 spatial patterns. Each has
- *                          a tiny SVG icon showing what the gradient
- *                          does to the two picked colors so the choice
- *                          is visual, not just textual.
+ *   1. Preset gradients — 8 one-tap curated combos spanning 2, 3, and
+ *      5-color compositions. Tap applies all 5 slots (setting unused
+ *      ones to the 'none' sentinel) + the style that reads best with
+ *      those colors. User can still tweak slots/style after.
  *
- * All three rows write into the same config object via onChange; the
- * shader re-renders on every frame with the current values, so changes
- * are immediately visible in preview.
+ *   2. Color slots A..E — up to five pickers. A slot can be:
+ *        • Active: native color input + 'No Color' button (hides slot)
+ *        • Inactive: hidden entirely per the "hide when No Color" rule
+ *      Slots are hidden independently — so a 2-color setup (A+B only)
+ *      shows only two rows, cleanly matching what the performer
+ *      configured. An "+ Add color" row appears below the last active
+ *      slot and promotes the next inactive slot to a color.
+ *
+ *   3. Style selector — 4×2 grid of the 8 spatial patterns. Each tile
+ *      renders a CSS preview of the ACTUAL current slots (not just
+ *      A→B) so the performer sees what a 3- or 5-color gradient
+ *      actually looks like in each pattern.
+ *
+ * The "natural fade" semantics (A gets more space, E less when later
+ * slots are inactive) are implemented in the fragment shader's
+ * sampleGradient() helper — the UI just renders what's configured
+ * and trusts the shader. Slot anchor positions match exactly:
+ *   A=0.0  B=0.25  C=0.5  D=0.75  E=1.0
  */
 function GradientControls({
-  colorA, colorB, style,
-  onColorAChange, onColorBChange, onStyleChange, onPresetApply,
+  slots, style,
+  onSlotChange, onStyleChange, onPresetApply,
 }) {
+  // Find the first inactive slot so we can show an "+ Add color" row
+  // just below the last active one. Scanning forward and taking the
+  // first inactive index gives us a stable insertion point even when
+  // earlier slots get toggled off (the "add" affordance stays glued
+  // to the bottom of the active range).
+  const firstInactiveIdx = slots.findIndex((s) => !isGradientSlotActive(s));
+  const canAdd = firstInactiveIdx >= 0 && firstInactiveIdx < GRADIENT_SLOT_COUNT;
+
+  // When the user clicks "+ Add color", we promote the next inactive
+  // slot to a reasonable default hex. We seed with the same brand
+  // crimson A/B defaults + three appealing follow-ups so the added
+  // slot doesn't arrive as pure black. User immediately re-colors via
+  // the picker anyway, but the seed makes the visual change obvious.
+  const ADD_SEEDS = ['#1a1a22', '#cc0000', '#e8489d', '#6a1bff', '#1a8a9a'];
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <GradientPresetRow
-        colorA={colorA}
-        colorB={colorB}
-        style={style}
-        onApply={onPresetApply}
-      />
-      <ColorRow label="Color A" value={colorA} onChange={onColorAChange} />
-      <ColorRow label="Color B" value={colorB} onChange={onColorBChange} />
-      <GradientStylePicker
-        colorA={colorA}
-        colorB={colorB}
-        value={style}
-        onChange={onStyleChange}
-      />
+      <GradientPresetRow slots={slots} style={style} onApply={onPresetApply} />
+
+      {/* Render only ACTIVE slots — hide-when-none rule */}
+      {slots.map((v, i) => {
+        if (!isGradientSlotActive(v)) return null;
+        return (
+          <GradientSlotRow
+            key={i}
+            label={GRADIENT_SLOT_LABELS[i]}
+            value={v}
+            canDeactivate={countActive(slots) > 1}
+            onChange={(next) => onSlotChange(i, next)}
+            onDeactivate={() => onSlotChange(i, GRADIENT_NONE)}
+          />
+        );
+      })}
+
+      {/* "+ Add color" affordance — appears below the last active slot */}
+      {canAdd && (
+        <button
+          type="button"
+          onClick={() => onSlotChange(firstInactiveIdx, ADD_SEEDS[firstInactiveIdx] || '#cccccc')}
+          style={{
+            padding: '7px 10px',
+            fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase',
+            color: 'var(--text-dim, #9ca3af)',
+            background: 'transparent',
+            border: '1px dashed var(--border, #2a2a35)',
+            borderRadius: 3,
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          + Add color {GRADIENT_SLOT_LABELS[firstInactiveIdx]}
+        </button>
+      )}
+
+      <GradientStylePicker slots={slots} value={style} onChange={onStyleChange} />
     </div>
   );
 }
 
+// ─── Gradient helpers (shared by preset, slot-row, and style-picker) ───
+
+function countActive(slots) {
+  let n = 0;
+  for (const s of slots) if (isGradientSlotActive(s)) n++;
+  return n;
+}
+
 /**
- * Preset row for gradients. Same 5-column grid as PresetSwatches so the
- * UI rhythm matches. Each swatch is a mini CSS gradient using the
- * preset's actual colors, so the performer sees what they're about to
- * apply. Layout: 8 presets = 5 columns x 2 rows.
- *
- * Selected detection: a preset is "selected" when all three fields
- * (colorA, colorB, style) match. Case-insensitive hex comparison so
- * uppercase and lowercase forms both match.
+ * Build a CSS gradient string using up-to-5 slots with the same
+ * "natural fade" semantics the fragment shader uses:
+ *   A=0%  B=25%  C=50%  D=75%  E=100%
+ * Inactive slots are omitted from the color-stops list, and the last
+ * active color is extended to 100% so the tail of the gradient reads
+ * as a flat hold (matching the shader). If only one color is active,
+ * we return a solid-color "gradient" — CSS needs at least 2 stops,
+ * so we duplicate the single color at 0% and 100%.
  */
-function GradientPresetRow({ colorA, colorB, style, onApply }) {
-  const isSelected = (p) =>
-    p.a.toLowerCase() === (colorA || '').toLowerCase() &&
-    p.b.toLowerCase() === (colorB || '').toLowerCase() &&
-    p.style === style;
+function buildCssStops(slots) {
+  const anchors = [0, 25, 50, 75, 100];
+  const stops = [];
+  for (let i = 0; i < GRADIENT_SLOT_COUNT; i++) {
+    if (isGradientSlotActive(slots[i])) stops.push({ c: slots[i], p: anchors[i] });
+  }
+  if (stops.length === 0) return { ok: false, stops: [] };
+  if (stops.length === 1) return { ok: true, stops: [{ c: stops[0].c, p: 0 }, { c: stops[0].c, p: 100 }] };
+  // Hold the last active color from its anchor through 100%
+  const last = stops[stops.length - 1];
+  if (last.p < 100) stops.push({ c: last.c, p: 100 });
+  return { ok: true, stops };
+}
+
+function stopsToString(stops) {
+  return stops.map((s) => `${s.c} ${s.p}%`).join(', ');
+}
+
+/**
+ * Build a CSS preview for a given spatial style using the current
+ * multi-stop slot list. The shader's precise output is authoritative;
+ * these CSS strings just give the UI enough fidelity to distinguish
+ * styles and convey what each pattern looks like with the configured
+ * colors. CSS can't exactly replicate the shader's tie-dye swirl or
+ * square (Chebyshev) distance field, so we use conic/radial gradient
+ * approximations that are visually close enough for at-a-glance tile
+ * differentiation.
+ */
+function cssPreviewForSlotGradient(style, slots) {
+  const { ok, stops } = buildCssStops(slots);
+  if (!ok) return 'var(--bg-elevated, #1a1a22)';
+  const s = stopsToString(stops);
+  switch (style) {
+    case 0: return `linear-gradient(to bottom, ${s})`;
+    case 1: return `linear-gradient(to right, ${s})`;
+    case 2: return `linear-gradient(135deg, ${s})`;
+    case 3: return `linear-gradient(225deg, ${s})`;
+    case 4: return `radial-gradient(circle at center, ${s})`;
+    case 5: {
+      // Tie-dye: conic gradient with all active stops, cycled once
+      // back to the first color to avoid the seam discontinuity that
+      // a raw conic gradient would show.
+      const active = stops.filter((x, i, arr) => !(i === arr.length - 1 && x.p === 100 && arr[i-1] && arr[i-1].c === x.c));
+      if (active.length >= 2) {
+        const cycled = [...active.map((x) => x.c), active[0].c].join(', ');
+        return `conic-gradient(from 0deg at 50% 50%, ${cycled})`;
+      }
+      return `radial-gradient(circle at center, ${s})`;
+    }
+    case 6: return `radial-gradient(farthest-side at center, ${s})`;
+    case 7: {
+      // Waves: repeating linear, compressed to ~25% so the repeats
+      // read as banded. Only use the FIRST two active colors — the
+      // repeating-linear-gradient syntax doesn't play well with >2.
+      const first = stops[0]?.c ?? '#000';
+      const second = stops[1]?.c ?? first;
+      return `repeating-linear-gradient(to bottom, ${first} 0%, ${second} 25%, ${first} 50%)`;
+    }
+    default: return `linear-gradient(to bottom, ${s})`;
+  }
+}
+
+/**
+ * Preset row for gradients. 4×2 grid. Each swatch shows a linear CSS
+ * preview using the preset's full slot palette (some have 2, some 3,
+ * some all 5 colors) so the performer can tell at a glance how rich
+ * a given preset will be.
+ *
+ * Selected detection: a preset is "selected" when every slot (A..E)
+ * and the style all match. Case-insensitive hex comparison so stored
+ * uppercase/lowercase forms both match.
+ */
+function GradientPresetRow({ slots, style, onApply }) {
+  const isSelected = (p) => {
+    const presetSlots = [p.a, p.b, p.c, p.d, p.e];
+    if (p.style !== style) return false;
+    for (let i = 0; i < GRADIENT_SLOT_COUNT; i++) {
+      const a = (presetSlots[i] || '').toLowerCase();
+      const b = (slots[i] || '').toLowerCase();
+      if (a !== b) return false;
+    }
+    return true;
+  };
 
   return (
     <div style={{
@@ -591,6 +736,12 @@ function GradientPresetRow({ colorA, colorB, style, onApply }) {
     }}>
       {BG_GRADIENT_PRESETS.map((p) => {
         const selected = isSelected(p);
+        // Preview uses each preset's own slot palette
+        const presetSlotsArr = [p.a, p.b, p.c, p.d, p.e];
+        const { ok, stops } = buildCssStops(presetSlotsArr);
+        const bg = ok
+          ? `linear-gradient(135deg, ${stopsToString(stops)})`
+          : 'var(--bg-elevated, #1a1a22)';
         return (
           <button
             key={p.name}
@@ -600,10 +751,7 @@ function GradientPresetRow({ colorA, colorB, style, onApply }) {
             onClick={() => onApply(p)}
             style={{
               aspectRatio: '1 / 1',
-              // Linear-gradient CSS preview of the actual colors — fast
-              // visual read, and correct enough to convey vibe even if
-              // the preset's actual style is radial/tie-dye/etc.
-              background: `linear-gradient(135deg, ${p.a}, ${p.b})`,
+              background: bg,
               border: selected
                 ? '2px solid var(--accent, #cc0000)'
                 : '1px solid var(--border, #2a2a35)',
@@ -621,16 +769,74 @@ function GradientPresetRow({ colorA, colorB, style, onApply }) {
 }
 
 /**
- * Gradient style picker. 4×2 grid of miniature SVG previews — each shows
- * exactly what the 8 spatial patterns do to the currently-selected
- * color A → color B pair. Seeing the current colors in every preview
- * means the performer can A/B styles without guessing.
- *
- * Preview rendering: each style is approximated by CSS — cheap, no
- * canvas/webgl needed at panel-draw time. The actual shader does the
- * precise version at composite time.
+ * One color-slot row. Shown only when the slot is active. Displays:
+ *   • Slot label (A..E)
+ *   • Native color picker
+ *   • Hex readout
+ *   • "No Color" button (hidden when there's only one active slot —
+ *     we prevent deactivating the last one, else the gradient becomes
+ *     empty and the shader falls back to u_bgColor which is confusing).
  */
-function GradientStylePicker({ colorA, colorB, value, onChange }) {
+function GradientSlotRow({ label, value, canDeactivate, onChange, onDeactivate }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <span style={{
+        fontSize: 10, fontWeight: 700, letterSpacing: 1,
+        textTransform: 'uppercase',
+        color: 'var(--text, #f5f5f5)',
+        width: 56,
+      }}>
+        Color {label}
+      </span>
+      <input
+        type="color"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: 40, height: 26, padding: 0,
+          border: '1px solid var(--border, #2a2a35)',
+          borderRadius: 3,
+          background: 'transparent',
+          cursor: 'pointer',
+        }}
+      />
+      <span style={{
+        fontSize: 10, color: 'var(--text-dim, #9ca3af)',
+        fontVariantNumeric: 'tabular-nums',
+        flex: 1,
+      }}>
+        {(value || '').toUpperCase()}
+      </span>
+      {canDeactivate && (
+        <button
+          type="button"
+          onClick={onDeactivate}
+          title="Remove this color from the gradient"
+          style={{
+            background: 'transparent',
+            border: '1px solid var(--border, #2a2a35)',
+            color: 'var(--text-dim, #9ca3af)',
+            fontSize: 9, fontWeight: 700, letterSpacing: 1,
+            textTransform: 'uppercase',
+            borderRadius: 3,
+            padding: '4px 8px',
+            cursor: 'pointer',
+          }}
+        >
+          No Color
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Gradient style picker. 4×2 grid of miniature previews — each shows
+ * what the 8 spatial patterns do to the CURRENT multi-stop slot
+ * configuration (not just A/B). Seeing real colors in every preview
+ * means the performer can A/B styles without guessing at outcomes.
+ */
+function GradientStylePicker({ slots, value, onChange }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{
@@ -657,7 +863,7 @@ function GradientStylePicker({ colorA, colorB, value, onChange }) {
               style={{
                 position: 'relative',
                 aspectRatio: '1 / 1',
-                background: cssPreviewForStyle(s.value, colorA, colorB),
+                background: cssPreviewForSlotGradient(s.value, slots),
                 border: active
                   ? '2px solid var(--accent, #cc0000)'
                   : '1px solid var(--border, #2a2a35)',
@@ -688,37 +894,6 @@ function GradientStylePicker({ colorA, colorB, value, onChange }) {
   );
 }
 
-/**
- * Build a CSS preview string for each gradient style. These are
- * approximations — the real gradient is computed in the fragment
- * shader at composite time — but CSS has enough expressiveness to
- * convey the shape of each pattern so the performer can distinguish
- * them at a glance.
- */
-function cssPreviewForStyle(style, a, b) {
-  switch (style) {
-    case 0: return `linear-gradient(to bottom, ${a}, ${b})`;
-    case 1: return `linear-gradient(to right, ${a}, ${b})`;
-    case 2: return `linear-gradient(135deg, ${a}, ${b})`;
-    case 3: return `linear-gradient(225deg, ${a}, ${b})`;
-    case 4: return `radial-gradient(circle at center, ${a}, ${b})`;
-    case 5: {
-      // Tie-dye: layer a conic and a radial to hint at the swirl effect
-      return `conic-gradient(from 0deg at 50% 50%, ${a}, ${b}, ${a}, ${b}, ${a})`;
-    }
-    case 6: {
-      // Square: layered radial with small/large stops to suggest concentric squares
-      // CSS has no native "square radial" — use a conic gradient that steps
-      // at 45° intervals to hint at the axis-aligned edges.
-      return `radial-gradient(farthest-side at center, ${a} 0%, ${b} 100%)`;
-    }
-    case 7: {
-      // Waves: stacked linear gradients with repeating color bands
-      return `repeating-linear-gradient(to bottom, ${a} 0%, ${b} 25%, ${a} 50%)`;
-    }
-    default: return a;
-  }
-}
 
 /**
  * Small affordance at the bottom of the Background section once the

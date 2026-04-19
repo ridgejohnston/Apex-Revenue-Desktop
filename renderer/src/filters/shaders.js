@@ -169,8 +169,16 @@ uniform float     u_radial;      // -1..+1 — vignette / key light
 uniform float     u_aspect;      // width / height for circular radial math
 uniform int       u_bgMode;      // 0=off, 1=blur, 2=color, 3=gradient
 uniform vec3      u_bgColor;     // replacement color when u_bgMode == 2
-uniform vec3      u_bgGradA;     // gradient color A (from) when u_bgMode == 3
-uniform vec3      u_bgGradB;     // gradient color B (to)   when u_bgMode == 3
+// Gradient slots A..E as vec4(r, g, b, active). active ∈ {0.0, 1.0}.
+// Packing color + active-flag into one vec4 lets us ship all 5 slots
+// in a single uniform4fv call (20 floats), and makes the shader's
+// loop cleaner — no parallel arrays of colors and booleans to keep
+// in sync. The slot's anchor position along the gradient axis is
+// fixed (A=0.0, B=0.25, C=0.5, D=0.75, E=1.0) so an inactive slot
+// in the middle just gets skipped, and the neighboring active slots
+// remain at their original positions ("natural fade": A gets more
+// space when later slots are empty).
+uniform vec4      u_bgGradSlots[5];
 uniform int       u_bgGradStyle; // 0..7 — gradient pattern style
 uniform float     u_maskFeather; // 0..1 — soften mask edges (default 0.15)
 
@@ -248,6 +256,83 @@ float gradientT(vec2 uv, int style, float aspect) {
   return 0.0;
 }
 
+// ─── Multi-stop gradient sampler ─────────────────────────────────────
+// Given a parametric position t ∈ [0,1] along the gradient axis and
+// the 5 slot entries (color + active flag), return the interpolated
+// RGB color with "natural fade" semantics:
+//
+//   Each slot has a fixed anchor position: A=0.0, B=0.25, C=0.5,
+//   D=0.75, E=1.0. An inactive slot (alpha == 0) is dropped from
+//   the interpolation. The remaining active slots keep their original
+//   anchor positions, so when later slots are inactive the last
+//   active color holds steady across the remainder of the axis.
+//
+// Example: A=red, B=blue, C/D/E=none.
+//   t=0.0  → red
+//   t=0.1  → ~80% red / 20% blue (lerp A→B on the 0..0.25 segment)
+//   t=0.25 → blue
+//   t=0.5  → blue (no later active slot to interpolate into)
+//   t=1.0  → blue
+// This is the "A gets more space, E less (natural fade)" UX that
+// makes early-slot colors dominant when later slots are empty.
+//
+// Algorithm: walk the 5 slots in order; track the last active slot
+// as the "previous" anchor. At each active slot, if t falls between
+// the previous anchor and this one, lerp between them and return.
+// After the loop, t was past the last active slot, so return that
+// slot's color unchanged.
+//
+// A pathological case: zero active slots. Shouldn't happen in normal
+// use because the UI prevents disabling the last slot, but we guard
+// by returning the single-color u_bgColor — a reasonable fallback
+// color to substitute any nearby visual hole.
+vec3 sampleGradient(float t) {
+  // Fixed anchor positions matching the slot layout.
+  float anchors[5] = float[5](0.0, 0.25, 0.5, 0.75, 1.0);
+
+  bool  havePrev   = false;
+  float prevAnchor = 0.0;
+  vec3  prevColor  = vec3(0.0);
+
+  // Cache the very first active color so we can return it if t falls
+  // before the first active anchor (only relevant when slot A itself
+  // is inactive — unusual, but valid).
+  bool  haveFirst  = false;
+  vec3  firstColor = vec3(0.0);
+
+  for (int i = 0; i < 5; i++) {
+    vec4 slot = u_bgGradSlots[i];
+    bool active = slot.a > 0.5;
+    if (!active) continue;
+
+    vec3 col = slot.rgb;
+    float a  = anchors[i];
+
+    if (!haveFirst) {
+      haveFirst  = true;
+      firstColor = col;
+    }
+
+    if (havePrev && t <= a) {
+      // t is inside (prevAnchor..a], lerp previous → this
+      float span = max(a - prevAnchor, 1e-6);
+      float u = clamp((t - prevAnchor) / span, 0.0, 1.0);
+      return mix(prevColor, col, u);
+    }
+    havePrev   = true;
+    prevAnchor = a;
+    prevColor  = col;
+  }
+
+  // Exited the loop without returning. Either:
+  //   (a) no active slots at all → fall back to u_bgColor
+  //   (b) t is past the last active anchor → hold the last color
+  //   (c) t is before the first active anchor → hold the first color
+  if (!haveFirst) return u_bgColor;
+  if (t < anchors[0] && haveFirst) return firstColor; // dead branch on normal paths; kept for safety
+  return prevColor;
+}
+
 void main() {
   vec3 original = texture(u_original, v_uv).rgb;
   vec3 smoothed = texture(u_smoothed, v_uv).rgb;
@@ -320,11 +405,11 @@ void main() {
     } else if (u_bgMode == 2) {
       bgSource = u_bgColor;
     } else {
-      // u_bgMode == 3 — gradient. Compute per-pixel interpolation
-      // parameter from the chosen style, then blend between the two
-      // user-picked colors. Zero extra texture samples; pure ALU.
+      // u_bgMode == 3 — gradient. Compute per-pixel spatial parameter
+      // from the chosen style, then look up the color across up to 5
+      // stops with natural-fade handling of inactive slots.
       float t = gradientT(v_uv, u_bgGradStyle, u_aspect);
-      bgSource = mix(u_bgGradA, u_bgGradB, t);
+      bgSource = sampleGradient(t);
     }
     color = mix(bgSource, color, personW);
   }
