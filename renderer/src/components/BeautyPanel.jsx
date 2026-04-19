@@ -14,7 +14,10 @@ import React, { useCallback } from 'react';
  *
  * Tier-gated: Free users see a locked preview with a Platinum upsell CTA.
  */
-export default function BeautyPanel({ config, onChange, unlocked, effectivePlan }) {
+export default function BeautyPanel({
+  config, onChange, unlocked, effectivePlan,
+  mediapipeStatus, onInstallMediapipe, onUninstallMediapipe, mediapipeProgress,
+}) {
   const set = useCallback((key, value) => {
     onChange({ ...config, [key]: value });
   }, [config, onChange]);
@@ -123,29 +126,43 @@ export default function BeautyPanel({ config, onChange, unlocked, effectivePlan 
 
       {/* ─── BACKGROUND ─── */}
       <Section title="Background" dim={!config.enabled}>
-        <ModeSelector
-          value={config.bgMode || 0}
-          onChange={(v) => set('bgMode', v)}
-          options={[
-            { value: 0, label: 'Off' },
-            { value: 1, label: 'Blur' },
-            { value: 2, label: 'Color' },
-          ]}
-        />
-        {config.bgMode === 1 && (
-          <Slider label="Blur Strength" hint="Stronger → more out-of-focus"
-            min={0} max={100} value={config.bgStrength ?? 60}
-            onChange={(v) => set('bgStrength', v)} />
-        )}
-        {config.bgMode === 2 && (
-          <ColorRow label="Color"
-            value={config.bgColor ?? '#1a1a22'}
-            onChange={(v) => set('bgColor', v)} />
-        )}
-        {(config.bgMode || 0) > 0 && (
-          <div style={{ fontSize: 9, color: 'var(--text-dim, #6b7280)', lineHeight: 1.4 }}>
-            First activation downloads a ~3 MB person-segmentation model. Keep a light background behind you for best edge quality.
-          </div>
+        {!mediapipeStatus?.installed ? (
+          <InstallPrompt
+            progress={mediapipeProgress}
+            onInstall={onInstallMediapipe}
+          />
+        ) : (
+          <>
+            <ModeSelector
+              value={config.bgMode || 0}
+              onChange={(v) => set('bgMode', v)}
+              options={[
+                { value: 0, label: 'Off' },
+                { value: 1, label: 'Blur' },
+                { value: 2, label: 'Color' },
+              ]}
+            />
+            {config.bgMode === 1 && (
+              <Slider label="Blur Strength" hint="Stronger → more out-of-focus"
+                min={0} max={100} value={config.bgStrength ?? 60}
+                onChange={(v) => set('bgStrength', v)} />
+            )}
+            {config.bgMode === 2 && (
+              <>
+                <PresetSwatches
+                  value={config.bgColor ?? '#1a1a22'}
+                  onChange={(v) => set('bgColor', v)}
+                />
+                <ColorRow label="Custom"
+                  value={config.bgColor ?? '#1a1a22'}
+                  onChange={(v) => set('bgColor', v)} />
+              </>
+            )}
+            <InstalledFooter
+              status={mediapipeStatus}
+              onUninstall={onUninstallMediapipe}
+            />
+          </>
         )}
       </Section>
 
@@ -311,4 +328,218 @@ function ColorRow({ label, value, onChange }) {
       </span>
     </div>
   );
+}
+
+/**
+ * Install gate for the Background engine. Shown in place of the mode
+ * selector when mediapipeStatus.installed is false.
+ *
+ * Three visual states:
+ *   • Idle: headline + size + Install button
+ *   • Downloading: progress bar + bytes/total + phase label
+ *   • Error: red message + Retry button
+ *
+ * The progress prop is the same {phase, bytesDownloaded, totalBytes}
+ * shape the main-process installer emits, plumbed through App.jsx.
+ */
+function InstallPrompt({ progress, onInstall }) {
+  const installing = progress &&
+    ['manifest', 'assets', 'verify', 'finalize'].includes(progress.phase);
+  const errored = progress?.phase === 'error';
+
+  const pctRaw = progress?.totalBytes > 0
+    ? (progress.bytesDownloaded / progress.totalBytes) * 100
+    : 0;
+  const pct = Math.max(0, Math.min(100, pctRaw));
+
+  return (
+    <div style={{
+      padding: 14,
+      background: 'var(--bg-elevated, #1a1a22)',
+      border: '1px solid var(--border, #2a2a35)',
+      borderRadius: 5,
+      display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      <div>
+        <div style={{
+          fontSize: 11, fontWeight: 700, letterSpacing: 1,
+          textTransform: 'uppercase', color: 'var(--text, #f5f5f5)',
+          marginBottom: 4,
+        }}>
+          Install Background Engine
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--text-dim, #9ca3af)', lineHeight: 1.45 }}>
+          One-time 23 MB download. Runs locally on your machine — no footage leaves your device. Uninstall any time to reclaim space.
+        </div>
+      </div>
+
+      {installing && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{
+            height: 6, borderRadius: 3,
+            background: 'var(--bg-primary, #0a0a0f)',
+            overflow: 'hidden',
+          }}>
+            <div style={{
+              width: `${pct}%`, height: '100%',
+              background: 'var(--accent, #cc0000)',
+              transition: 'width 0.15s ease-out',
+            }} />
+          </div>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between',
+            fontSize: 9, color: 'var(--text-dim, #9ca3af)',
+            fontVariantNumeric: 'tabular-nums',
+          }}>
+            <span>{phaseLabel(progress.phase)}</span>
+            <span>
+              {formatBytes(progress.bytesDownloaded)} / {formatBytes(progress.totalBytes)}
+              {' '}({Math.round(pct)}%)
+            </span>
+          </div>
+        </div>
+      )}
+
+      {errored && (
+        <div style={{
+          fontSize: 10, color: '#ef4444', lineHeight: 1.4,
+          padding: '6px 8px',
+          background: 'rgba(239, 68, 68, 0.08)',
+          border: '1px solid rgba(239, 68, 68, 0.25)',
+          borderRadius: 3,
+        }}>
+          Install failed: {progress.message || 'unknown error'}
+        </div>
+      )}
+
+      {!installing && (
+        <button
+          type="button"
+          onClick={onInstall}
+          style={{
+            padding: '8px 16px',
+            background: 'var(--accent, #cc0000)',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 3,
+            fontSize: 11, fontWeight: 700, letterSpacing: 1.5,
+            textTransform: 'uppercase',
+            cursor: 'pointer',
+          }}
+        >
+          {errored ? 'Retry Install' : 'Install'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Preset color swatches for Background → Color mode. Curated set covers
+ * the situations a cam performer actually asks for:
+ *   • Studio neutrals (black, charcoal, soft grey) for clean portraits
+ *   • Warm/tan tones that flatter most skin
+ *   • Bold accents (red, teal, purple) for branding/personality
+ *   • Chroma-key green & blue for downstream OBS key-in workflows
+ * The "Infinity" full-picker lives below this row (ColorRow component).
+ */
+const PRESET_COLORS = [
+  { hex: '#000000', label: 'Black' },
+  { hex: '#1a1a22', label: 'Charcoal' },
+  { hex: '#3a3a44', label: 'Slate' },
+  { hex: '#8d7a68', label: 'Warm Tan' },
+  { hex: '#7a94b8', label: 'Dusk Blue' },
+  { hex: '#cc0000', label: 'Apex Red' },
+  { hex: '#14b8a6', label: 'Teal' },
+  { hex: '#a855f7', label: 'Purple' },
+  { hex: '#00b140', label: 'Chroma Green' },
+  { hex: '#0047bb', label: 'Chroma Blue' },
+];
+
+function PresetSwatches({ value, onChange }) {
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(5, 1fr)',
+      gap: 4,
+    }}>
+      {PRESET_COLORS.map((p) => {
+        const selected = value?.toLowerCase() === p.hex.toLowerCase();
+        return (
+          <button
+            key={p.hex}
+            type="button"
+            title={p.label}
+            aria-label={p.label}
+            onClick={() => onChange(p.hex)}
+            style={{
+              aspectRatio: '1 / 1',
+              background: p.hex,
+              border: selected
+                ? '2px solid var(--accent, #cc0000)'
+                : '1px solid var(--border, #2a2a35)',
+              borderRadius: 3,
+              cursor: 'pointer',
+              padding: 0,
+              outline: 'none',
+              transition: 'border-color 0.12s',
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Small affordance at the bottom of the Background section once the
+ * engine is installed — shows version/size for transparency and gives
+ * the user a path to uninstall (reclaim ~23 MB) without digging.
+ */
+function InstalledFooter({ status, onUninstall }) {
+  if (!status?.installed) return null;
+  const mb = Math.round((status.totalBytes || 0) / (1024 * 1024));
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      paddingTop: 6,
+      fontSize: 9, color: 'var(--text-dim, #6b7280)',
+      fontVariantNumeric: 'tabular-nums',
+    }}>
+      <span>Engine installed · {mb} MB</span>
+      <button
+        type="button"
+        onClick={onUninstall}
+        style={{
+          background: 'transparent',
+          border: 'none',
+          color: 'var(--text-dim, #9ca3af)',
+          fontSize: 9, fontWeight: 700, letterSpacing: 1,
+          textTransform: 'uppercase',
+          cursor: 'pointer',
+          textDecoration: 'underline',
+          padding: 0,
+        }}
+      >
+        Uninstall
+      </button>
+    </div>
+  );
+}
+
+function phaseLabel(phase) {
+  switch (phase) {
+    case 'manifest': return 'Fetching manifest…';
+    case 'assets':   return 'Downloading…';
+    case 'verify':   return 'Verifying…';
+    case 'finalize': return 'Installing…';
+    case 'done':     return 'Done';
+    default:         return 'Starting…';
+  }
+}
+
+function formatBytes(n) {
+  if (!n || n < 1024) return `${n || 0} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }

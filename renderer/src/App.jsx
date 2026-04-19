@@ -116,6 +116,14 @@ export default function App() {
   const beautyConfigRef = useRef(BEAUTY_DEFAULTS);
   const beautyFiltersRef = useRef({});   // sourceId → BeautyFilter
   useEffect(() => { beautyConfigRef.current = beautyConfig; }, [beautyConfig]);
+
+  // MediaPipe WASM + model install state. Background effects in the
+  // filter only work once the engine is installed; the InstallPrompt
+  // in BeautyPanel drives api.mediapipe.install() and shows progress.
+  const [mediapipeStatus, setMediapipeStatus] = useState({ installed: false });
+  const [mediapipeProgress, setMediapipeProgress] = useState(null);
+  const mediapipeInstalledRef = useRef(false);
+  useEffect(() => { mediapipeInstalledRef.current = !!mediapipeStatus.installed; }, [mediapipeStatus.installed]);
   const [showAuth, setShowAuth] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAddSource, setShowAddSource] = useState(false);
@@ -194,6 +202,12 @@ export default function App() {
       try {
         const saved = await api.store?.get?.(BEAUTY_STORE_KEY);
         if (saved) setBeautyConfig(clampBeauty(saved));
+      } catch {}
+
+      // Hydrate MediaPipe install status + subscribe to install progress
+      try {
+        const st = await api.mediapipe?.status?.();
+        if (st) setMediapipeStatus(st);
       } catch {}
     })();
 
@@ -311,7 +325,10 @@ export default function App() {
         // the current plan from a ref so this callback can stay stable.
         if (effectivePlanRef.current && isBeautyUnlocked(effectivePlanRef.current)) {
           try {
-            const filter = new BeautyFilter(stream, beautyConfigRef.current);
+            const filter = new BeautyFilter(stream, {
+              ...beautyConfigRef.current,
+              mediapipeInstalled: mediapipeInstalledRef.current,
+            });
             const filteredStream = filter.getStream();
             if (filteredStream !== stream) {
               beautyFiltersRef.current[id] = filter;
@@ -882,9 +899,58 @@ export default function App() {
     setBeautyConfig(clamped);
     // Persist to electron-store so settings survive restarts
     api.store?.set?.(BEAUTY_STORE_KEY, clamped);
-    // Live-update all active filter instances — no reload / reactivate
+    // Live-update all active filter instances — no reload / reactivate.
+    // We also re-send the current install flag on every update so the
+    // filter's lazy-segmenter gate sees it when the user flips bgMode on.
+    const update = { ...clamped, mediapipeInstalled: mediapipeInstalledRef.current };
     for (const filter of Object.values(beautyFiltersRef.current)) {
-      try { filter.update(clamped); } catch {}
+      try { filter.update(update); } catch {}
+    }
+  }, []);
+
+  // ─── MediaPipe install handlers ───────────────────────
+  // Subscribe to main-process progress events once on mount; the
+  // teardown returned by the bridge keeps React StrictMode happy.
+  useEffect(() => {
+    if (!api.mediapipe?.onProgress) return;
+    const off = api.mediapipe.onProgress((p) => setMediapipeProgress(p));
+    return () => { try { off?.(); } catch {} };
+  }, []);
+
+  const handleInstallMediapipe = useCallback(async () => {
+    setMediapipeProgress({ phase: 'manifest', bytesDownloaded: 0, totalBytes: 0 });
+    try {
+      const result = await api.mediapipe?.install?.();
+      if (result?.ok) {
+        setMediapipeStatus(result.status);
+        setMediapipeProgress(null);
+        // Nudge every live filter: install just completed, so the lazy
+        // segmenter gate should now open on the next update.
+        for (const filter of Object.values(beautyFiltersRef.current)) {
+          try { filter.update({ mediapipeInstalled: true }); } catch {}
+        }
+      } else {
+        setMediapipeProgress({ phase: 'error', message: result?.error || 'install failed' });
+      }
+    } catch (err) {
+      setMediapipeProgress({ phase: 'error', message: err?.message || String(err) });
+    }
+  }, []);
+
+  const handleUninstallMediapipe = useCallback(async () => {
+    try {
+      await api.mediapipe?.uninstall?.();
+      setMediapipeStatus({ installed: false });
+      setMediapipeProgress(null);
+      // Flip bg mode off in current config since the engine is gone
+      const next = clampBeauty({ ...beautyConfigRef.current, bgMode: 0 });
+      setBeautyConfig(next);
+      api.store?.set?.(BEAUTY_STORE_KEY, next);
+      for (const filter of Object.values(beautyFiltersRef.current)) {
+        try { filter.update({ ...next, mediapipeInstalled: false }); } catch {}
+      }
+    } catch (err) {
+      console.warn('[Apex] Mediapipe uninstall failed:', err?.message);
     }
   }, []);
 
@@ -1111,6 +1177,10 @@ export default function App() {
           onBeautyChange={handleBeautyChange}
           beautyUnlocked={isBeautyUnlocked(effectivePlan)}
           effectivePlan={effectivePlan}
+          mediapipeStatus={mediapipeStatus}
+          mediapipeProgress={mediapipeProgress}
+          onInstallMediapipe={handleInstallMediapipe}
+          onUninstallMediapipe={handleUninstallMediapipe}
         />
       </div>
 

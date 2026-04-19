@@ -23,6 +23,7 @@ export default function RightPanel({
   aiPrompt, onDismissPrompt, onAuthClick, activeScene,
   onToggleSourceVisible, onToggleCategory,
   beautyConfig, onBeautyChange, beautyUnlocked, effectivePlan,
+  mediapipeStatus, mediapipeProgress, onInstallMediapipe, onUninstallMediapipe,
 }) {
   const [sessionTimer, setSessionTimer] = useState(0);
   const timerRef = useRef(null);
@@ -73,6 +74,10 @@ export default function RightPanel({
             onChange={onBeautyChange}
             unlocked={beautyUnlocked}
             effectivePlan={effectivePlan}
+            mediapipeStatus={mediapipeStatus}
+            mediapipeProgress={mediapipeProgress}
+            onInstallMediapipe={onInstallMediapipe}
+            onUninstallMediapipe={onUninstallMediapipe}
           />
         )}
         {activeTab === 'live' && (

@@ -84,10 +84,14 @@ export class BeautyFilter {
       this._failSafe('setup', err);
     }
 
-    // If the initial config already has bg effects on (e.g. user had
-    // them on in the last session and store-hydration kicked in), start
-    // the segmenter immediately rather than waiting for an update().
-    if ((this.config.bgMode ?? 0) > 0 && !this._passthrough) {
+    // If the initial config already has bg effects on AND MediaPipe is
+    // already installed (user had bg on last session and already ran
+    // the installer), start the segmenter immediately rather than
+    // waiting for an update(). If not installed, the renderer will
+    // call update({mediapipeInstalled: true}) after install completes.
+    const wantsBg = (this.config.bgMode ?? 0) > 0;
+    const installed = this.config.mediapipeInstalled === true;
+    if (wantsBg && installed && !this._passthrough) {
       this._segmenterInitStarted = true;
       this._segmenter = new SelfieSegmenter(this.video);
       this._segmenter.init();
@@ -105,10 +109,14 @@ export class BeautyFilter {
   update(partial) {
     Object.assign(this.config, partial);
     // Lazy-load the selfie segmenter the first time the user enables any
-    // background effect. Costs ~2–3 MB of one-time network fetch and a
-    // few hundred ms of WASM compile. Users who never touch bg never pay.
+    // background effect AND the MediaPipe assets are locally installed.
+    // If bg is requested but not installed, silently no-op here; the UI
+    // (InstallPrompt in BeautyPanel) is the user-visible gate, and the
+    // composite shader's effectiveBgMode check falls back to bgMode=0
+    // whenever segmenter.ready is false — nothing breaks.
     const wantsSegmentation = (this.config.bgMode ?? 0) > 0;
-    if (wantsSegmentation && !this._segmenter && !this._segmenterInitStarted) {
+    const installed = this.config.mediapipeInstalled === true;
+    if (wantsSegmentation && installed && !this._segmenter && !this._segmenterInitStarted) {
       this._segmenterInitStarted = true;
       this._segmenter = new SelfieSegmenter(this.video);
       this._segmenter.init(); // async; ready flag flips when model loads
