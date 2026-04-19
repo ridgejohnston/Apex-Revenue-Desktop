@@ -94,7 +94,11 @@ export class BeautyFilter {
     if (wantsBg && installed && !this._passthrough) {
       this._segmenterInitStarted = true;
       this._segmenter = new SelfieSegmenter(this.video);
-      this._segmenter.init();
+      // Worker-backed init can reject if the worker fails to spawn or
+      // MediaPipe fails to load. Errors are already logged inside the
+      // segmenter; here we only need to swallow the rejection so it
+      // doesn't surface as an unhandled promise warning.
+      this._segmenter.init().catch(() => {});
     }
   }
 
@@ -119,7 +123,10 @@ export class BeautyFilter {
     if (wantsSegmentation && installed && !this._segmenter && !this._segmenterInitStarted) {
       this._segmenterInitStarted = true;
       this._segmenter = new SelfieSegmenter(this.video);
-      this._segmenter.init(); // async; ready flag flips when model loads
+      // async; ready flag flips when worker loads MediaPipe. Rejection
+      // is already logged inside the segmenter — swallow here so it
+      // doesn't bubble to an unhandled promise warning.
+      this._segmenter.init().catch(() => {});
     }
   }
 
@@ -372,6 +379,14 @@ export class BeautyFilter {
 
     const bgModeActive = (this.config.bgMode ?? 0) > 0;
     const bgBlurActive = (this.config.bgMode ?? 0) === 1;
+
+    // Drive the segmentation worker from the render loop. pushFrame is
+    // fire-and-forget: it'll skip if an inference is still in flight,
+    // and it'll skip if the segmenter isn't ready yet. No await — we
+    // never block compositing on ML inference.
+    if (bgModeActive && this._segmenter) {
+      this._segmenter.pushFrame(this.video);
+    }
 
     // If the segmenter has a fresh mask, upload it. Happens once per
     // inference result, independent of render frame rate.

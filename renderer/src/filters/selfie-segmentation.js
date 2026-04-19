@@ -1,39 +1,34 @@
 /**
- * Apex Revenue — Selfie Segmentation wrapper
+ * Apex Revenue — Selfie Segmentation (main-thread wrapper)
  *
- * Thin adapter over MediaPipe's Tasks Vision ImageSegmenter that:
- *   • Lazy-loads the WASM + model on first activation (so users who
- *     never enable bg blur never pay the ~3 MB download cost).
- *   • Runs its own timing loop, decoupled from the WebGL render loop.
- *     Segmentation is slower than 30 fps on modest hardware; if we
- *     tied it to rAF the whole filter would throttle. Instead we let
- *     it run as fast as the GPU allows and the render loop just uses
- *     whatever mask is freshest.
- *   • Exposes `.getMaskTexture(gl)` — paints the latest mask into a
- *     single-channel WebGL texture that the composite shader samples.
- *   • Graceful failure: if WASM or model fetch fails, `ready` stays
- *     false, `enabled` getter returns false, and the caller can keep
- *     running without background effects.
+ * Owns a dedicated Web Worker that runs MediaPipe Selfie Segmentation.
+ * The main thread never sees an ImageSegmenter instance — it only
+ * transfers ImageBitmaps in and receives Float32Array masks back,
+ * over transferable postMessages so nothing is copied across threads.
  *
- * Performance notes:
- *   • MediaPipe's selfie segmenter (float16) is ~2 MB and typically
- *     runs at 30+ fps on any integrated GPU from the last 5 years.
- *   • We use `outputConfidenceMasks: true` for soft 0..1 edges, NOT
- *     `outputCategoryMask: true` which is binary and produces hard
- *     halos around hair/shoulders.
+ * The previous implementation ran MediaPipe inline on the renderer
+ * thread. On weaker GPUs that caused visible frame hitches because
+ * WASM inference and WebGL compositing fought for the same event
+ * loop. Moving to a worker gives the inference its own thread and
+ * its own GC rhythm — the render loop never waits on it.
+ *
+ * External API (unchanged from the previous version):
+ *   • new SelfieSegmenter(videoEl, { wasmBase?, modelPath? })
+ *   • await .init()         — spawns worker, waits for 'ready'
+ *   • .pushFrame(videoEl)   — non-blocking; kicks off async inference
+ *                             on the latest frame if no request is
+ *                             in flight. Fire-and-forget.
+ *   • .uploadMaskTo(gl)     — uploads latest mask to a bound WebGL
+ *                             texture. Called from the render loop.
+ *   • .ready                — boolean; true once worker init succeeded
+ *   • .destroy()            — terminates worker, releases resources
+ *
+ * The BeautyFilter render loop drives pushFrame() itself — the worker
+ * has no timer of its own. This keeps segmentation naturally synced
+ * to video playback (no frames sent when the video is paused) and
+ * lets the filter skip segmentation entirely when bgMode = 0.
  */
 
-// Load MediaPipe Tasks Vision via dynamic import so its ~400 KB of
-// JavaScript is only pulled into the renderer when the user actually
-// turns on a background effect. On failure we swallow the error and
-// mark the segmenter unavailable.
-//
-// The WASM binaries and the .tflite model are NOT bundled with the app.
-// Users install them on demand via the Install button in the Filters
-// panel (see mediapipe-installer.js). By default we look for them at
-// the apex-mp:// protocol served from userData/mediapipe/assets/. If
-// the caller hasn't installed and still tries to start segmentation,
-// init() fails cleanly and the filter runs in no-bg mode.
 const DEFAULT_WASM_BASE = 'apex-mp://wasm/';
 const DEFAULT_MODEL_URL = 'apex-mp://models/selfie_segmenter.tflite';
 
@@ -42,115 +37,146 @@ export class SelfieSegmenter {
     this.video = videoEl;
     this.wasmBase = options.wasmBase || DEFAULT_WASM_BASE;
     this.modelPath = options.modelPath || DEFAULT_MODEL_URL;
-    this.segmenter = null;
+
     this.ready = false;
     this._disposed = false;
     this._lastError = null;
 
-    // Scratch canvas — MediaPipe returns an MPMask object which is
-    // cheapest to read as a Float32Array. We upload that straight into
-    // a WebGL texture; no intermediate canvas needed.
-    this._maskData = null;    // Float32Array of latest mask
+    // Latest mask state (updated when worker posts back)
+    this._maskData = null;
     this._maskW = 0;
     this._maskH = 0;
 
-    this._loopHandle = null;
+    // Backpressure: only one frame in flight at a time. Naturally
+    // throttles the effective segmentation rate to whatever the worker
+    // can sustain — no queue buildup, no stale frames piling up.
+    this._frameInFlight = false;
+
+    // Init promise state
+    this._worker = null;
+    this._initPromise = null;
+    this._initResolve = null;
+    this._initReject  = null;
   }
 
   async init() {
-    try {
-      // Dynamic import keeps the MediaPipe bundle out of the main chunk.
-      // @mediapipe/tasks-vision must be in package.json dependencies.
-      const { ImageSegmenter, FilesetResolver } =
-        await import('@mediapipe/tasks-vision');
+    if (this._initPromise) return this._initPromise;
+    this._initPromise = new Promise((resolve, reject) => {
+      this._initResolve = resolve;
+      this._initReject  = reject;
+    });
 
-      const fileset = await FilesetResolver.forVisionTasks(this.wasmBase);
-      this.segmenter = await ImageSegmenter.createFromOptions(fileset, {
-        baseOptions: {
-          modelAssetPath: this.modelPath,
-          delegate: 'GPU', // falls back to CPU automatically if unavailable
-        },
-        runningMode: 'VIDEO',
-        outputConfidenceMasks: true,
-        outputCategoryMask: false,
+    try {
+      // Module worker — webpack 5 bundles the referenced file as a
+      // separate chunk and rewrites the URL at build time. Works in
+      // both dev (webpack-dev-server) and prod (file://-loaded
+      // bundle) without any additional config.
+      this._worker = new Worker(
+        new URL('./segmentation-worker.js', import.meta.url),
+        { type: 'module' }
+      );
+      this._worker.onmessage = (e) => this._handleMessage(e.data);
+      this._worker.onerror   = (e) => this._onWorkerError(e);
+
+      // Tell the worker to load MediaPipe. Once it does, it'll post
+      // back { type: 'ready' } and we flip this.ready + resolve init.
+      this._worker.postMessage({
+        type: 'init',
+        wasmBase: this.wasmBase,
+        modelPath: this.modelPath,
       });
-      this.ready = true;
-      this._startLoop();
     } catch (err) {
-      this._lastError = err;
-      this.ready = false;
-      try {
-        window.electronAPI?.errors?.log?.(
-          'warn',
-          'selfie-segmentation',
-          `MediaPipe init failed: ${err?.message || err}`,
-          { stack: err?.stack }
-        );
-      } catch {}
-      // eslint-disable-next-line no-console
-      console.warn('[SelfieSegmenter] init failed — bg effects disabled:', err?.message);
+      this._logError('setup', err);
+      this._initReject?.(err);
+    }
+
+    return this._initPromise;
+  }
+
+  _handleMessage(msg) {
+    switch (msg?.type) {
+      case 'ready':
+        this.ready = true;
+        this._initResolve?.();
+        return;
+
+      case 'mask':
+        this._frameInFlight = false;
+        // Wrap the transferred ArrayBuffer back into a typed view. The
+        // worker owns nothing here anymore — we fully own the buffer.
+        this._maskData = new Float32Array(msg.buffer);
+        this._maskW = msg.width;
+        this._maskH = msg.height;
+        return;
+
+      case 'mask-missed':
+        this._frameInFlight = false;
+        return;
+
+      case 'error':
+        this._frameInFlight = false;
+        this._logError(msg.stage || 'worker', new Error(msg.message || 'unknown'));
+        if (msg.stage === 'init') this._initReject?.(this._lastError);
+        return;
+
+      default:
+        // Unknown message type; ignore
+        return;
     }
   }
 
-  _startLoop() {
-    if (this._disposed || !this.ready) return;
-
-    const tick = () => {
-      if (this._disposed || !this.ready || !this.segmenter) return;
-      try {
-        if (this.video.readyState >= 2 && this.video.videoWidth > 0) {
-          const t = performance.now();
-          const result = this.segmenter.segmentForVideo(this.video, t);
-          // result.confidenceMasks is an array of MPMask — one per class.
-          // For selfie segmenter there's only one: person vs background.
-          const mask = result?.confidenceMasks?.[0];
-          if (mask) {
-            const w = mask.width;
-            const h = mask.height;
-            // MPMask owns the underlying buffer and frees it when you
-            // call .close(). getAsFloat32Array() copies it out.
-            const data = mask.getAsFloat32Array();
-            this._maskData = data;
-            this._maskW = w;
-            this._maskH = h;
-            mask.close();
-          }
-          // Some MediaPipe versions return a result object that must be
-          // closed to free tensors. Newer API doesn't require this, but
-          // calling close() is a no-op if unsupported, so we try both.
-          try { result?.close?.(); } catch {}
-        }
-      } catch (err) {
-        // Log once, then continue — a single bad frame shouldn't kill
-        // segmentation for the rest of the session.
-        if (!this._lastError || this._lastError.message !== err.message) {
-          this._lastError = err;
-          // eslint-disable-next-line no-console
-          console.warn('[SelfieSegmenter] frame inference failed:', err?.message);
-        }
-      }
-      // Use setTimeout(0) rather than rAF so segmentation runs
-      // independently of the video render loop. rAF would couple us
-      // to the display refresh and waste work when the filter's
-      // render loop is already throttling to 30 fps.
-      this._loopHandle = setTimeout(tick, 0);
-    };
-    tick();
+  _onWorkerError(e) {
+    this._frameInFlight = false;
+    const err = new Error(e?.message || 'worker error');
+    this._logError('worker', err);
+    // If we haven't hit 'ready' yet, fail init
+    if (!this.ready) this._initReject?.(err);
   }
 
   /**
-   * Upload the latest mask into a pre-existing WebGL texture. The
-   * texture should be bound to TEXTURE_2D by the caller, with LINEAR
-   * filtering set (we rely on GPU interpolation to smooth the mask's
-   * lower resolution up to the output frame size).
+   * Non-blocking frame push. Called from the WebGL render loop. Creates
+   * an ImageBitmap from the live video element (fast, GPU-backed) and
+   * transfers its ownership to the worker via postMessage. The main
+   * thread never holds the bitmap's decoded bytes — it just proxies
+   * the handle.
    *
-   * Returns `true` if a mask was uploaded, `false` if no mask is yet
-   * available (segmenter still initializing, or first frame pending).
+   * Dedup: if an inference is still running on a previous frame, this
+   * call returns immediately without sending. That keeps the worker's
+   * inbox at size ≤ 1 and makes stale-frame buildup impossible.
+   */
+  async pushFrame(videoEl) {
+    if (this._disposed || !this.ready) return;
+    if (this._frameInFlight) return;
+    if (!videoEl || videoEl.readyState < 2 || !videoEl.videoWidth) return;
+
+    this._frameInFlight = true;
+    let bitmap = null;
+    try {
+      // createImageBitmap from a video element is ~1-2 ms and runs
+      // off the main thread internally. We still await it here so the
+      // transfer argument is valid, but this doesn't block rendering
+      // because the render loop has already completed its draw calls
+      // by the time pushFrame is invoked.
+      bitmap = await createImageBitmap(videoEl);
+      if (this._disposed) { try { bitmap.close(); } catch {} return; }
+      this._worker.postMessage(
+        { type: 'frame', imageBitmap: bitmap, timestamp: performance.now() },
+        [bitmap]
+      );
+    } catch (err) {
+      // Single frame failed — don't lock the in-flight flag
+      this._frameInFlight = false;
+      try { bitmap?.close?.(); } catch {}
+    }
+  }
+
+  /**
+   * Upload the latest mask to a currently-bound WebGL texture. Same
+   * signature as the previous inline version — beauty-filter.js
+   * doesn't need any changes to switch between worker and inline.
    */
   uploadMaskTo(gl, target = gl.TEXTURE_2D) {
     if (!this._maskData || !this._maskW || !this._maskH) return false;
-    // R32F texture — single-channel float. The shader samples .r.
-    // Internal format must match type to avoid INVALID_OPERATION.
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     gl.texImage2D(
       target, 0,
@@ -165,11 +191,27 @@ export class SelfieSegmenter {
 
   destroy() {
     this._disposed = true;
-    if (this._loopHandle) clearTimeout(this._loopHandle);
-    if (this.segmenter) {
-      try { this.segmenter.close(); } catch {}
-      this.segmenter = null;
+    if (this._worker) {
+      try { this._worker.postMessage({ type: 'close' }); } catch {}
+      try { this._worker.terminate(); } catch {}
+      this._worker = null;
     }
     this._maskData = null;
+    this._frameInFlight = false;
+    this.ready = false;
+  }
+
+  _logError(stage, err) {
+    this._lastError = err;
+    try {
+      window.electronAPI?.errors?.log?.(
+        'warn',
+        'selfie-segmentation',
+        `${stage}: ${err?.message || err}`,
+        { stack: err?.stack }
+      );
+    } catch {}
+    // eslint-disable-next-line no-console
+    console.warn(`[SelfieSegmenter] ${stage}:`, err?.message || err);
   }
 }
