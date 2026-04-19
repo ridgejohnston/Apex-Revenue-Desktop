@@ -84,9 +84,25 @@ void main() {
 `;
 
 // ─── Fragment: final composite ─────────────────────────────
-// Samples both the original frame and the bilateral-blurred frame,
-// lerps between them based on intensity, then applies a simple tone
-// curve for warmth (red/blue shift) and brightness.
+// Runs a pipeline of image-processing stages on the bilateral-blurred
+// frame + original frame. Every stage is additive math against the
+// incoming `color` vec3, so each slider can be set to its neutral
+// value (0 or 1 depending on stage) to pass through untouched.
+//
+// Stage order matters:
+//   1. Beauty blend         — establish the base color (smoothed ↔ original)
+//   2. Sharpness            — add back high-frequency detail from
+//                             the `original - smoothed` difference
+//   3. Low-light boost      — gamma-lift shadows BEFORE contrast, so
+//                             contrast operates on lifted values
+//   4. Contrast             — pivot around 0.5 luma
+//   5. Saturation           — desaturate / supersaturate
+//   6. Warmth               — R/B tonal shift
+//   7. Brightness           — additive offset
+//   8. Radial light         — single slider: negative → vignette
+//                             (darken corners), positive → virtual
+//                             key light (lift center). Approximates
+//                             NVIDIA Broadcast's Key Light + Vignette.
 export const FRAG_COMPOSITE = `#version 300 es
 precision highp float;
 
@@ -95,24 +111,70 @@ out vec4 outColor;
 
 uniform sampler2D u_original;
 uniform sampler2D u_smoothed;
-uniform float     u_intensity;   // 0..1 — blend factor
+uniform float     u_intensity;   // 0..1 — beauty blend factor
 uniform float     u_warmth;      // -1..+1 — red/blue tonal shift
 uniform float     u_brightness;  // -1..+1 — additive offset
+uniform float     u_sharpness;   // 0..1 — unsharp mask strength
+uniform float     u_contrast;    // -1..+1 — stretch / flatten around 0.5
+uniform float     u_saturation;  // -1..+1 — mix toward/away from grayscale
+uniform float     u_lowLight;    // 0..1 — shadow lift via gamma<1
+uniform float     u_radial;      // -1..+1 — vignette / key light
+uniform float     u_aspect;      // width / height for circular radial math
+
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
 void main() {
   vec3 original = texture(u_original, v_uv).rgb;
   vec3 smoothed = texture(u_smoothed, v_uv).rgb;
 
-  // Cross-fade original ↔ smoothed by intensity
+  // 1. Beauty blend — mix toward the bilateral-smoothed version
   vec3 color = mix(original, smoothed, u_intensity);
 
-  // Warmth: +1 pushes red up, blue down; -1 the opposite.
-  // Scaled down so the effect stays subtle at slider extremes.
+  // 2. Sharpness — unsharp mask. (original - smoothed) is the high-frequency
+  //    content that the bilateral pass removed. Adding a scaled version back
+  //    restores detail (eye/lip crispness) without undoing the smoothing
+  //    on low-frequency areas (cheeks, forehead).
+  vec3 highFreq = original - smoothed;
+  color += highFreq * u_sharpness * 1.5;
+
+  // 3. Low-light boost — gamma 1.0 → 0.5 as slider goes 0 → 1.
+  //    Lifts shadow detail without blowing out highlights. Directly
+  //    addresses the #1 cam-model complaint (under-lit rooms).
+  float gamma = 1.0 - u_lowLight * 0.5;
+  color = pow(max(color, vec3(0.0)), vec3(gamma));
+
+  // 4. Contrast — pivot around 0.5 luma midpoint. +1 doubles contrast,
+  //    -1 flattens to flat-gray. Neutral at 0.
+  color = (color - 0.5) * (1.0 + u_contrast) + 0.5;
+
+  // 5. Saturation — mix between luma-only (grayscale) and full color.
+  //    -1 → grayscale, 0 → neutral, +1 → saturation +100%.
+  float luma = dot(color, LUMA);
+  color = mix(vec3(luma), color, 1.0 + u_saturation);
+
+  // 6. Warmth — subtle R/B shift
   color.r += u_warmth * 0.08;
   color.b -= u_warmth * 0.08;
 
-  // Brightness: simple additive, clamped.
+  // 7. Brightness — simple additive
   color += u_brightness * 0.15;
+
+  // 8. Radial light — aspect-corrected distance from center, smooth-stepped
+  //    so the transition isn't hard-edged. Negative slider darkens corners
+  //    (classic vignette); positive lifts center (virtual key light).
+  vec2 toCenter = (v_uv - 0.5) * vec2(u_aspect, 1.0);
+  float dist    = length(toCenter);
+  float radial  = smoothstep(0.15, 0.85, dist); // 0 at center → 1 at corners
+
+  float lightFactor;
+  if (u_radial < 0.0) {
+    // Vignette: corners get multiplied by (1 + u_radial * 0.8), which is <1
+    lightFactor = mix(1.0, 1.0 + u_radial * 0.8, radial);
+  } else {
+    // Key light: center gets multiplied by (1 + u_radial * 0.4), falls off
+    lightFactor = mix(1.0 + u_radial * 0.4, 1.0, radial);
+  }
+  color *= lightFactor;
 
   outColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }

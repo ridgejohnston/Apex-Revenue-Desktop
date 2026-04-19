@@ -1,22 +1,38 @@
 import React, { useCallback } from 'react';
 
 /**
- * Beauty Filter settings panel — lives in the RightPanel ✨ Beauty tab.
+ * Filter settings panel — lives in the RightPanel ✨ Beauty tab.
  *
- * Shows either:
- *  • Full controls (toggle + Intensity / Smoothness / Warmth / Brightness),
- *    when the effective plan unlocks the feature (admins via DEV toggle,
- *    beta users, or paying Platinum).
- *  • A locked preview with an upsell CTA for Free users.
+ * Organized into three sections:
+ *   • Beauty   — Intensity, Smoothness, Sharpness
+ *   • Color    — Warmth, Brightness, Contrast, Saturation
+ *   • Lighting — Low-Light Boost, Radial Light (vignette ↔ key light)
  *
  * The panel never touches the BeautyFilter instance directly — it just
  * updates config in electron-store, and App.jsx listens for changes and
  * pushes them into the live filter via filter.update(...).
+ *
+ * Tier-gated: Free users see a locked preview with a Platinum upsell CTA.
  */
 export default function BeautyPanel({ config, onChange, unlocked, effectivePlan }) {
   const set = useCallback((key, value) => {
     onChange({ ...config, [key]: value });
   }, [config, onChange]);
+
+  const resetAll = useCallback(() => {
+    onChange({
+      enabled:    config.enabled,
+      intensity:  50,
+      smoothness: 50,
+      warmth:     0,
+      brightness: 0,
+      sharpness:  0,
+      contrast:   0,
+      saturation: 0,
+      lowLight:   0,
+      radial:     0,
+    });
+  }, [config.enabled, onChange]);
 
   if (!unlocked) {
     return (
@@ -33,10 +49,10 @@ export default function BeautyPanel({ config, onChange, unlocked, effectivePlan 
             fontSize: 13, fontWeight: 700, color: 'var(--text, #f5f5f5)',
             letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6,
           }}>
-            Beauty Filter
+            Beauty & Filters
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-dim, #9ca3af)', lineHeight: 1.5, marginBottom: 14 }}>
-            Real-time skin smoothing, tone, and warmth applied directly to your camera feed — viewers see the polished you, live.
+            Real-time skin smoothing, color grading, virtual key light, and more — all applied directly to your camera feed. Viewers see the polished you, live.
           </div>
           <div style={{
             display: 'inline-block',
@@ -58,12 +74,12 @@ export default function BeautyPanel({ config, onChange, unlocked, effectivePlan 
   }
 
   return (
-    <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* On/Off toggle */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0' }}>
+    <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Master on/off */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 0' }}>
         <div>
           <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text, #f5f5f5)' }}>
-            ✨ Beauty Filter
+            ✨ Filters
           </div>
           <div style={{ fontSize: 9, color: 'var(--text-dim, #9ca3af)', marginTop: 2 }}>
             Applied to all webcam sources
@@ -72,41 +88,40 @@ export default function BeautyPanel({ config, onChange, unlocked, effectivePlan 
         <Switch value={config.enabled} onChange={(v) => set('enabled', v)} />
       </div>
 
-      <div style={{ height: 1, background: 'var(--border, #2a2a35)' }} />
+      {/* ─── BEAUTY ─── */}
+      <Section title="Beauty" dim={!config.enabled}>
+        <Slider label="Intensity"  hint="Overall smoothing blend"
+          min={0} max={100} value={config.intensity} onChange={(v) => set('intensity', v)} />
+        <Slider label="Smoothness" hint="Skin softening strength"
+          min={0} max={100} value={config.smoothness} onChange={(v) => set('smoothness', v)} />
+        <Slider label="Sharpness"  hint="Restore fine detail"
+          min={0} max={100} value={config.sharpness} onChange={(v) => set('sharpness', v)} />
+      </Section>
 
-      {/* Sliders — greyed out when disabled but still interactive so the
-          performer can tune without repeatedly toggling the main switch */}
-      <Slider
-        label="Intensity"   hint="Overall blend of the smoothed pass"
-        min={0} max={100} value={config.intensity}
-        dim={!config.enabled}
-        onChange={(v) => set('intensity', v)}
-      />
-      <Slider
-        label="Smoothness"  hint="Skin softening strength"
-        min={0} max={100} value={config.smoothness}
-        dim={!config.enabled}
-        onChange={(v) => set('smoothness', v)}
-      />
-      <Slider
-        label="Warmth"      hint="Red / blue tonal shift"
-        min={-100} max={100} value={config.warmth}
-        dim={!config.enabled}
-        center
-        onChange={(v) => set('warmth', v)}
-      />
-      <Slider
-        label="Brightness"  hint="Lift or darken overall"
-        min={-100} max={100} value={config.brightness}
-        dim={!config.enabled}
-        center
-        onChange={(v) => set('brightness', v)}
-      />
+      {/* ─── COLOR ─── */}
+      <Section title="Color" dim={!config.enabled}>
+        <Slider label="Warmth"     hint="Red ↔ blue shift"
+          min={-100} max={100} value={config.warmth} center onChange={(v) => set('warmth', v)} />
+        <Slider label="Brightness" hint="Lift or darken overall"
+          min={-100} max={100} value={config.brightness} center onChange={(v) => set('brightness', v)} />
+        <Slider label="Contrast"   hint="Pop shadows vs highlights"
+          min={-100} max={100} value={config.contrast} center onChange={(v) => set('contrast', v)} />
+        <Slider label="Saturation" hint="Color richness"
+          min={-100} max={100} value={config.saturation} center onChange={(v) => set('saturation', v)} />
+      </Section>
 
-      {/* Reset button — back to defaults */}
+      {/* ─── LIGHTING ─── */}
+      <Section title="Lighting" dim={!config.enabled}>
+        <Slider label="Low-Light Boost" hint="Lift shadows in dim rooms"
+          min={0} max={100} value={config.lowLight} onChange={(v) => set('lowLight', v)} />
+        <Slider label="Radial Light" hint="Vignette ↔ virtual key light"
+          min={-100} max={100} value={config.radial} center onChange={(v) => set('radial', v)} />
+      </Section>
+
+      {/* Reset */}
       <button
         type="button"
-        onClick={() => onChange({ enabled: config.enabled, intensity: 50, smoothness: 50, warmth: 0, brightness: 0 })}
+        onClick={resetAll}
         style={{
           alignSelf: 'flex-end',
           padding: '4px 12px',
@@ -118,13 +133,37 @@ export default function BeautyPanel({ config, onChange, unlocked, effectivePlan 
           cursor: 'pointer',
         }}
       >
-        Reset
+        Reset all
       </button>
     </div>
   );
 }
 
 // ─── Sub-components ──────────────────────────────────────
+
+function Section({ title, children, dim }) {
+  return (
+    <div style={{
+      borderTop: '1px solid var(--border, #2a2a35)',
+      paddingTop: 10,
+      opacity: dim ? 0.55 : 1,
+      transition: 'opacity 0.15s',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+    }}>
+      <div style={{
+        fontSize: 9, fontWeight: 700, letterSpacing: 2,
+        textTransform: 'uppercase',
+        color: 'var(--accent, #cc0000)',
+        marginBottom: 2,
+      }}>
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
 
 function Switch({ value, onChange }) {
   return (
@@ -153,13 +192,11 @@ function Switch({ value, onChange }) {
   );
 }
 
-function Slider({ label, hint, min, max, value, onChange, dim, center }) {
-  // Center-type sliders (Warmth/Brightness) show a tick mark at 0 and
-  // display the value with a sign so the zero-point is visually obvious.
+function Slider({ label, hint, min, max, value, onChange, center }) {
   const displayVal = center && value > 0 ? `+${value}` : `${value}`;
   return (
-    <div style={{ opacity: dim ? 0.55 : 1, transition: 'opacity 0.15s' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 3 }}>
         <div>
           <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text, #f5f5f5)' }}>
             {label}

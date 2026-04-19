@@ -8,10 +8,15 @@
 
 const BEAUTY_DEFAULTS = Object.freeze({
   enabled:    false,   // off by default — performer opts in explicitly
-  intensity:  50,      // 0–100
+  intensity:  50,      // 0–100 — beauty blend
   smoothness: 50,      // 0–100 → bilateral sigma_color
-  warmth:     0,       // -100..+100
-  brightness: 0,       // -100..+100
+  warmth:     0,       // -100..+100 — R/B tonal shift
+  brightness: 0,       // -100..+100 — additive offset
+  sharpness:  0,       // 0–100 — unsharp mask
+  contrast:   0,       // -100..+100 — pivot around 0.5
+  saturation: 0,       // -100..+100 — grayscale ↔ supersaturated
+  lowLight:   0,       // 0–100 — shadow lift
+  radial:     0,       // -100 vignette .. +100 key light
 });
 
 const BEAUTY_BOUNDS = Object.freeze({
@@ -19,6 +24,11 @@ const BEAUTY_BOUNDS = Object.freeze({
   smoothness: { min: 0,    max: 100 },
   warmth:     { min: -100, max: 100 },
   brightness: { min: -100, max: 100 },
+  sharpness:  { min: 0,    max: 100 },
+  contrast:   { min: -100, max: 100 },
+  saturation: { min: -100, max: 100 },
+  lowLight:   { min: 0,    max: 100 },
+  radial:     { min: -100, max: 100 },
 });
 
 // Store key used by electron-store in main, and by window.electronAPI.store

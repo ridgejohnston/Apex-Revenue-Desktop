@@ -32,6 +32,11 @@ const DEFAULT_CONFIG = {
   smoothness: 50,   // 0–100 — maps to sigma_color (0.02–0.25)
   warmth:     0,    // -100 to +100 — red/blue tonal shift
   brightness: 0,    // -100 to +100 — additive offset
+  sharpness:  0,    // 0–100 — unsharp mask strength (adds detail back)
+  contrast:   0,    // -100 to +100 — pivot around 0.5 luma
+  saturation: 0,    // -100 to +100 — grayscale ↔ supersaturated
+  lowLight:   0,    // 0–100 — shadow lift (gamma) for dim rooms
+  radial:     0,    // -100 (full vignette) .. +100 (full key light)
 };
 
 // Map a 0–100 slider to a bilateral sigma_color in [0.02, 0.25].
@@ -134,6 +139,12 @@ export class BeautyFilter {
       intensity:  gl.getUniformLocation(this.progComposite, 'u_intensity'),
       warmth:     gl.getUniformLocation(this.progComposite, 'u_warmth'),
       brightness: gl.getUniformLocation(this.progComposite, 'u_brightness'),
+      sharpness:  gl.getUniformLocation(this.progComposite, 'u_sharpness'),
+      contrast:   gl.getUniformLocation(this.progComposite, 'u_contrast'),
+      saturation: gl.getUniformLocation(this.progComposite, 'u_saturation'),
+      lowLight:   gl.getUniformLocation(this.progComposite, 'u_lowLight'),
+      radial:     gl.getUniformLocation(this.progComposite, 'u_radial'),
+      aspect:     gl.getUniformLocation(this.progComposite, 'u_aspect'),
     };
 
     // Create textures + framebuffers sized to the canvas. They get
@@ -270,9 +281,16 @@ export class BeautyFilter {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.texVideo);
       gl.uniform1i(this.locComposite.smoothed, 1);
-      gl.uniform1f(this.locComposite.intensity,  0.0); // all original
+      // Every slider at neutral — passthrough
+      gl.uniform1f(this.locComposite.intensity,  0.0);
       gl.uniform1f(this.locComposite.warmth,     0.0);
       gl.uniform1f(this.locComposite.brightness, 0.0);
+      gl.uniform1f(this.locComposite.sharpness,  0.0);
+      gl.uniform1f(this.locComposite.contrast,   0.0);
+      gl.uniform1f(this.locComposite.saturation, 0.0);
+      gl.uniform1f(this.locComposite.lowLight,   0.0);
+      gl.uniform1f(this.locComposite.radial,     0.0);
+      gl.uniform1f(this.locComposite.aspect,     W / Math.max(1, H));
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       return;
     }
@@ -309,9 +327,21 @@ export class BeautyFilter {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.texSmoothed);
     gl.uniform1i(this.locComposite.smoothed, 1);
-    gl.uniform1f(this.locComposite.intensity,  Math.max(0, Math.min(100, this.config.intensity)) / 100);
-    gl.uniform1f(this.locComposite.warmth,     Math.max(-100, Math.min(100, this.config.warmth))     / 100);
-    gl.uniform1f(this.locComposite.brightness, Math.max(-100, Math.min(100, this.config.brightness)) / 100);
+
+    // Slider values are authored in human-friendly ranges (0..100 for
+    // unipolar, -100..+100 for bipolar). Normalize to shader space here.
+    const c = this.config;
+    const uni01    = (v) => Math.max(0,    Math.min(100, v)) / 100;
+    const uniPM1   = (v) => Math.max(-100, Math.min(100, v)) / 100;
+    gl.uniform1f(this.locComposite.intensity,  uni01(c.intensity));
+    gl.uniform1f(this.locComposite.warmth,     uniPM1(c.warmth));
+    gl.uniform1f(this.locComposite.brightness, uniPM1(c.brightness));
+    gl.uniform1f(this.locComposite.sharpness,  uni01(c.sharpness   ?? 0));
+    gl.uniform1f(this.locComposite.contrast,   uniPM1(c.contrast   ?? 0));
+    gl.uniform1f(this.locComposite.saturation, uniPM1(c.saturation ?? 0));
+    gl.uniform1f(this.locComposite.lowLight,   uni01(c.lowLight    ?? 0));
+    gl.uniform1f(this.locComposite.radial,     uniPM1(c.radial     ?? 0));
+    gl.uniform1f(this.locComposite.aspect,     W / Math.max(1, H));
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
