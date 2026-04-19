@@ -1199,6 +1199,22 @@ class StreamEngine extends EventEmitter {
     if (/connection refused|connection timed out|network is unreachable/i.test(stderr)) {
       return 'Hint: the RTMP server refused the connection. Verify the Stream URL and Stream Key are correct, and that your firewall allows outbound TCP 1935.';
     }
+    // FFmpeg "Error number -138" on an RTMP output is a generic libavformat
+    // network I/O failure — usually raised when the RTMP handshake fails
+    // for reasons that don't match the more specific connection-refused /
+    // timeout / unreachable wording. In practice it's almost always one of:
+    //   • expired or incorrect stream key (Chaturbate rotates keys)
+    //   • RTMP ingest unreachable (VPN, firewall, ISP, transient outage)
+    //   • the cam platform rate-limited or banned the stream key
+    // We put this check BEFORE the generic "invalid argument / output" branch
+    // because the user-visible error line that FFmpeg emits for -138 is
+    // "Error opening output files: Error number -138 occurred" — which also
+    // contains the word "output" and would otherwise fall into the vague
+    // catch-all hint below.
+    if (/error number -138/i.test(stderr) ||
+        /-138 occurred/i.test(stderr)) {
+      return 'Hint: the streaming platform rejected the connection (error -138). Most common causes: the Stream Key in Settings > Streaming is expired or wrong (Chaturbate rotates keys — copy a fresh one from your broadcaster page), the RTMP ingest is unreachable (check your internet / VPN / firewall), or the platform rate-limited this key. Re-copy the key and retry.';
+    }
     if (/invalid argument/i.test(stderr) && /output/i.test(stderr)) {
       return 'Hint: "Invalid argument" on output is often caused by an input or encoder setup failure. Check the full log for lines before this one to see which component failed to initialize.';
     }
