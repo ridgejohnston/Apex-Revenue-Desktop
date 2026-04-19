@@ -1273,6 +1273,44 @@ class StreamEngine extends EventEmitter {
         /-138 occurred/i.test(stderr)) {
       return 'Hint: the streaming platform rejected the connection (error -138). Most common causes: the Stream Key in Settings > Streaming is expired or wrong (Chaturbate rotates keys — copy a fresh one from your broadcaster page), the RTMP ingest is unreachable (check your internet / VPN / firewall), or the platform rate-limited this key. Re-copy the key and retry.';
     }
+    // Windows socket error family on an RTMP stream that was ALREADY
+    // ESTABLISHED and then lost. These show up as "Error closing file:
+    // Error number -XXXXX occurred" because FFmpeg reports them when
+    // trying to flush/close the RTMP output.
+    //
+    //   -10053  WSAECONNABORTED   Software caused connection abort
+    //                             Usually: platform disconnected you,
+    //                             or a local firewall/AV killed the
+    //                             socket, or the Windows network stack
+    //                             aborted a long-running TCP connection.
+    //                             Also fires on normal Stop Stream when
+    //                             the RTMP trailer send races the server
+    //                             close — harmless in that case.
+    //
+    //   -10054  WSAECONNRESET     Connection reset by peer. Platform
+    //                             sent TCP RST mid-stream (server went
+    //                             down, key revoked, banned, etc).
+    //
+    //   -10060  WSAETIMEDOUT      Connection timed out. Network went
+    //                             away (Wi-Fi/VPN toggle, sleep, etc).
+    //
+    //   -10061  WSAECONNREFUSED   Refused outright. Typically DNS
+    //                             cached a stale IP or server moved.
+    //
+    // Check BEFORE the more generic branches below so the specific
+    // explanation wins.
+    if (/error number -10053/i.test(stderr) || /-10053 occurred/i.test(stderr)) {
+      return 'Hint: the stream was running but the connection was aborted (Windows error -10053). Most common causes: the broadcast platform dropped you (stream key revoked, session timed out, or kicked off), Windows Defender / antivirus interfered with the TCP socket, or — if this fired when you pressed Stop Stream — it is harmless (FFmpeg tried to send the RTMP trailer after the server had already closed). If the stream actually ran for a while before this, check your broadcaster page on the platform for any session status and re-copy the stream key.';
+    }
+    if (/error number -10054/i.test(stderr) || /-10054 occurred/i.test(stderr)) {
+      return 'Hint: the broadcast platform forcibly closed your connection (Windows error -10054, connection reset by peer). This usually means the platform revoked your stream key, your account was temporarily banned, or the ingest server restarted. Copy a fresh stream key from your broadcaster page and retry.';
+    }
+    if (/error number -10060/i.test(stderr) || /-10060 occurred/i.test(stderr)) {
+      return 'Hint: the connection to the streaming platform timed out (Windows error -10060). Network changed mid-stream? Check your Wi-Fi / VPN / firewall, then retry. If you were on a mobile hotspot or your PC went to sleep, that would explain this error.';
+    }
+    if (/error number -10061/i.test(stderr) || /-10061 occurred/i.test(stderr)) {
+      return 'Hint: the streaming platform refused the connection (Windows error -10061). The RTMP ingest may have moved or be temporarily down. Re-copy the stream URL from the Chaturbate broadcaster page and retry.';
+    }
     if (/invalid argument/i.test(stderr) && /output/i.test(stderr)) {
       return 'Hint: "Invalid argument" on output is often caused by an input or encoder setup failure. Check the full log for lines before this one to see which component failed to initialize.';
     }

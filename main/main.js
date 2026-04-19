@@ -1448,6 +1448,18 @@ app.whenReady().then(async () => {
   // handshake was removed in v3.3.24 because the pipe-streaming path
   // keeps the camera in the renderer permanently (no more release/
   // restore dance needed).
+  // Track the last stream error we wrote to the error log. During an
+  // FFmpeg failure shutdown the stream engine can emit 'status' 4-8
+  // times in quick succession (close handler, ledger stop, cleanup,
+  // final flush) — each with status.errorReason still populated.
+  // Without dedup, the error log shows the same failure logged six
+  // times in a row with identical errorLogPath, which drowns the
+  // signal when debugging real recurring issues. Keep a tiny cache
+  // of the last (errorReason, errorLogPath) tuple and skip writes
+  // that match it. Reset when errorReason clears (stream success /
+  // clean stop) so the next distinct failure WILL log.
+  let _lastLoggedStreamError = null;
+
   streamEngine.on('status', (status) => {
     mainWindow?.webContents.send('stream:status', status);
     // Mirror stream errors into the central log so the Debug panel
@@ -1455,9 +1467,17 @@ app.whenReady().then(async () => {
     // writes its own detailed per-incident log to userData/stream-logs/;
     // this is a shorter breadcrumb for the unified view.
     if (status && status.errorReason) {
-      errorLogger.log('error', 'stream-engine', status.errorReason, {
-        errorLogPath: status.errorLogPath,
-      });
+      const key = `${status.errorReason}|${status.errorLogPath || ''}`;
+      if (key !== _lastLoggedStreamError) {
+        _lastLoggedStreamError = key;
+        errorLogger.log('error', 'stream-engine', status.errorReason, {
+          errorLogPath: status.errorLogPath,
+        });
+      }
+    } else {
+      // No error on this status update — clear the dedup cache so a
+      // subsequent failure (possibly with identical message) re-logs.
+      _lastLoggedStreamError = null;
     }
   });
 
