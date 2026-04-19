@@ -141,6 +141,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     knowledgeList:   () => ipcRenderer.invoke('coach:knowledge-list'),
     knowledgeDelete: (filename) => ipcRenderer.invoke('coach:knowledge-delete', filename),
     knowledgeStats:  () => ipcRenderer.invoke('coach:knowledge-stats'),
+    // Performer profile — niche, goals, hard NOs, regulars, style prefs.
+    // Changes here affect every subsequent coach response (injected
+    // into the system prompt). Local-only, not synced anywhere.
+    profileGet:    () => ipcRenderer.invoke('coach:profile-get'),
+    profileUpdate: (patch) => ipcRenderer.invoke('coach:profile-update', patch),
+    profileClear:  () => ipcRenderer.invoke('coach:profile-clear'),
     // Progress events during long-running /research calls. Returns an
     // unsubscribe fn per React's useEffect cleanup idiom.
     onResearchProgress: (cb) => {

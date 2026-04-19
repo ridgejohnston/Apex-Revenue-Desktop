@@ -16,6 +16,7 @@ const ffmpegInstaller = require('./ffmpeg-installer');
 const mediapipeInstaller = require('./mediapipe-installer');
 const { AiCoach } = require('./ai-coach');
 const coachKnowledge = require('./coach-knowledge');
+const coachProfile = require('./coach-profile');
 const autoconfig = require('./autoconfig');
 const errorLogger = require('./error-logger');
 const { autoUpdater } = require('electron-updater');
@@ -709,6 +710,24 @@ ipcMain.handle('coach:knowledge-stats',  async () => {
   catch { return { totalArtifacts: 0, shippedArtifacts: 0, userArtifacts: 0, totalWords: 0 }; }
 });
 
+// ─── Coach profile (performer identity) ─────────────
+// Persistent performer-specific state used to personalize every coach
+// response: niche, platform, goals, hard NOs, regulars, style prefs.
+// Local-only (electron-store pattern) for privacy — see coach-profile.js
+// for the decision rationale.
+ipcMain.handle('coach:profile-get', async () => {
+  try { return await coachProfile.get(); }
+  catch (err) { return { error: err?.message || String(err) }; }
+});
+ipcMain.handle('coach:profile-update', async (_, patch) => {
+  try { return { ok: true, profile: await coachProfile.update(patch || {}) }; }
+  catch (err) { return { ok: false, error: err?.message || String(err) }; }
+});
+ipcMain.handle('coach:profile-clear', async () => {
+  try { await coachProfile.clear(); return { ok: true }; }
+  catch (err) { return { ok: false, error: err?.message || String(err) }; }
+});
+
 // ─── Auth + Subscription state ──────────────────────────
 //
 // `apexSession`        — persisted Hosted UI tokens + groups
@@ -1294,6 +1313,16 @@ app.whenReady().then(async () => {
     console.log('[main] coach-knowledge initialized at', app.getPath('userData'));
   } catch (err) {
     console.error('[main] coach-knowledge init failed:', err.message);
+  }
+
+  // Bind coach-profile (the performer's persistent identity/prefs).
+  // Uses a single JSON file in userData, same directory as the
+  // knowledge artifacts. Loads lazily on first get/update.
+  try {
+    coachProfile.init(app);
+    console.log('[main] coach-profile initialized at', app.getPath('userData'));
+  } catch (err) {
+    console.error('[main] coach-profile init failed:', err.message);
   }
 
   ipcMain.handle('mediapipe:status',    async () => mediapipeInstaller.getStatus());

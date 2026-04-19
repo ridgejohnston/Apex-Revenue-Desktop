@@ -31,6 +31,7 @@
 
 const { REGION, BEDROCK_MODEL_ID } = require('../shared/aws-config');
 const coachKnowledge = require('./coach-knowledge');
+const coachProfile = require('./coach-profile');
 const { researchTopic } = require('./coach-research');
 
 // Hard cap on conversation size. Beyond this we drop the oldest
@@ -306,6 +307,19 @@ class AiCoach {
       throw new Error('Empty message');
     }
 
+    // Profile commands intercept before research or chat. They're
+    // local-only operations (disk read/write, no Bedrock call) so
+    // they return quickly and never hit the network.
+    const profileResult = await this._tryProfileCommand(userText);
+    if (profileResult) {
+      // Save user + assistant turns so the user sees their command and
+      // the result in the chat history like any other exchange.
+      this.messages.push({ role: 'user', content: userText.slice(0, 4000), ts: Date.now() });
+      this.messages.push({ role: 'assistant', content: profileResult, ts: Date.now(), kind: 'profile' });
+      this._trimHistory();
+      return { reply: profileResult, kind: 'profile' };
+    }
+
     // Research-command detection. Two entry points:
     //   explicit:  /research quantum whale cultivation
     //   natural:   "research whale cultivation for me" / "deep dive on ..."
@@ -380,6 +394,263 @@ class AiCoach {
     }
 
     return null;
+  }
+
+  /**
+   * Profile commands — local-only, no network. Each returns a markdown
+   * reply string if handled, or null to let the caller fall through
+   * to research / normal chat routing.
+   *
+   * Available commands:
+   *   /profile                        — show full profile
+   *   /niche <archetype>              — set niche archetype (e.g. "goth domme", "GFE cosplay")
+   *   /style <description>            — set style description
+   *   /signature <description>        — set signature gesture/catchphrase/prop
+   *   /stage-name <name>              — set stage name
+   *   /platform <name>                — set primary platform
+   *   /goal <USD/week>                — set weekly revenue target
+   *   /focus <text>                   — set top-of-mind goal
+   *   /hardno <item>                  — add to hard-nos list
+   *   /undo-hardno <item>             — remove from hard-nos
+   *   /regular <name>: <note>         — add a regular fan
+   *   /regular remove <name-or-id>    — remove a regular
+   *   /regulars                       — list regulars
+   *   /remember <note>                — free-form quick note
+   *   /forget <note-id>               — remove a note by id prefix
+   *   /tone <direct|warm|playful>     — coach tone preference
+   *   /length <brief|standard|detailed> — coach response length preference
+   *   /reset-profile                  — wipe profile (requires /reset-profile confirm)
+   */
+  async _tryProfileCommand(text) {
+    const t = text.trim();
+    if (!t.startsWith('/')) return null;
+
+    // Parse `/cmd rest`
+    const match = t.match(/^\/([a-z-]+)(?:\s+(.*))?$/i);
+    if (!match) return null;
+    const cmd = match[1].toLowerCase();
+    const arg = (match[2] || '').trim();
+
+    try {
+      switch (cmd) {
+        case 'profile':          return await this._cmdProfile();
+        case 'niche':            return await this._cmdNiche(arg);
+        case 'style':            return await this._cmdNested('niche', 'style', arg, 'Style');
+        case 'signature':        return await this._cmdNested('niche', 'signature', arg, 'Signature');
+        case 'stage-name':
+        case 'stagename':        return await this._cmdTopLevel('stageName', arg, 'Stage name');
+        case 'platform':         return await this._cmdPlatform(arg);
+        case 'goal':             return await this._cmdGoal(arg);
+        case 'focus':            return await this._cmdNested('goals', 'topOfMind', arg, 'Top-of-mind focus');
+        case 'hardno':           return await this._cmdHardNo(arg);
+        case 'undo-hardno':      return await this._cmdUndoHardNo(arg);
+        case 'regular':          return await this._cmdRegular(arg);
+        case 'regulars':         return await this._cmdRegularsList();
+        case 'remember':         return await this._cmdRemember(arg);
+        case 'forget':           return await this._cmdForget(arg);
+        case 'tone':             return await this._cmdPreference('tone', arg, ['direct','warm','playful']);
+        case 'length':           return await this._cmdPreference('length', arg, ['brief','standard','detailed']);
+        case 'reset-profile':    return await this._cmdResetProfile(arg);
+        case 'help':             return this._cmdHelp();
+        default:                 return null;  // unknown command → fall through
+      }
+    } catch (err) {
+      return `⚠️ Profile command failed: ${err.message}`;
+    }
+  }
+
+  async _cmdProfile() {
+    const p = await coachProfile.get();
+    const L = [];
+    L.push('**Your profile** (saved locally, never uploaded)');
+    L.push('');
+    if (p.stageName)          L.push(`• Stage name: **${p.stageName}**`);
+    if (p.primaryPlatform)    L.push(`• Primary platform: **${p.primaryPlatform}**`);
+    if (p.otherPlatforms.length) L.push(`• Also on: ${p.otherPlatforms.join(', ')}`);
+    if (p.niche.archetype)    L.push(`• Niche: **${p.niche.archetype}**`);
+    if (p.niche.style)        L.push(`• Style: ${p.niche.style}`);
+    if (p.niche.signature)    L.push(`• Signature: ${p.niche.signature}`);
+    if (p.goals.weeklyRevenueUSD) L.push(`• Goal: $${p.goals.weeklyRevenueUSD}/week`);
+    if (p.goals.topOfMind)    L.push(`• Focus: ${p.goals.topOfMind}`);
+    if (p.preferences.tone || p.preferences.length) {
+      const parts = [];
+      if (p.preferences.tone)   parts.push(`tone ${p.preferences.tone}`);
+      if (p.preferences.length) parts.push(`length ${p.preferences.length}`);
+      L.push(`• Coach style: ${parts.join(', ')}`);
+    }
+    if (p.hardNos.length) {
+      L.push('');
+      L.push(`**Hard NOs** (${p.hardNos.length}):`);
+      for (const h of p.hardNos) L.push(`  ✗ ${h}`);
+    }
+    if (p.regulars.length) {
+      L.push('');
+      L.push(`**Regulars** (${p.regulars.length}):`);
+      for (const r of p.regulars.slice(0, 15)) {
+        L.push(`  • ${r.name}${r.note ? ' — ' + r.note : ''}`);
+      }
+      if (p.regulars.length > 15) L.push(`  …and ${p.regulars.length - 15} more`);
+    }
+    if (p.notes.length) {
+      L.push('');
+      L.push(`**Notes** (${p.notes.length}):`);
+      for (const n of p.notes.slice(-8)) {
+        L.push(`  • [\`${n.id.slice(0, 12)}\`] ${n.content}`);
+      }
+    }
+    if (L.length <= 2) {
+      L.push('_Your profile is empty. Use_ `/niche goth domme`, `/platform chaturbate`, `/goal 3000`, `/hardno scat`, `/remember Marcus tips 500 on Fridays` _— I adapt silently to whatever you set._');
+    }
+    L.push('');
+    L.push('_Type `/help` for the full command list._');
+    return L.join('\n');
+  }
+
+  _cmdHelp() {
+    return [
+      '**Coach commands:**',
+      '',
+      '_Identity:_',
+      '  `/stage-name <name>` · `/platform <name>` · `/niche <archetype>` · `/style <description>` · `/signature <description>`',
+      '',
+      '_Goals:_',
+      '  `/goal <$/week>` · `/focus <top of mind>`',
+      '',
+      '_Boundaries:_',
+      '  `/hardno <item>` — never suggested regardless of tip',
+      '  `/undo-hardno <item>`',
+      '',
+      '_People:_',
+      '  `/regular <name>: <note>` · `/regulars` · `/regular remove <name>`',
+      '',
+      '_Notes & knowledge:_',
+      '  `/remember <quick note>` — free-form profile note',
+      '  `/forget <id>` — remove note by id prefix',
+      '  `/learn <fact>` — (if wired) add to knowledge base',
+      '  `/research <topic>` — deep-research + add to knowledge',
+      '',
+      '_Style:_',
+      '  `/tone direct|warm|playful` · `/length brief|standard|detailed`',
+      '',
+      '_Admin:_',
+      '  `/profile` · `/reset-profile confirm`',
+      '',
+      'Everything without a leading `/` is a normal chat message.',
+    ].join('\n');
+  }
+
+  async _cmdTopLevel(field, value, label) {
+    if (!value) return `Usage: \`/${field === 'stageName' ? 'stage-name' : field} <value>\``;
+    await coachProfile.update({ [field]: value.slice(0, 200) });
+    return `✅ ${label}: **${value}**`;
+  }
+
+  async _cmdNested(parent, field, value, label) {
+    if (!value) return `Usage: \`/${field} <value>\``;
+    await coachProfile.update({ [parent]: { [field]: value.slice(0, 500) } });
+    return `✅ ${label}: **${value}**`;
+  }
+
+  async _cmdNiche(value) {
+    if (!value) return 'Usage: `/niche <archetype>` — e.g. `goth domme`, `GFE girl-next-door`, `cosplay kink`, `playful jester`.';
+    await coachProfile.update({ niche: { archetype: value.slice(0, 200) } });
+    return `✅ Niche: **${value}**. I'll tailor recommendations to this archetype from now on.`;
+  }
+
+  async _cmdPlatform(value) {
+    if (!value) return 'Usage: `/platform <name>` — e.g. `chaturbate`, `stripchat`, `mfc`, `xtease`, `bongacams`.';
+    const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    await coachProfile.update({ primaryPlatform: normalized });
+    return `✅ Primary platform: **${normalized}**. Advice will default to ${normalized}-specific tactics.`;
+  }
+
+  async _cmdGoal(value) {
+    const n = parseInt(String(value).replace(/[^0-9]/g, ''), 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      return 'Usage: `/goal <weekly revenue in USD>` — e.g. `/goal 3000`.';
+    }
+    await coachProfile.update({ goals: { weeklyRevenueUSD: n } });
+    return `✅ Weekly revenue target: **$${n}**. I'll factor this into session planning.`;
+  }
+
+  async _cmdHardNo(value) {
+    if (!value) return 'Usage: `/hardno <item>` — adds to your never-suggest list.';
+    const r = await coachProfile.addHardNo(value);
+    if (r.error) return `❌ ${r.error}`;
+    return `✅ Hard NO added: **${r.added}**. I'll never suggest this regardless of tip amount.`;
+  }
+
+  async _cmdUndoHardNo(value) {
+    if (!value) return 'Usage: `/undo-hardno <item>`.';
+    const r = await coachProfile.removeHardNo(value);
+    if (r.error) return `❌ ${r.error}`;
+    return `✅ Removed from hard NOs: **${value}**.`;
+  }
+
+  async _cmdRegular(arg) {
+    if (!arg) return 'Usage: `/regular <name>: <note>` to add, or `/regular remove <name-or-id>`.';
+
+    if (arg.toLowerCase().startsWith('remove ') || arg.toLowerCase().startsWith('rm ')) {
+      const target = arg.replace(/^(?:remove|rm)\s+/i, '').trim();
+      const r = await coachProfile.removeRegular(target);
+      if (r.error) return `❌ ${r.error}`;
+      return `✅ Removed regular: ${target}`;
+    }
+
+    // Parse "name: note" or just "name" if no colon
+    const colonIdx = arg.indexOf(':');
+    const name = colonIdx === -1 ? arg.trim() : arg.slice(0, colonIdx).trim();
+    const note = colonIdx === -1 ? '' : arg.slice(colonIdx + 1).trim();
+    const r = await coachProfile.addRegular(name, note);
+    if (r.error) return `❌ ${r.error}`;
+    return `✅ Regular added: **${r.entry.name}**${r.entry.note ? ' — ' + r.entry.note : ''}\n\nI'll know them by name going forward.`;
+  }
+
+  async _cmdRegularsList() {
+    const p = await coachProfile.get();
+    if (!p.regulars.length) {
+      return 'No regulars saved yet. Add with `/regular <name>: <note>` (e.g. `/regular Marcus: loves foot content, tips 500 Fri nights`).';
+    }
+    const L = [`**Your regulars** (${p.regulars.length}):`, ''];
+    for (const r of p.regulars) {
+      L.push(`• **${r.name}** [\`${r.id.slice(0, 12)}\`]${r.note ? ' — ' + r.note : ''}`);
+    }
+    L.push('');
+    L.push('_Remove with `/regular remove <name>` or `/regular remove <id-prefix>`._');
+    return L.join('\n');
+  }
+
+  async _cmdRemember(content) {
+    if (!content) return 'Usage: `/remember <note>` — adds a short free-form note to your profile. For longer facts you want in the coach\'s strategic knowledge, use `/learn` instead.';
+    const r = await coachProfile.addNote(content);
+    if (r.error) return `❌ ${r.error}`;
+    return `✅ Remembered: "${r.entry.content}" \n\n_id \`${r.entry.id.slice(0, 12)}\` — remove with \`/forget ${r.entry.id.slice(0, 12)}\`._`;
+  }
+
+  async _cmdForget(idPrefix) {
+    if (!idPrefix) return 'Usage: `/forget <id>` — use id from `/profile` output.';
+    // Could be a profile note OR a KB artifact — try profile first
+    const r = await coachProfile.removeNote(idPrefix);
+    if (!r.error) return `✅ Forgotten note \`${r.removed.slice(0, 12)}\`.`;
+    return `❌ ${r.error} (For removing knowledge-base artifacts, open the Training Log.)`;
+  }
+
+  async _cmdPreference(field, value, allowed) {
+    if (!value) return `Usage: \`/${field} <${allowed.join('|')}>\``;
+    const normalized = value.toLowerCase();
+    if (!allowed.includes(normalized)) {
+      return `Invalid ${field}. Must be one of: ${allowed.join(', ')}.`;
+    }
+    await coachProfile.update({ preferences: { [field]: normalized } });
+    return `✅ Coach ${field} preference: **${normalized}**.`;
+  }
+
+  async _cmdResetProfile(arg) {
+    if (arg !== 'confirm') {
+      return '⚠️ This will wipe your entire profile — name, niche, goals, regulars, notes, preferences. To confirm, run `/reset-profile confirm`.';
+    }
+    await coachProfile.clear();
+    return '🗑️  Profile reset. Start fresh with `/niche`, `/platform`, `/goal`, etc.';
   }
 
   /**
@@ -473,6 +744,21 @@ class AiCoach {
     } catch {
       // Knowledge load failure shouldn't block the chat — just degrade
       // gracefully and use the baseline prompt
+    }
+
+    // Pull in the performer's persistent profile — their niche, goals,
+    // hard NOs, named regulars, style preferences. This is the highest-
+    // specificity context the coach has; unlike the knowledge base
+    // (generic strategy) or the shipped baseline (industry norms), this
+    // is the individual performer's identity. We append it AFTER the
+    // knowledge block so it has maximum recency-bias in the prompt and
+    // overrides generic advice when they disagree.
+    try {
+      const profileContext = await coachProfile.buildPromptContext();
+      if (profileContext) lines.push(profileContext);
+    } catch {
+      // Profile load failure is non-fatal — the coach should still
+      // function without personalization
     }
 
     return lines.join('\n');
