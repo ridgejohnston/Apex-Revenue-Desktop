@@ -15,6 +15,7 @@ const audioMixer = require('./audio-mixer');
 const ffmpegInstaller = require('./ffmpeg-installer');
 const mediapipeInstaller = require('./mediapipe-installer');
 const { AiCoach } = require('./ai-coach');
+const coachKnowledge = require('./coach-knowledge');
 const autoconfig = require('./autoconfig');
 const errorLogger = require('./error-logger');
 const { autoUpdater } = require('electron-updater');
@@ -662,10 +663,20 @@ function getCoach() {
   return coach;
 }
 
-ipcMain.handle('coach:send-message', async (_, text, liveContext) => {
+ipcMain.handle('coach:send-message', async (evt, text, liveContext) => {
   try {
-    const reply = await getCoach().sendMessage(text, liveContext || {});
-    return { ok: true, reply };
+    const coach = getCoach();
+    // Stream research progress back to the renderer that called us —
+    // the Coach's chat send returns after the call completes, but for
+    // 30-second research runs the UI needs intermediate updates so the
+    // user knows it hasn't hung.
+    const onProgress = (stage) => {
+      try {
+        evt.sender.send('coach:research-progress', { stage });
+      } catch {}
+    };
+    const result = await coach.sendMessage(text, liveContext || {}, onProgress);
+    return { ok: true, reply: result.reply, kind: result.kind };
   } catch (err) {
     console.error('[coach] send-message error:', err?.message || err);
     return { ok: false, error: err?.message || String(err) };
@@ -679,6 +690,23 @@ ipcMain.handle('coach:reset', async () => {
 
 ipcMain.handle('coach:history', async () => {
   try { return coach?.getHistory?.() || []; } catch { return []; }
+});
+
+// ─── Coach knowledge base (Training Log) ────────────
+// Knowledge artifacts are created by /research commands and by the
+// shipped baseline bundle. The renderer uses these to show the user
+// what the Coach has "learned" and give them a way to prune stale
+// research they don't want anymore.
+ipcMain.handle('coach:knowledge-list',   async () => {
+  try { return await coachKnowledge.list(); } catch { return []; }
+});
+ipcMain.handle('coach:knowledge-delete', async (_, filename) => {
+  try { return { ok: await coachKnowledge.remove(filename) }; }
+  catch (err) { return { ok: false, error: err?.message || String(err) }; }
+});
+ipcMain.handle('coach:knowledge-stats',  async () => {
+  try { return await coachKnowledge.stats(); }
+  catch { return { totalArtifacts: 0, shippedArtifacts: 0, userArtifacts: 0, totalWords: 0 }; }
 });
 
 // ─── Auth + Subscription state ──────────────────────────
@@ -1255,6 +1283,17 @@ app.whenReady().then(async () => {
     console.log('[main] apex-mp:// handler registered for MediaPipe assets');
   } catch (err) {
     console.error('[main] apex-mp:// registration failed:', err.message);
+  }
+
+  // Bind coach-knowledge to Electron's user-data directory. Creates
+  // <userData>/coach-knowledge/ lazily on first /research call. The
+  // Coach can draw on this library automatically once artifacts are
+  // in place.
+  try {
+    coachKnowledge.init(app);
+    console.log('[main] coach-knowledge initialized at', app.getPath('userData'));
+  } catch (err) {
+    console.error('[main] coach-knowledge init failed:', err.message);
   }
 
   ipcMain.handle('mediapipe:status',    async () => mediapipeInstaller.getStatus());

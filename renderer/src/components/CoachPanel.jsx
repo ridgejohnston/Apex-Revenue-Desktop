@@ -29,14 +29,24 @@ const STARTER_SUGGESTIONS = [
   'I have one whale tipping — how do I keep them engaged?',
   'What should I do in the last 15 min of my session?',
   'Help me plan a 2-hour session for tonight.',
-  'I\'m burned out mid-session. Quick pick-me-up?',
+  '/research Chaturbate cam score optimization',
 ];
+
+// User-facing progress labels for the research pipeline stages. The
+// main-process module emits these via the research-progress IPC.
+const RESEARCH_STAGE_LABELS = {
+  searching:    '🔎 Searching the web…',
+  reading:      '📖 Reading sources…',
+  synthesizing: '🧠 Synthesizing findings…',
+};
 
 export default function CoachPanel({ user, liveData, platform, effectivePlan, unlocked, onAuthClick }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [researchStage, setResearchStage] = useState(null); // 'searching' | 'reading' | 'synthesizing' | null
   const [error, setError] = useState(null);
+  const [showTrainingLog, setShowTrainingLog] = useState(false);
   const scrollerRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -49,6 +59,18 @@ export default function CoachPanel({ user, liveData, platform, effectivePlan, un
         if (Array.isArray(hist)) setMessages(hist);
       } catch {}
     })();
+  }, []);
+
+  // Subscribe to research progress events. The main process emits
+  // 'searching' → 'reading' → 'synthesizing' during long /research
+  // calls so we can show the user what's happening instead of a
+  // generic "thinking…" for 30 seconds.
+  useEffect(() => {
+    if (!window.electronAPI.coach?.onResearchProgress) return;
+    const unsub = window.electronAPI.coach.onResearchProgress(({ stage }) => {
+      setResearchStage(stage);
+    });
+    return unsub;
   }, []);
 
   // Auto-scroll when new messages arrive, but only if user was near
@@ -95,6 +117,7 @@ export default function CoachPanel({ user, liveData, platform, effectivePlan, un
       setError(err?.message || 'Network error');
     } finally {
       setSending(false);
+      setResearchStage(null);
       // Return focus to input for fast follow-up
       setTimeout(() => inputRef.current?.focus(), 50);
     }
@@ -207,7 +230,7 @@ export default function CoachPanel({ user, liveData, platform, effectivePlan, un
             color: 'var(--text-dim, #9ca3af)',
             fontStyle: 'italic',
           }}>
-            Coach is thinking…
+            {researchStage ? RESEARCH_STAGE_LABELS[researchStage] || 'Researching…' : 'Coach is thinking…'}
           </div>
         )}
 

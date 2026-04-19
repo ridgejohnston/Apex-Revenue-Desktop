@@ -1,0 +1,31 @@
+{
+  "topic": "Performance craft — camera, posing, and reveal pacing",
+  "summary": "The difference between $500/week and $5K/week at the same viewer count is craft: camera positioning, body language, reveal pacing, and signature moves. Borrowed principles from burlesque (your costume is your choreography) and portrait photography (eye-level or slightly-above lens, rule of thirds, weight-shifted poses). The performer's job is to direct the viewer's eyes, thoughts, and anticipation — the platform is the stage, the tip menu is the setlist, but performance is what gets tipped.",
+  "keyPoints": [
+    "Camera at eye-level or slightly above — low cameras (looking up) are universally unflattering; elevated cameras slim the neck and create intimate 'looking up at' eye line",
+    "Lens distance 50–70 cm for headshot framing, further for full-body; face in upper third of frame when close-cropped, center when full-body (rule of thirds)",
+    "Direct-to-lens eye contact ~70% of the time during engaged moments — looking away during reveals heightens intimacy, park gaze on lens for emotionally charged moments",
+    "Weight-shifted posing (one leg forward, slight S-curve) with bent elbows and knees — stiffness reads uncomfortable, gentle bends read at-ease",
+    "Hands are the second-most-watched element after face — use them: trace collarbone, brush hair, frame face; idle hands drop energy",
+    "Layer costumes for sequential removal (jacket → blouse → bra → skirt → stockings → lingerie) — more layers = more menu items, more pacing breaks, more anticipation",
+    "Glove peel at 30–60 seconds per glove with eye contact maintained — timeless burlesque technique, the slowness is the point",
+    "Prop play (feather boa, fan, robe, sheet) conceals AND reveals in alternation — the eye wants what it can't see",
+    "Music as metronome: 3-min song gives verse/bridge/chorus pacing breaks; time reveals to the chorus hit",
+    "1–3 signature gestures viewers wait for — a specific wink before reveals, a catchphrase for whales, a trademark goodbye. Repetition is the point",
+    "Organize menu items into categories: Affection (1–100 tokens), Pose (50–200), Outfit/reveal (100–500), Interaction (varies), Premium (500–2000+)",
+    "Price pose items UNDER outfit-reveal items — poses are momentary/reversible, reveals are finite resources"
+  ],
+  "sources": [
+    {"title": "Top 5 Striptease Techniques in Burlesque", "url": "https://burlesquewithparis.co.uk/blog/2025/1/2/the-alluring-dance-top-5-striptease-techniques-in-burlesque"},
+    {"title": "10 Steps to Classic Burlesque Striptease Masterclass", "url": "https://21stcenturyburlesque.com/10-steps-classic-burlesque-striptease-masterclass/"},
+    {"title": "Creating a Sensual Striptease Performance", "url": "https://stationcarrboro.com/creating-a-sensual-striptease-performance/"},
+    {"title": "Striptease Guide: MasterClass", "url": "https://www.masterclass.com/articles/striptease-guide"},
+    {"title": "Webcam Placement: Finding the Perfect Angle", "url": "https://camscopetest.com/webcam-placement-perfect-angle.html"},
+    {"title": "Perfect Your Webcam Positioning", "url": "https://21stcenturyav.com/webcam-positioning/"},
+    {"title": "Body Position Views for Camera Angle", "url": "https://lensviewing.com/body-position-views-for-camera-angle/"},
+    {"title": "Webcam Model Tips & Tricks (vampirecorleone)", "url": "https://vampirecorleone.tumblr.com/post/55041167318/webcam-model-tips-tricks-beginners"}
+  ],
+  "qualityNote": "strong — synthesized from burlesque-craft primary sources (21stCenturyBurlesque, Burlesque with Paris) plus professional camera-framing guides plus first-person cam-performer field notes",
+  "ts": 1713479820000,
+  "source": "shipped"
+}

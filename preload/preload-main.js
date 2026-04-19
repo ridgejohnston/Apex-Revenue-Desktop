@@ -137,6 +137,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('coach:send-message', text, liveContext),
     reset:       () => ipcRenderer.invoke('coach:reset'),
     history:     () => ipcRenderer.invoke('coach:history'),
+    // Training Log — knowledge artifacts the coach has acquired
+    knowledgeList:   () => ipcRenderer.invoke('coach:knowledge-list'),
+    knowledgeDelete: (filename) => ipcRenderer.invoke('coach:knowledge-delete', filename),
+    knowledgeStats:  () => ipcRenderer.invoke('coach:knowledge-stats'),
+    // Progress events during long-running /research calls. Returns an
+    // unsubscribe fn per React's useEffect cleanup idiom.
+    onResearchProgress: (cb) => {
+      const h = (_, data) => cb(data);
+      ipcRenderer.on('coach:research-progress', h);
+      return () => ipcRenderer.removeListener('coach:research-progress', h);
+    },
   },
 
   // ─── Audio Mixer ─────────────────────────────────────

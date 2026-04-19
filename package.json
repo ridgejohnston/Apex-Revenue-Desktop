@@ -1,6 +1,6 @@
 {
   "name": "apex-revenue-desktop",
-  "version": "3.4.2",
+  "version": "3.4.3",
   "description": "Apex Revenue Desktop — Creator Intelligence Engine + OBS Streaming Platform",
   "main": "main/main.js",
   "author": "Ridge Johnston",
@@ -75,6 +75,13 @@
         "to": "ffmpeg",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "coach-knowledge-shipped/",
+        "to": "coach-knowledge-shipped",
+        "filter": [
+          "**/*.json"
         ]
       }
     ],
