@@ -432,10 +432,23 @@ export class BeautyFilter {
     // If the segmenter has a fresh mask, upload it. Happens once per
     // inference result, independent of render frame rate.
     if (bgModeActive && this._segmenter && this._segmenter.ready) {
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // mask is already in image coords
+      // CRITICAL: the mask must be uploaded with the SAME vertical flip
+      // as the video texture above. Both MediaPipe's mask and the video
+      // arrive in "image coordinates" (top row first, like a raster
+      // scan). We upload the video with UNPACK_FLIP_Y_WEBGL=true so its
+      // top row lands at UV v=1 — matching the standard GL convention
+      // where the shader samples texture(sampler, v_uv) and (0,0) is
+      // bottom-left. The mask needs the identical flip so that when the
+      // composite shader reads texture(u_mask, v_uv), the person's head
+      // at UV v=1 samples the top of the mask (where MediaPipe actually
+      // put the head). Without this flip the mask reads upside-down
+      // relative to the video — the head gets composited with the
+      // mask's bottom-row values (frequently background) and the
+      // torso with the mask's top-row values, producing a blur pattern
+      // that roughly resembles a flipped cutout of the subject. That's
+      // what Ridge's bug screenshot showed.
       gl.bindTexture(gl.TEXTURE_2D, this.texMask);
       this._segmenter.uploadMaskTo(gl);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
       // Auto-feather calibration — once per ~30 frames (roughly 1 sec
       // at 30 fps), analyze the mask's confidence distribution and
