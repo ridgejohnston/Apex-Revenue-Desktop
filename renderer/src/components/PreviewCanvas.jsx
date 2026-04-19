@@ -392,26 +392,42 @@ export default function PreviewCanvas({ scene, streamStatus, sourceStreams = {} 
           }
 
         } else if (stream && (source.type === 'audio_input' || source.type === 'audio_output')) {
-          // ── Audio source — show waveform visualizer ───
+          // ── Audio source — live / actively capturing ───
+          //
+          // Prior versions drew an animated sin-wave bar visualizer
+          // here. The bars were purely decorative (Math.sin over wall
+          // time, not real audio levels) and introduced continuous
+          // motion into the preview that added no information. Since
+          // v3.4.29 also lets the webcam source carry its own mic
+          // audio via getUserMedia({audio:true}), a separate audio
+          // source often overlaps that capture anyway — another reason
+          // to keep this placeholder understated.
+          //
+          // New behavior when active: draw just a subtle box with the
+          // source name and a static LIVE pill. User can still see where
+          // the source sits in the scene (for positioning / selection)
+          // without the animated noise. The inactive-placeholder branch
+          // below still renders when stream is absent.
           ctx.fillStyle = color + '22';
           ctx.fillRect(x, y, w, h);
           ctx.strokeStyle = color;
           ctx.lineWidth = 1;
           ctx.strokeRect(x, y, w, h);
-          // Animated waveform bars
-          const bars = 12;
-          const barW = (w * 0.6) / bars;
-          const gap = barW * 0.3;
-          const now = Date.now() / 300;
-          ctx.fillStyle = color;
-          for (let i = 0; i < bars; i++) {
-            const barH = (Math.sin(now + i * 0.8) * 0.4 + 0.5) * h * 0.5;
-            const bx = x + w * 0.2 + i * (barW + gap);
-            ctx.fillRect(bx, y + h / 2 - barH / 2, barW, barH);
-          }
-          ctx.fillStyle = color;
-          ctx.font = `${9 * Math.max(scaleX, scaleY)}px -apple-system, sans-serif`;
+
+          // Static LIVE indicator centered in the box — a small pill
+          // with the source icon. Replaces the 12-bar animated
+          // visualizer. No requestAnimationFrame cost, no sin/cos.
+          const icon = source.type === 'audio_input' ? '🎤' : '🔊';
+          const fontSize = 14 * Math.max(scaleX, scaleY);
+          ctx.font = `${fontSize}px -apple-system, sans-serif`;
           ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = color;
+          ctx.fillText(`${icon}  LIVE`, x + w / 2, y + h / 2);
+          ctx.textBaseline = 'alphabetic'; // reset to canvas default
+
+          // Source name along the bottom — unchanged from before
+          ctx.font = `${9 * Math.max(scaleX, scaleY)}px -apple-system, sans-serif`;
           ctx.fillText(source.name, x + w / 2, y + h * 0.85);
 
         } else {
