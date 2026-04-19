@@ -505,14 +505,79 @@ class StreamEngine extends EventEmitter {
   // list is empty.
   _resolveDestinations(settings) {
     const normalize = (d) => {
-      const base = String(d.url || '').replace(/\/+$/, '');
-      const key = String(d.key || '');
+      // Trim whitespace defensively. Settings UI should already do this
+      // but bad data from a copy-paste can slip through and FFmpeg's
+      // RTMP muxer rejects 'rtmp://server/path ' (trailing space) with
+      // "Error opening output files: Invalid argument" that's hard to
+      // diagnose from the error alone.
+      const base = String(d.url || '').trim().replace(/\/+$/, '');
+      const key = String(d.key || '').trim();
       return {
         name: d.name || d.platform || 'Destination',
         url: base,
         key,
         fullUrl: key ? `${base}/${key}` : base,
       };
+    };
+
+    // Human-facing validation. These run AFTER normalize(), on the
+    // already-trimmed values. Each check has a specific message naming
+    // the exact field the user needs to fix — far more actionable than
+    // FFmpeg's "Invalid argument" which is what we got before this
+    // validation existed. Catches the most common copy-paste mistakes:
+    //
+    //   • Empty URL or key
+    //   • URL missing protocol (user pasted 'live.mmcdn.com/live-origin')
+    //   • Wrong protocol (https://, http://, srt:// — none work for
+    //     cam platforms that require RTMP)
+    //   • Stream key pasted into URL field (common when copying the
+    //     combined URL from some platforms)
+    //   • URL pasted into stream key field (less common but does happen)
+    //
+    // The thrown error bubbles up to the renderer alert dialog.
+    const validate = (d, idx) => {
+      const label = idx === 0 ? 'Stream URL / Stream Key' : `destination "${d.name}"`;
+
+      if (!d.url) {
+        const err = new Error(`Stream URL is empty for ${label}. Open Settings > Streaming and either click a preset (Chaturbate, Stripchat, etc.) or paste your RTMP URL.`);
+        err.code = 'STREAM_CONFIG_INVALID_URL';
+        throw err;
+      }
+      if (!d.key) {
+        const err = new Error(`Stream Key is empty for ${label}. Open Settings > Streaming and paste your stream key from your platform's broadcaster page.`);
+        err.code = 'STREAM_CONFIG_INVALID_KEY';
+        throw err;
+      }
+
+      // Protocol check. rtmp:// or rtmps:// only. Case-insensitive.
+      if (!/^rtmps?:\/\//i.test(d.url)) {
+        // Special case: if the URL looks like a bare stream key (short,
+        // alphanumeric, no dots), the user probably pasted the key into
+        // the URL field.
+        const looksLikeKey = /^[A-Za-z0-9_\-]{10,64}$/.test(d.url);
+        const msg = looksLikeKey
+          ? `The Stream URL field looks like a stream key, not a URL. Open Settings > Streaming and make sure the Stream URL starts with rtmp:// (for example, rtmp://global.live.mmcdn.com/live-origin for Chaturbate). The stream key goes in the Stream Key field.`
+          : `Stream URL must start with rtmp:// or rtmps://. Current value: "${d.url}". Open Settings > Streaming and either click a preset or fix the URL.`;
+        const err = new Error(msg);
+        err.code = 'STREAM_CONFIG_INVALID_URL_PROTOCOL';
+        throw err;
+      }
+
+      // Key should NOT start with a protocol. If it does, user probably
+      // pasted the URL into the key field.
+      if (/^rtmps?:\/\//i.test(d.key)) {
+        const err = new Error(`The Stream Key field looks like an RTMP URL, not a key. Open Settings > Streaming and make sure the Stream Key field contains ONLY the key (a short alphanumeric string from your broadcaster page), not the full URL.`);
+        err.code = 'STREAM_CONFIG_KEY_IS_URL';
+        throw err;
+      }
+
+      // Whitespace in the middle of a key is almost certainly a paste
+      // error. Keys are always a single token.
+      if (/\s/.test(d.key)) {
+        const err = new Error(`The Stream Key contains whitespace, which is always a copy-paste error — stream keys are single tokens with no spaces. Open Settings > Streaming and re-copy the key directly from your platform.`);
+        err.code = 'STREAM_CONFIG_KEY_HAS_WHITESPACE';
+        throw err;
+      }
     };
 
     const resolved = [];
@@ -546,7 +611,9 @@ class StreamEngine extends EventEmitter {
       throw err;
     }
 
-    return resolved.map(normalize);
+    const normalized = resolved.map(normalize);
+    normalized.forEach(validate);
+    return normalized;
   }
 
   // Build the FFmpeg output args for 1 or N destinations.
@@ -1312,7 +1379,7 @@ class StreamEngine extends EventEmitter {
       return 'Hint: the streaming platform refused the connection (Windows error -10061). The RTMP ingest may have moved or be temporarily down. Re-copy the stream URL from the Chaturbate broadcaster page and retry.';
     }
     if (/invalid argument/i.test(stderr) && /output/i.test(stderr)) {
-      return 'Hint: "Invalid argument" on output is often caused by an input or encoder setup failure. Check the full log for lines before this one to see which component failed to initialize.';
+      return 'Hint: "Invalid argument" on output almost always means the Stream URL or Stream Key has a formatting problem (trailing whitespace, wrong protocol, fields swapped, or corrupted paste). Open Settings > Streaming, verify the URL starts with rtmp:// and the Key has no spaces, then retry. If they look right, click the platform preset button (Chaturbate, Stripchat, etc.) to reset the URL cleanly.';
     }
     // Non-monotonic DTS / PTS from a pipe input. Usually MediaRecorder's
     // matroska timestamps going backwards or jumping. v3.4.24+ adds
