@@ -232,6 +232,14 @@ export default function App() {
       setStreamStatus(prev => {
         // If stream just stopped unexpectedly (was streaming, now isn't) and there's an error
         if (prev.streaming && !status.streaming && status.errorReason) {
+          // CRITICAL: stop the MediaRecorder too. Without this, the
+          // recorder keeps emitting 250ms Matroska clusters into IPC
+          // long after FFmpeg has exited — and when the user clicks
+          // Start Stream again, those stale chunks race the new
+          // recorder's EBML header into the new FFmpeg's stdin,
+          // causing "Invalid data found when processing input".
+          stopWebcamRecorder();
+
           // Small delay so the "LIVE" badge has time to flip before the alert
           setTimeout(() => {
             alert(`Stream stopped unexpectedly:\n\n${status.errorReason}\n\nCheck your Stream URL, Stream Key, and that your audio device is connected.`);
@@ -703,6 +711,36 @@ export default function App() {
   // access it without stale closures.
   const webcamRecorderRef = useRef(null);
 
+  // Stop and clear the active webcam MediaRecorder if any. Idempotent
+  // and exception-safe. Called from three places:
+  //
+  //   1. Normal user-initiated stop (handleStopStream)
+  //   2. Defensive pre-start cleanup (handleStartStream guard)
+  //   3. Unexpected FFmpeg exit (api.stream.onStatus watcher)
+  //
+  // The third case is the critical one. When FFmpeg dies mid-stream
+  // (e.g. RTMP error -138, encoder crash, stream-key rejection), the
+  // renderer's MediaRecorder has no way to know — it keeps emitting
+  // 250ms Matroska clusters into IPC that go nowhere. When the user
+  // then clicks Start Stream again, those chunks race the NEW
+  // recorder's EBML header into the NEW FFmpeg's stdin, and the
+  // Matroska demuxer bails with "Invalid data found when processing
+  // input" because only the very first chunk after MediaRecorder.start()
+  // contains the header — every subsequent chunk is cluster-only.
+  //
+  // Stopping the recorder here prevents that race and produces a
+  // clean EOF on the closed pipe.
+  const stopWebcamRecorder = useCallback(() => {
+    const r = webcamRecorderRef.current;
+    webcamRecorderRef.current = null;
+    if (!r) return;
+    try {
+      if (r.state !== 'inactive') r.stop();
+    } catch (e) {
+      console.warn('[Apex] stopWebcamRecorder: recorder.stop() threw:', e?.message || e);
+    }
+  }, []);
+
   // Pick the best MediaRecorder mime type the browser supports. H.264
   // in a matroska container is ideal because the browser's hardware
   // encoder produces it directly — FFmpeg can accept it without
@@ -732,6 +770,16 @@ export default function App() {
       alert('FFmpeg is required for streaming. Please install it using the banner at the top.');
       return;
     }
+
+    // Defensive: if a previous stream attempt left a MediaRecorder
+    // running (e.g. the prior FFmpeg died on an RTMP error and the
+    // renderer's recorder was never stopped), kill it NOW before
+    // spawning a new one. Otherwise the old recorder's mid-cluster
+    // chunks race the new recorder's EBML header into FFmpeg's stdin
+    // and the Matroska demuxer fails with "Invalid data found when
+    // processing input".
+    stopWebcamRecorder();
+
     try {
       const settings = await api.store.get('obsSettings');
 
@@ -814,9 +862,13 @@ export default function App() {
       await api.stream.start(settings);
     } catch (e) {
       console.error('Stream start error:', e);
+      // If we got partway through setting up a pipe-stream recorder
+      // before something threw, clean it up. Otherwise an orphan
+      // recorder would keep emitting chunks into a closed pipe.
+      stopWebcamRecorder();
       alert('Stream failed to start: ' + (e.message || e));
     }
-  }, [ffmpegStatus, scenes, activeSceneId]);
+  }, [ffmpegStatus, scenes, activeSceneId, stopWebcamRecorder]);
 
   const handleStopStream = useCallback(async () => {
     // If we're pipe-streaming a webcam, stop the recorder first so
@@ -824,15 +876,14 @@ export default function App() {
     // tell main to end the FFmpeg process. Order matters: stopping
     // FFmpeg first would leave the recorder trying to write to a
     // closed pipe, spamming EPIPE errors.
-    const recorder = webcamRecorderRef.current;
-    if (recorder && recorder.state !== 'inactive') {
-      try { recorder.stop(); } catch {}
-      webcamRecorderRef.current = null;
+    const hadRecorder = !!webcamRecorderRef.current;
+    stopWebcamRecorder();
+    if (hadRecorder) {
       await api.stream.stopPipe();
       return;
     }
     await api.stream.stop();
-  }, []);
+  }, [stopWebcamRecorder]);
 
   const handleStartRecord = useCallback(async () => {
     if (ffmpegStatus && !ffmpegStatus.installed) {
