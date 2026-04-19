@@ -1019,6 +1019,19 @@ class StreamEngine extends EventEmitter {
     this.status.streaming = true;
     this.status.streamUptime = 0;
     this.status.errorReason = null;
+
+    // Open a broadcast-ledger session so usage accounting captures this
+    // stream. The returned id is held on the stream-engine instance and
+    // passed to recordStop() on any exit path (user stop, error, crash).
+    // Ledger is additions-only — nothing here enforces a quota.
+    try {
+      const ledger = require('./broadcast-ledger');
+      this._broadcastSessionId = ledger.recordStart(settings?.platform || 'unknown');
+    } catch (e) {
+      // Ledger errors must never block a stream from starting.
+      this._broadcastSessionId = null;
+    }
+
     this._uptimeInterval = setInterval(() => {
       this.status.streamUptime++;
       this._parseFFmpegStats();
@@ -1034,6 +1047,22 @@ class StreamEngine extends EventEmitter {
     this.streamProcess.on('close', (code) => {
       this.status.streaming = false;
       if (this._uptimeInterval) clearInterval(this._uptimeInterval);
+
+      // Close the broadcast-ledger session if it wasn't already closed
+      // by stopStream(). recordStop is idempotent — if stopStream
+      // already finalized this session id, the ledger returns the
+      // already-closed record untouched. Analytics-only; see note in
+      // stopStream().
+      if (this._broadcastSessionId) {
+        try {
+          const ledger = require('./broadcast-ledger');
+          const exitReason = (code !== 0 && code !== null) ? 'error' : 'user_stop';
+          ledger.recordStop(this._broadcastSessionId, exitReason);
+        } catch (e) {
+          // Ledger errors must never mask the underlying FFmpeg error.
+        }
+        this._broadcastSessionId = null;
+      }
 
       // Extract meaningful error from stderr when FFmpeg exits unexpectedly
       let errorReason = null;
@@ -1082,6 +1111,20 @@ class StreamEngine extends EventEmitter {
       console.error('[StreamEngine] Spawn error:', err);
       this.status.streaming = false;
       this.status.errorReason = err.message;
+
+      // Close the broadcast-ledger session on spawn failure. Duration
+      // will be near-zero in this case, which is the correct accounting:
+      // the stream never really ran.
+      if (this._broadcastSessionId) {
+        try {
+          const ledger = require('./broadcast-ledger');
+          ledger.recordStop(this._broadcastSessionId, 'crash');
+        } catch (e) {
+          // Ledger errors are not the user's problem.
+        }
+        this._broadcastSessionId = null;
+      }
+
       this.emit('status', { ...this.status });
       this.streamProcess = null;
       this._cleanupTempFiles();
@@ -1406,12 +1449,32 @@ class StreamEngine extends EventEmitter {
     this.status.streaming = true;
     this.status.errorReason = null;
     this.status.errorLogPath = null;
+
+    // Open broadcast-ledger session for pipe mode. Same semantics as the
+    // direct-path startStream — analytics-only accounting, zero enforcement.
+    try {
+      const ledger = require('./broadcast-ledger');
+      this._broadcastSessionId = ledger.recordStart(settings?.platform || 'unknown');
+    } catch (e) {
+      this._broadcastSessionId = null;
+    }
+
     this.emit('status', { ...this.status });
 
     this.streamProcess.on('close', (code) => {
       if (this._uptimeInterval) clearInterval(this._uptimeInterval);
       this.status.streaming = false;
       this.status.streamUptime = 0;
+
+      // Close the ledger session on pipe-mode exit.
+      if (this._broadcastSessionId) {
+        try {
+          const ledger = require('./broadcast-ledger');
+          const exitReason = (code !== 0 && code !== null) ? 'error' : 'user_stop';
+          ledger.recordStop(this._broadcastSessionId, exitReason);
+        } catch (e) { /* ledger errors don't block cleanup */ }
+        this._broadcastSessionId = null;
+      }
 
       let errorReason = null;
       let logPath = null;
@@ -1452,6 +1515,15 @@ class StreamEngine extends EventEmitter {
       console.error('[StreamEngine] Pipe spawn error:', err);
       this.status.streaming = false;
       this.status.errorReason = err.message;
+
+      if (this._broadcastSessionId) {
+        try {
+          const ledger = require('./broadcast-ledger');
+          ledger.recordStop(this._broadcastSessionId, 'crash');
+        } catch (e) { /* ledger errors don't block cleanup */ }
+        this._broadcastSessionId = null;
+      }
+
       this.emit('status', { ...this.status });
       this.streamProcess = null;
       this._cleanupTempFiles();
@@ -1498,6 +1570,17 @@ class StreamEngine extends EventEmitter {
     }
     this.status.streaming = false;
     if (this._uptimeInterval) clearInterval(this._uptimeInterval);
+
+    // Close the ledger session on pipe-mode user stop. Same analytics-
+    // only semantics as stopStream — no enforcement.
+    if (this._broadcastSessionId) {
+      try {
+        const ledger = require('./broadcast-ledger');
+        ledger.recordStop(this._broadcastSessionId, 'user_stop');
+      } catch (e) { /* ledger errors don't block cleanup */ }
+      this._broadcastSessionId = null;
+    }
+
     this.emit('status', { ...this.status });
   }
 
@@ -1513,6 +1596,22 @@ class StreamEngine extends EventEmitter {
     }
     this.status.streaming = false;
     if (this._uptimeInterval) clearInterval(this._uptimeInterval);
+
+    // Close the broadcast-ledger session. Analytics-only — this records
+    // how long the model broadcast so we can surface usage stats in the
+    // UI. There is no quota enforcement: models on Platinum (Tier 2)
+    // and Agency (Tier 3) have unlimited broadcasting as part of their
+    // subscription. See BROADCAST_POLICY in shared/apex-config.js.
+    if (this._broadcastSessionId) {
+      try {
+        const ledger = require('./broadcast-ledger');
+        ledger.recordStop(this._broadcastSessionId, 'user_stop');
+      } catch (e) {
+        // Ledger errors must never interfere with the stop flow.
+      }
+      this._broadcastSessionId = null;
+    }
+
     this.emit('status', { ...this.status });
   }
 

@@ -93,12 +93,13 @@ const BEAUTY_STORE_KEY = 'beautyFilterConfig';
 
 // ─── Tier gate ───────────────────────────────────────────
 /**
- * Feature gate: beauty filter is a Platinum feature. Beta users see it
- * (they get Platinum for free), Free users see a locked panel with an
- * upsell, Admins see it regardless via the DEV toggle.
+ * Feature gate: filters are a paid-tier feature available to Platinum
+ * (Tier 2) and Agency (Tier 3) subscribers. Beta users see them (they
+ * get Platinum for free), Free users see a locked panel with an upsell,
+ * Admins see them regardless via the DEV toggle.
  */
 function isBeautyUnlocked(effectivePlan) {
-  return effectivePlan === 'platinum';
+  return effectivePlan === 'platinum' || effectivePlan === 'agency';
 }
 
 // ─── Config clamp / migrate ──────────────────────────────

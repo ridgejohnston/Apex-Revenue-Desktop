@@ -895,14 +895,18 @@ export default function App() {
 
   // ─── Derived: effective plan ──────────────────────────
   // Admin toggle wins, then subscription plan. Non-admins never see the toggle.
-  const effectivePlan =
-    (user?.isAdmin && (adminTierToggle === 'free' || adminTierToggle === 'platinum'))
-      ? adminTierToggle
-      : (subscription?.plan || 'free');
-  const effectiveBillingSource =
-    (user?.isAdmin && (adminTierToggle === 'free' || adminTierToggle === 'platinum'))
-      ? 'admin-toggle'
-      : (subscription?.billingSource || 'unknown');
+  // Valid admin toggles are the same set as paid plan names + free —
+  // agency (Tier 3) is the organization-level plan, platinum (Tier 2)
+  // is the individual paid plan, free is the ungated baseline.
+  const ADMIN_TOGGLE_VALUES = ['free', 'platinum', 'agency'];
+  const adminOverrideActive =
+    user?.isAdmin && ADMIN_TOGGLE_VALUES.includes(adminTierToggle);
+  const effectivePlan = adminOverrideActive
+    ? adminTierToggle
+    : (subscription?.plan || 'free');
+  const effectiveBillingSource = adminOverrideActive
+    ? 'admin-toggle'
+    : (subscription?.billingSource || 'unknown');
 
   // Ref mirror of effectivePlan so callbacks (activateSource) can read
   // the latest tier without being re-created on every subscription update.

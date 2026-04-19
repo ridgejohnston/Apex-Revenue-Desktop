@@ -7,7 +7,11 @@
  * fields so existing consumers (renderer/src/components/RightPanel.jsx lines
  * 502-504 and the compiled renderer/dist/bundle.js) continue to work
  * unchanged. New code should prefer `tierFromTotal(total, thresholds)` which
- * uses the performer's own thresholds pulled from RDS.
+ * uses the model's own thresholds pulled from RDS.
+ *
+ * Terminology: "model" (the on-camera user of this app). Older code uses
+ * "performer" interchangeably — both refer to the same person. Going forward
+ * new UI strings, system prompts, and public-facing copy should use "model".
  */
 
 const DEFAULT_THRESHOLDS = Object.freeze({
@@ -24,7 +28,7 @@ const WHALE_TIERS = {
 };
 
 /**
- * Resolves a cumulative token total to a whale tier using the performer's
+ * Resolves a cumulative token total to a whale tier using the model's
  * dynamic thresholds (falling back to DEFAULT_THRESHOLDS if not provided).
  */
 function tierFromTotal(total, thresholds) {
@@ -38,7 +42,7 @@ function tierFromTotal(total, thresholds) {
 module.exports = {
   APP_NAME: 'Apex Revenue',
   EXTENSION_ID: 'desktop',
-  VERSION: '3.4.17',
+  VERSION: '3.4.18',
 
   DEFAULT_PLATFORMS: {
     'Live Cams': [
@@ -73,6 +77,32 @@ module.exports = {
   DEFAULT_THRESHOLDS,
   WHALE_TIERS,
   tierFromTotal,
+
+  /**
+   * Broadcast policy.
+   *
+   * Models on the Platinum (Tier 2) and Agency (Tier 3) subscription
+   * plans get UNLIMITED broadcasting as part of their subscription.
+   * There is no hourly cap, no overage billing, no STS scoping — if
+   * the model is on a paid tier, they stream as long as they want.
+   *
+   * The Free tier has no broadcast-duration limits imposed by this app
+   * either. Whatever broadcast limits exist for Free users come from
+   * feature gating elsewhere (e.g. the Beauty Filter unlock check in
+   * shared/beauty-config.js), not from a time-based quota.
+   *
+   * This object is intentionally minimal. It exists as a single
+   * documented source of truth so anyone reading the codebase sees
+   * "broadcasting is unlimited on paid tiers" directly rather than
+   * having to infer it from the absence of cap-checking code. The
+   * broadcast-ledger module records session data for analytics only —
+   * never for enforcement.
+   */
+  BROADCAST_POLICY: Object.freeze({
+    PLANS_WITH_UNLIMITED_BROADCAST: Object.freeze(['platinum', 'agency']),
+    ENFORCE_DURATION_CAP: false,
+    OVERAGE_BILLING_ENABLED: false,
+  }),
 
   AI_TRIGGERS: {
     // Legacy triggers (preserved — fireTrigger in main/main.js references these)

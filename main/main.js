@@ -62,6 +62,14 @@ const store = new Store({
   },
 });
 
+// Initialize the broadcast-ledger analytics module with the app's
+// electron-store instance. The ledger records every broadcast session
+// (start, end, duration, exit reason) for usage analytics only — there
+// is no quota enforcement. Platinum and Agency tiers have unlimited
+// broadcasting per BROADCAST_POLICY in shared/apex-config.js.
+const broadcastLedger = require('./broadcast-ledger');
+broadcastLedger.init(store);
+
 // ─── State ──────────────────────────────────────────────
 let mainWindow = null;
 let camView = null;
@@ -955,7 +963,8 @@ ipcMain.handle('subscription:refresh', () => refreshSubscription());
 ipcMain.handle('admin:set-tier-toggle', (_, tier) => {
   const sess = store.get('apexSession');
   if (!sess?.isAdmin) return { ok: false, error: 'not_admin' };
-  if (tier !== 'free' && tier !== 'platinum' && tier !== null) {
+  const VALID_TIERS = new Set(['free', 'platinum', 'agency']);
+  if (tier !== null && !VALID_TIERS.has(tier)) {
     return { ok: false, error: 'invalid_tier' };
   }
   adminTierToggle = tier;
@@ -963,6 +972,19 @@ ipcMain.handle('admin:set-tier-toggle', (_, tier) => {
   return { ok: true, tier };
 });
 ipcMain.handle('admin:get-tier-toggle', () => adminTierToggle);
+
+// ─── Broadcast usage (analytics-only) ──────────────────
+// Returns today's broadcast usage for display in the UI. No enforcement
+// is attached to this — Platinum and Agency have unlimited broadcasting.
+// The returned shape gives the UI enough to render "3.2 hours broadcast
+// today" style status without implying any cap.
+ipcMain.handle('broadcast:get-today-usage', () => {
+  try {
+    return { ok: true, usage: broadcastLedger.getTodayUsage() };
+  } catch (err) {
+    return { ok: false, error: err?.message || 'unknown_error' };
+  }
+});
 
 // ─── Expiry notifications ───────────────────────────────
 function fireExpiryNotification({ hours, expiresAt }) {

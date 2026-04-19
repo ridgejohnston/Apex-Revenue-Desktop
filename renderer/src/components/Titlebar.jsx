@@ -282,16 +282,27 @@ export default function Titlebar({
 // ─── Tier Badge ───────────────────────────────────────────
 //
 // Shows the current effective plan with color coding:
+//   • Agency (admin-toggle)  — teal with 🔧, "DEV AGENCY"  (7.5% rev share)
+//   • Agency (stripe)        — teal, "AGENCY"              (7.5% rev share)
+//   • Agency (offline)       — amber, "AGENCY (OFFLINE)"
 //   • Platinum (admin)       — gold, "ADMIN"
 //   • Platinum (admin-toggle)— gold with 🔧, "DEV"
 //   • Platinum (beta)        — magenta, "BETA"
-//   • Platinum (stripe)      — purple, "PLATINUM"
+//   • Platinum (stripe)      — purple, "PLATINUM"           (5% rev share)
 //   • Platinum (offline)     — amber, "OFFLINE [countdown]"
 //   • Free                   — gray, "FREE"
 function TierBadge({ plan, source, offline, graceRemainingMs }) {
   let label, bg, color, border, icon = null;
 
-  if (plan === 'platinum') {
+  if (plan === 'agency') {
+    // Agency (Tier 3) — organization-level paid plan. Teal palette
+    // distinguishes it from Platinum's purple while still reading as
+    // "paid tier." Admin override gets the same 🔧 indicator as other
+    // dev toggles.
+    if (source === 'admin-toggle')   { label = 'DEV AGENCY'; icon = '🔧'; bg = 'rgba(20, 184, 166, 0.15)'; color = '#2dd4bf'; border = 'rgba(20, 184, 166, 0.5)'; }
+    else if (offline)                { label = 'AGENCY (OFFLINE)'; bg = 'rgba(251, 146, 60, 0.15)'; color = '#fb923c'; border = 'rgba(251, 146, 60, 0.5)'; }
+    else                             { label = 'AGENCY';   bg = 'rgba(20, 184, 166, 0.15)'; color = '#2dd4bf'; border = 'rgba(20, 184, 166, 0.5)'; }
+  } else if (plan === 'platinum') {
     if (source === 'admin')          { label = 'ADMIN';    bg = 'rgba(250, 204, 21, 0.15)'; color = '#fbbf24'; border = 'rgba(250, 204, 21, 0.5)'; }
     else if (source === 'admin-toggle') { label = 'DEV PLATINUM'; icon = '🔧'; bg = 'rgba(250, 204, 21, 0.15)'; color = '#fbbf24'; border = 'rgba(250, 204, 21, 0.5)'; }
     else if (source === 'beta')      { label = 'BETA';     bg = 'rgba(236, 72, 153, 0.15)'; color = '#f472b6'; border = 'rgba(236, 72, 153, 0.5)'; }

@@ -47,6 +47,26 @@ const FEATURE_MAP = {
     whaleAlerts:  true,
     beautyFilter: true,
   },
+  // Agency (Tier 3) — an organization-level plan billed at 7.5% revenue
+  // share. Agencies managing multiple models share the plan across their
+  // roster; the higher rate vs Platinum (5%) reflects the extra support
+  // and onboarding an agency relationship includes. Feature access
+  // matches Platinum at a per-model level — the distinction between
+  // Platinum and Agency is billing/organizational (handled on the
+  // subscription backend: separate Stripe product + different rev-share
+  // percentage), not feature gating at this layer. Both tiers include
+  // unlimited broadcasting — see BROADCAST_POLICY in shared/apex-config.js.
+  agency: {
+    aiPrompts:    true,
+    aiCoach:      true,
+    voiceAlerts:  true,
+    s3Backup:     true,
+    obsStreaming: true,
+    virtualCam:   true,
+    cloudSync:    true,
+    whaleAlerts:  true,
+    beautyFilter: true,
+  },
 };
 
 function hasFeature(plan, feature) {

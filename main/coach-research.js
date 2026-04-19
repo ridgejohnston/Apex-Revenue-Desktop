@@ -144,7 +144,7 @@ async function _synthesize(topic, searchResults, pages, bedrockClient, modelId) 
     return `[Source ${i + 1}]\nTitle: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}${body}`;
   }).join('\n\n');
 
-  const systemPrompt = `You synthesize research findings into tactical knowledge artifacts for the Apex Revenue AI Coach — an advisor to professional live cam performers. Your output is NOT the user-facing answer; it's a persistent knowledge record the Coach will draw on in later conversations.
+  const systemPrompt = `You synthesize research findings into tactical knowledge artifacts for the Apex Revenue AI Coach — an advisor to professional live cam models. Your output is NOT the user-facing answer; it's a persistent knowledge record the Coach will draw on in later conversations.
 
 Goals:
   • Extract concrete, actionable tactics — name specific techniques, numbers, dollar/token amounts, percentages, timings

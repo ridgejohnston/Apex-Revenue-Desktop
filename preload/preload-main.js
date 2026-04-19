@@ -245,6 +245,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onTierToggleChanged: (cb) => ipcRenderer.on('admin:tier-toggle-changed', (_, data) => cb(data)),
   },
 
+  // ─── Broadcast Usage (analytics-only) ─────────────────
+  // Returns today's broadcast hours for UI display. Read-only on the
+  // renderer side. No enforcement is attached — Platinum and Agency
+  // tiers both include unlimited broadcasting.
+  broadcast: {
+    getTodayUsage: () => ipcRenderer.invoke('broadcast:get-today-usage'),
+  },
+
   // ─── Live Data ───────────────────────────────────────
   onLiveUpdate: (cb) => ipcRenderer.on('live-update', (_, data) => cb(data)),
 

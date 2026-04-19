@@ -137,7 +137,12 @@ function computeExpiryWarnings(sub, ledger = {}) {
   if (!sub || !sub.expiresAt)             return { toFire, ledger: nextLedger };
   if (sub.billingSource === 'admin')      return { toFire, ledger: nextLedger };
   if (sub.billingSource === 'beta')       return { toFire, ledger: nextLedger };
-  if (sub.plan !== 'platinum')            return { toFire, ledger: nextLedger };
+  // Expiry-warning logic applies to any paid plan (platinum or agency) —
+  // free users have nothing to renew. Checking plan membership here
+  // instead of hard-coding 'platinum' future-proofs this against new
+  // paid tiers without requiring edits.
+  const PAID_PLANS = new Set(['platinum', 'agency']);
+  if (!PAID_PLANS.has(sub.plan))          return { toFire, ledger: nextLedger };
 
   const expiresAt = new Date(sub.expiresAt).getTime();
   const now = Date.now();
@@ -165,11 +170,12 @@ function computeExpiryWarnings(sub, ledger = {}) {
  *
  * @param {object} session  { isAdmin, isBeta, ... }
  * @param {object} sub      { plan, billingSource, softExpired, ... }
- * @param {'free'|'platinum'|null} adminToggle  Only honored if isAdmin
+ * @param {'free'|'platinum'|'agency'|null} adminToggle  Only honored if isAdmin
  * @returns {{effectivePlan, source, isAdminOverride}}
  */
 function resolveEffectivePlan(session, sub, adminToggle) {
-  if (session?.isAdmin && (adminToggle === 'free' || adminToggle === 'platinum')) {
+  const VALID_OVERRIDES = new Set(['free', 'platinum', 'agency']);
+  if (session?.isAdmin && VALID_OVERRIDES.has(adminToggle)) {
     return {
       effectivePlan:   adminToggle,
       source:          'admin-toggle',

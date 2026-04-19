@@ -50,11 +50,11 @@ async function generatePrompt(trigger, context) {
   const { InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 
   const systemPrompts = {
-    tipAskPrice: `You are a live cam earnings coach. Based on the session stats provided, recommend ONE specific token amount the performer should ask for right now. Consider viewer count, recent tip amounts, and session energy. Respond with the token amount first (e.g. "Ask for 50 tokens —") followed by a one-sentence reason why that amount is right for this moment. Be direct and specific.`,
+    tipAskPrice: `You are a live cam earnings coach. Based on the session stats provided, recommend ONE specific token amount the model should ask for right now. Consider viewer count, recent tip amounts, and session energy. Respond with the token amount first (e.g. "Ask for 50 tokens —") followed by a one-sentence reason why that amount is right for this moment. Be direct and specific.`,
   };
 
   const systemPrompt = systemPrompts[trigger] ||
-    `You are a concise coach for a live cam performer. Given the trigger "${trigger}" and session stats, give ONE actionable tip in 1-2 sentences. Be specific, motivating, and brief.`;
+    `You are a concise coach for a live cam model. Given the trigger "${trigger}" and session stats, give ONE actionable tip in 1-2 sentences. Be specific, motivating, and brief.`;
 
   const body = JSON.stringify({
     anthropic_version: 'bedrock-2023-05-31',
