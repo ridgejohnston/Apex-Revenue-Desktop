@@ -325,10 +325,26 @@ export default function App() {
         // the current plan from a ref so this callback can stay stable.
         if (effectivePlanRef.current && isBeautyUnlocked(effectivePlanRef.current)) {
           try {
-            const filter = new BeautyFilter(stream, {
-              ...beautyConfigRef.current,
-              mediapipeInstalled: mediapipeInstalledRef.current,
-            });
+            const filter = new BeautyFilter(
+              stream,
+              {
+                ...beautyConfigRef.current,
+                mediapipeInstalled: mediapipeInstalledRef.current,
+              },
+              {
+                // Auto-Beauty writeback. The engine ticks every ~2s and
+                // sends partial config deltas (e.g. { warmth: 12,
+                // brightness: 15 }) when it decides the current frame
+                // deserves an adjustment. We merge with the current
+                // config — which beautyConfigRef always holds — then
+                // route through the same handler a manual slider edit
+                // would use, so persistence + live-update + UI
+                // re-render all happen for free via the existing path.
+                onAutoBeautyUpdate: (updates) => {
+                  handleBeautyChange({ ...beautyConfigRef.current, ...updates });
+                },
+              }
+            );
             const filteredStream = filter.getStream();
             if (filteredStream !== stream) {
               beautyFiltersRef.current[id] = filter;

@@ -728,6 +728,27 @@ ipcMain.handle('coach:profile-clear', async () => {
   catch (err) { return { ok: false, error: err?.message || String(err) }; }
 });
 
+// ─── Auto-Beauty vision analysis ──────────────────────────
+//
+// Called from the renderer roughly once every 15 seconds while
+// Auto-Beauty is enabled. Receives a base64-encoded JPEG of the
+// current webcam frame and returns slider suggestions from Claude
+// Haiku. The renderer handles EMA smoothing, delta clamping, and
+// manual-touch grace periods — this handler is pure request/response.
+//
+// Errors always return { reason } objects rather than throwing, so
+// the renderer's fallback (leave sliders where they are, try again
+// next tick) doesn't need a try/catch around every IPC call.
+ipcMain.handle('beauty:analyze-frame', async (_evt, base64Jpeg) => {
+  try {
+    const { analyzeFrameForBeauty } = require('./auto-beauty-vision');
+    const result = await analyzeFrameForBeauty(base64Jpeg);
+    return { ok: true, ...result };
+  } catch (err) {
+    return { ok: false, reason: `handler-error: ${err?.message || String(err)}` };
+  }
+});
+
 // ─── Auth + Subscription state ──────────────────────────
 //
 // `apexSession`        — persisted Hosted UI tokens + groups

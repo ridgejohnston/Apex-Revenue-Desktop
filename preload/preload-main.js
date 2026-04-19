@@ -156,6 +156,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // ─── Auto-Beauty vision analysis ─────────────────────
+  // Invoked by the renderer's AutoBeautyEngine roughly once every
+  // 15 seconds. Sends a base64-encoded JPEG of the current webcam
+  // frame to the main process, which forwards it to Claude Haiku
+  // on Bedrock and returns suggested slider values. Always resolves
+  // (never rejects) — errors come back as { ok: false, reason }.
+  beauty: {
+    analyzeFrame: (base64Jpeg) => ipcRenderer.invoke('beauty:analyze-frame', base64Jpeg),
+  },
+
   // ─── Audio Mixer ─────────────────────────────────────
   audio: {
     getDevices: () => ipcRenderer.invoke('audio:get-devices'),

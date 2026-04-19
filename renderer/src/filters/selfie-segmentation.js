@@ -46,10 +46,6 @@ export class SelfieSegmenter {
     this._maskData = null;
     this._maskW = 0;
     this._maskH = 0;
-    // Monotonic counter bumped each time a fresh mask arrives. Consumers
-    // snapshot this value and compare on next render frame to detect
-    // "new mask since last look" cheaply, without diffing the pixels.
-    this._maskGen = 0;
 
     // Backpressure: only one frame in flight at a time. Naturally
     // throttles the effective segmentation rate to whatever the worker
@@ -111,12 +107,6 @@ export class SelfieSegmenter {
         this._maskData = new Float32Array(msg.buffer);
         this._maskW = msg.width;
         this._maskH = msg.height;
-        // Bump generation counter so consumers (the render loop) can
-        // detect "new mask since last check" without having to diff
-        // the Float32Array themselves. Wraps at MAX_SAFE_INTEGER — in
-        // practice it'll roll over after 9 quadrillion masks, i.e.
-        // never in a human lifetime.
-        this._maskGen = (this._maskGen | 0) + 1;
         return;
 
       case 'mask-missed':

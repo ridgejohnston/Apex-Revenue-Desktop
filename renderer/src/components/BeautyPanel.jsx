@@ -54,6 +54,7 @@ export default function BeautyPanel({
       bgGradientStyle: 0,
       autoFeather: true,
       manualFeather: 50,
+      autoBeauty: false,
     });
   }, [config.enabled, onChange]);
 
@@ -113,6 +114,11 @@ export default function BeautyPanel({
 
       {/* ─── BEAUTY ─── */}
       <Section title="Beauty" dim={!config.enabled}>
+        <AutoBeautyToggle
+          enabled={!!config.autoBeauty}
+          disabled={!config.enabled}
+          onChange={(v) => set('autoBeauty', v)}
+        />
         <Slider label="Intensity"  hint="Overall smoothing blend"
           min={0} max={100} value={config.intensity} onChange={(v) => set('intensity', v)} />
         <Slider label="Smoothness" hint="Skin softening strength"
@@ -279,6 +285,80 @@ function Switch({ value, onChange }) {
         background: '#fff',
         transition: 'left 0.15s',
       }} />
+    </div>
+  );
+}
+
+/**
+ * Auto-Beauty toggle row. Sits at the top of the Beauty section and
+ * controls whether the background vision analyzer (Claude Haiku on
+ * Bedrock) continuously tunes the beauty/color/lighting sliders while
+ * the stream is live. When enabled, the performer can still drag any
+ * slider manually — the engine respects a 10-second grace window on
+ * any slider the user touched before resuming auto-adjustment on it.
+ */
+function AutoBeautyToggle({ enabled, disabled, onChange }) {
+  const handleClick = () => { if (!disabled) onChange(!enabled); };
+  return (
+    <div
+      onClick={handleClick}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '8px 10px',
+        background: enabled
+          ? 'linear-gradient(90deg, rgba(204,0,0,0.12), rgba(204,0,0,0.02) 60%, transparent)'
+          : 'var(--bg-elevated, #1a1a22)',
+        border: `1px solid ${enabled ? 'var(--accent, #cc0000)' : 'var(--border, #2a2a35)'}`,
+        borderRadius: 4,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+        transition: 'background 0.15s, border-color 0.15s',
+      }}
+      role="button"
+      aria-pressed={enabled}
+      aria-disabled={disabled}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: 1.5,
+          textTransform: 'uppercase',
+          color: enabled ? 'var(--accent, #cc0000)' : 'var(--text, #f5f5f5)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+        }}>
+          <span>✨ Auto-Beauty</span>
+          {enabled && (
+            <span style={{
+              fontSize: 8,
+              fontWeight: 700,
+              letterSpacing: 0.5,
+              padding: '1px 5px',
+              borderRadius: 2,
+              background: 'var(--accent, #cc0000)',
+              color: '#fff',
+            }}>
+              LIVE
+            </span>
+          )}
+        </div>
+        <div style={{
+          fontSize: 9,
+          color: 'var(--text-dim, #9ca3af)',
+          marginTop: 3,
+          lineHeight: 1.35,
+        }}>
+          AI vision tunes your filter every 15s for optimal on-cam look
+        </div>
+      </div>
+      {/* Stop propagation so the inner Switch click isn't doubled by the row click */}
+      <div onClick={(e) => e.stopPropagation()}>
+        <Switch value={enabled} onChange={(v) => { if (!disabled) onChange(v); }} />
+      </div>
     </div>
   );
 }

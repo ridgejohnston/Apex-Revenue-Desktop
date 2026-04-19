@@ -59,6 +59,16 @@ const BEAUTY_DEFAULTS = Object.freeze({
   // Mask edge handling
   autoFeather:  true,    // true → filter calibrates feather from mask stats
   manualFeather: 50,     // 0–100 — user override (maps to 0.05..0.30 shader units)
+  // Auto-Beauty: when true, the renderer samples the live webcam frame
+  // every ~2 seconds and autonomously nudges intensity/smoothness/
+  // warmth/brightness/contrast/saturation/lowLight toward values that
+  // flatter the subject under their current lighting. Updates are
+  // gentle (≤5 units per tick) so the preview never jumps — it settles
+  // into an optimum over ~30-60 seconds and keeps adapting if the
+  // lighting changes. Manual slider changes from the user stop
+  // auto-adjustment on that slider for 10 seconds (respect the
+  // performer's latest intent).
+  autoBeauty:  false,
 });
 
 const BEAUTY_BOUNDS = Object.freeze({
@@ -115,6 +125,7 @@ function clampConfig(cfg = {}) {
   }
   c.enabled = !!c.enabled;
   c.autoFeather = c.autoFeather === undefined ? true : !!c.autoFeather;
+  c.autoBeauty = !!c.autoBeauty;
   // bgMode is an integer 0..3 — coerce softly
   c.bgMode = Math.round(c.bgMode) | 0;
   if (c.bgMode < 0 || c.bgMode > 3) c.bgMode = 0;
