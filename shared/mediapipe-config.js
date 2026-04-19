@@ -29,15 +29,15 @@
  */
 
 // ─── S3 bucket / path ────────────────────────────────────
-// TODO before first release: point this at the actual bucket after
-// assets are uploaded. The S3 object needs public-read ACL (or be
-// fronted by CloudFront). The bucket should enable CORS — a permissive
-// policy is fine since the files are public:
-//   AllowedMethods: GET, HEAD
-//   AllowedOrigins: *
-//   AllowedHeaders: *
+// Assets live under the apex-revenue-downloads bucket at /mediapipe/v1/.
+// The bucket already carries a public-read policy on s3:GetObject for
+// every object (PublicReadInstallers SID), and CORS is configured to
+// allow GET/HEAD from any origin. No further S3 config needed when
+// uploading new versions — drop files into the versioned prefix, run
+// the manifest-generation script, and users' Install buttons will
+// redownload.
 const MEDIAPIPE_S3_BASE =
-  'https://apexrevenue-downloads.s3.us-east-1.amazonaws.com/mediapipe/v1';
+  'https://apex-revenue-downloads.s3.us-east-1.amazonaws.com/mediapipe/v1';
 
 const MEDIAPIPE_MANIFEST_URL = `${MEDIAPIPE_S3_BASE}/manifest.json`;
 

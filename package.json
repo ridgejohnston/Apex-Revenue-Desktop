@@ -25,7 +25,7 @@
     "@aws-sdk/client-polly": "^3.1028.0",
     "@aws-sdk/client-s3": "^3.1028.0",
     "@aws-sdk/credential-providers": "^3.1028.0",
-    "@mediapipe/tasks-vision": "^0.10.30",
+    "@mediapipe/tasks-vision": "^0.10.34",
     "electron-store": "^8.1.0",
     "electron-updater": "^6.8.3",
     "fluent-ffmpeg": "^2.1.3",
