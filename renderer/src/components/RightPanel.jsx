@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import BeautyPanel from './BeautyPanel';
 import CoachPanel from './CoachPanel';
-const { hasFeature } = require('../../../shared/billing-manager');
+const { hasFeature } = require('../../../shared/feature-map');
 
 // Source-type → Stream Source category mapping. MUST stay in sync with
 // App.jsx VIDEO_CATEGORY_MAP — both files need this table and neither
@@ -62,13 +62,23 @@ export default function RightPanel({
       {/* Panel Header */}
       <div className="section-header">
         <span>
-          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI' : activeTab === 'beauty' ? '✨ Beauty Filter' : '🔗 Toy Sync'}
+          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI Prompt Engine' : activeTab === 'coach' ? '💬 AI Coach' : activeTab === 'beauty' ? '✨ Beauty Filter' : '🔗 Toy Sync'}
         </span>
       </div>
 
       <div className="flex-col flex-1" style={{ overflow: 'auto', padding: 8 }}>
         {activeTab === 'obs' && <OBSProperties activeScene={activeScene} onToggleSourceVisible={onToggleSourceVisible} onToggleCategory={onToggleCategory} />}
         {activeTab === 'ai' && <AIPanel user={user} onAuthClick={onAuthClick} liveData={liveData} aiPrompt={aiPrompt} onDismissPrompt={onDismissPrompt} platform={platform} effectivePlan={effectivePlan} />}
+        {activeTab === 'coach' && (
+          <CoachPanel
+            user={user}
+            liveData={liveData}
+            platform={platform}
+            effectivePlan={effectivePlan}
+            unlocked={hasFeature(effectivePlan, 'aiCoach')}
+            onAuthClick={onAuthClick}
+          />
+        )}
         {activeTab === 'sync' && <SyncPanel />}
         {activeTab === 'beauty' && (
           <BeautyPanel
@@ -986,19 +996,14 @@ function getTier(total, tiers) {
 
 // ─── AI Prompt Engine Panel ──────────────────────────────
 function AIPanel({ user, onAuthClick, liveData, aiPrompt, onDismissPrompt, platform, effectivePlan }) {
-  // Sub-mode within the AI tab:
-  //   'prompts' — existing one-shot Bedrock trigger engine
-  //   'coach'   — new multi-turn conversational coach
-  // These live together rather than as top-level tabs because they
-  // share the same Bedrock client, the same session context, and the
-  // same "this is an AI thing" mental model for the performer.
-  const [aiMode, setAiMode] = useState('prompts');
+  // platform + effectivePlan are threaded through from RightPanel for
+  // consistency with other panels, though AIPanel itself doesn't use
+  // them yet. The Coach lives in its own top-level tab now; this panel
+  // is dedicated to the one-shot Bedrock Prompt Engine.
   const [history, setHistory] = useState([]);
   const [firing, setFiring] = useState(null);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [promptMode, setPromptMode] = useState('bedrock');
-
-  const coachUnlocked = hasFeature(effectivePlan, 'aiCoach');
 
   useEffect(() => {
     window.electronAPI.store.get('awsVoiceEnabled').then((v) => setVoiceEnabled(v ?? true));
@@ -1054,62 +1059,7 @@ function AIPanel({ user, onAuthClick, liveData, aiPrompt, onDismissPrompt, platf
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, height: '100%', minHeight: 0 }}>
-
-      {/* ─── Mode toggle — Prompts | Coach ─────────────────
-         Both modes share the Bedrock client and the same live session
-         context; they differ in interaction shape. Prompts = one-shot
-         algorithmic trigger. Coach = multi-turn conversation. Keep
-         them under the same tab so the user has one "AI" mental model. */}
-      <div style={{
-        display: 'flex',
-        gap: 4,
-        padding: 3,
-        background: 'var(--bg-tertiary, #15151c)',
-        border: '1px solid var(--border, #2a2a35)',
-        borderRadius: 6,
-      }}>
-        {[
-          { key: 'prompts', label: '⚡ Prompts' },
-          { key: 'coach',   label: '🤖 Coach' },
-        ].map(({ key, label }) => {
-          const active = aiMode === key;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setAiMode(key)}
-              style={{
-                flex: 1,
-                padding: '6px 10px',
-                background: active ? 'var(--accent, #cc0000)' : 'transparent',
-                color: active ? '#fff' : 'var(--text-secondary, #9ca3af)',
-                border: 'none',
-                borderRadius: 4,
-                fontSize: 10,
-                fontWeight: 700,
-                letterSpacing: 1,
-                textTransform: 'uppercase',
-                cursor: 'pointer',
-              }}
-            >
-              {label}
-            </button>
-          );
-        })}
-      </div>
-
-      {aiMode === 'coach' ? (
-        <CoachPanel
-          user={user}
-          liveData={liveData}
-          platform={platform}
-          effectivePlan={effectivePlan}
-          unlocked={coachUnlocked}
-          onAuthClick={onAuthClick}
-        />
-      ) : (
-      <div className="flex-col gap-3" style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+    <div className="flex-col gap-3">
 
       {/* Current prompt */}
       <div>
@@ -1207,8 +1157,6 @@ function AIPanel({ user, onAuthClick, liveData, aiPrompt, onDismissPrompt, platf
             ))}
           </div>
         </div>
-      )}
-      </div>
       )}
     </div>
   );

@@ -28,34 +28,10 @@ const {
 } = require('./aws-config');
 
 // ─── Feature map (mirrors the platinum/free split in the Chrome ext) ────
-const FEATURE_MAP = {
-  free: {
-    aiPrompts:    false,
-    aiCoach:      false,
-    voiceAlerts:  false,
-    s3Backup:     false,
-    obsStreaming: false,
-    virtualCam:   false,
-    cloudSync:    false,
-    whaleAlerts:  false,
-    beautyFilter: false,
-  },
-  platinum: {
-    aiPrompts:    true,
-    aiCoach:      true,
-    voiceAlerts:  true,
-    s3Backup:     true,
-    obsStreaming: true,
-    virtualCam:   true,
-    cloudSync:    true,
-    whaleAlerts:  true,
-    beautyFilter: true,
-  },
-};
-
-function hasFeature(plan, feature) {
-  return FEATURE_MAP[plan]?.[feature] ?? false;
-}
+// Hoisted into shared/feature-map.js so the renderer can require it
+// without webpack trying to bundle this file's https/aws-config
+// dependencies. Re-exported here so existing callers still work.
+const { FEATURE_MAP, hasFeature } = require('./feature-map');
 
 // ─── Live check against /check-subscription ─────────────────────────────
 function callCheckSubscription(idToken) {
