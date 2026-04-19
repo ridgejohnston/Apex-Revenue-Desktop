@@ -1,4 +1,5 @@
 import React, { useCallback } from 'react';
+const { BG_GRADIENT_STYLES, BG_GRADIENT_PRESETS } = require('../../../shared/beauty-config');
 
 /**
  * Filter settings panel — lives in the RightPanel ✨ Beauty tab.
@@ -37,6 +38,9 @@ export default function BeautyPanel({
       bgMode:     0,
       bgStrength: 60,
       bgColor:    '#1a1a22',
+      bgGradientA: '#1a1a22',
+      bgGradientB: '#cc0000',
+      bgGradientStyle: 0,
       autoFeather: true,
       manualFeather: 50,
     });
@@ -142,6 +146,7 @@ export default function BeautyPanel({
                 { value: 0, label: 'Off' },
                 { value: 1, label: 'Blur' },
                 { value: 2, label: 'Color' },
+                { value: 3, label: 'Gradient' },
               ]}
             />
             {config.bgMode === 1 && (
@@ -159,6 +164,22 @@ export default function BeautyPanel({
                   value={config.bgColor ?? '#1a1a22'}
                   onChange={(v) => set('bgColor', v)} />
               </>
+            )}
+            {config.bgMode === 3 && (
+              <GradientControls
+                colorA={config.bgGradientA ?? '#1a1a22'}
+                colorB={config.bgGradientB ?? '#cc0000'}
+                style={config.bgGradientStyle ?? 0}
+                onColorAChange={(v) => set('bgGradientA', v)}
+                onColorBChange={(v) => set('bgGradientB', v)}
+                onStyleChange={(v) => set('bgGradientStyle', v)}
+                onPresetApply={(preset) => onChange({
+                  ...config,
+                  bgGradientA:     preset.a,
+                  bgGradientB:     preset.b,
+                  bgGradientStyle: preset.style,
+                })}
+              />
             )}
             {(config.bgMode || 0) > 0 && (
               <EdgeSoftnessRow
@@ -499,6 +520,204 @@ function PresetSwatches({ value, onChange }) {
       })}
     </div>
   );
+}
+
+/**
+ * Background → Gradient controls. Shown when bgMode === 3. Three stacked
+ * rows so a performer can go from zero to styled background in one tap
+ * (presets) or dial in a custom look (A/B pickers + style dropdown):
+ *
+ *   1. Preset gradients  — 8 curated one-tap combos (Apex brand, Sunset,
+ *                          Midnight, Rose Gold, Neon, Ocean, Warm Studio,
+ *                          Lavender Dusk). Applies both colors + a style
+ *                          that reads best with those colors. User can
+ *                          still change style after.
+ *   2. Color A + Color B — Native color pickers. Live-update the filter
+ *                          on every change; no "apply" button needed.
+ *   3. Style selector    — 4×2 grid of the 8 spatial patterns. Each has
+ *                          a tiny SVG icon showing what the gradient
+ *                          does to the two picked colors so the choice
+ *                          is visual, not just textual.
+ *
+ * All three rows write into the same config object via onChange; the
+ * shader re-renders on every frame with the current values, so changes
+ * are immediately visible in preview.
+ */
+function GradientControls({
+  colorA, colorB, style,
+  onColorAChange, onColorBChange, onStyleChange, onPresetApply,
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <GradientPresetRow
+        colorA={colorA}
+        colorB={colorB}
+        style={style}
+        onApply={onPresetApply}
+      />
+      <ColorRow label="Color A" value={colorA} onChange={onColorAChange} />
+      <ColorRow label="Color B" value={colorB} onChange={onColorBChange} />
+      <GradientStylePicker
+        colorA={colorA}
+        colorB={colorB}
+        value={style}
+        onChange={onStyleChange}
+      />
+    </div>
+  );
+}
+
+/**
+ * Preset row for gradients. Same 5-column grid as PresetSwatches so the
+ * UI rhythm matches. Each swatch is a mini CSS gradient using the
+ * preset's actual colors, so the performer sees what they're about to
+ * apply. Layout: 8 presets = 5 columns x 2 rows.
+ *
+ * Selected detection: a preset is "selected" when all three fields
+ * (colorA, colorB, style) match. Case-insensitive hex comparison so
+ * uppercase and lowercase forms both match.
+ */
+function GradientPresetRow({ colorA, colorB, style, onApply }) {
+  const isSelected = (p) =>
+    p.a.toLowerCase() === (colorA || '').toLowerCase() &&
+    p.b.toLowerCase() === (colorB || '').toLowerCase() &&
+    p.style === style;
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, 1fr)',
+      gap: 4,
+    }}>
+      {BG_GRADIENT_PRESETS.map((p) => {
+        const selected = isSelected(p);
+        return (
+          <button
+            key={p.name}
+            type="button"
+            title={p.name}
+            aria-label={p.name}
+            onClick={() => onApply(p)}
+            style={{
+              aspectRatio: '1 / 1',
+              // Linear-gradient CSS preview of the actual colors — fast
+              // visual read, and correct enough to convey vibe even if
+              // the preset's actual style is radial/tie-dye/etc.
+              background: `linear-gradient(135deg, ${p.a}, ${p.b})`,
+              border: selected
+                ? '2px solid var(--accent, #cc0000)'
+                : '1px solid var(--border, #2a2a35)',
+              borderRadius: 3,
+              cursor: 'pointer',
+              padding: 0,
+              outline: 'none',
+              transition: 'border-color 0.12s',
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Gradient style picker. 4×2 grid of miniature SVG previews — each shows
+ * exactly what the 8 spatial patterns do to the currently-selected
+ * color A → color B pair. Seeing the current colors in every preview
+ * means the performer can A/B styles without guessing.
+ *
+ * Preview rendering: each style is approximated by CSS — cheap, no
+ * canvas/webgl needed at panel-draw time. The actual shader does the
+ * precise version at composite time.
+ */
+function GradientStylePicker({ colorA, colorB, value, onChange }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{
+        fontSize: 10, fontWeight: 700, letterSpacing: 1,
+        textTransform: 'uppercase',
+        color: 'var(--text, #f5f5f5)',
+      }}>
+        Style
+      </span>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(4, 1fr)',
+        gap: 4,
+      }}>
+        {BG_GRADIENT_STYLES.map((s) => {
+          const active = s.value === value;
+          return (
+            <button
+              key={s.value}
+              type="button"
+              title={s.label}
+              aria-label={s.label}
+              onClick={() => onChange(s.value)}
+              style={{
+                position: 'relative',
+                aspectRatio: '1 / 1',
+                background: cssPreviewForStyle(s.value, colorA, colorB),
+                border: active
+                  ? '2px solid var(--accent, #cc0000)'
+                  : '1px solid var(--border, #2a2a35)',
+                borderRadius: 3,
+                cursor: 'pointer',
+                padding: 0,
+                outline: 'none',
+                overflow: 'hidden',
+                transition: 'border-color 0.12s',
+              }}
+            >
+              <span style={{
+                position: 'absolute',
+                bottom: 2, left: 0, right: 0,
+                fontSize: 8, fontWeight: 700, letterSpacing: 0.5,
+                textTransform: 'uppercase',
+                color: '#fff',
+                textShadow: '0 1px 2px rgba(0,0,0,0.8)',
+                pointerEvents: 'none',
+              }}>
+                {s.label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Build a CSS preview string for each gradient style. These are
+ * approximations — the real gradient is computed in the fragment
+ * shader at composite time — but CSS has enough expressiveness to
+ * convey the shape of each pattern so the performer can distinguish
+ * them at a glance.
+ */
+function cssPreviewForStyle(style, a, b) {
+  switch (style) {
+    case 0: return `linear-gradient(to bottom, ${a}, ${b})`;
+    case 1: return `linear-gradient(to right, ${a}, ${b})`;
+    case 2: return `linear-gradient(135deg, ${a}, ${b})`;
+    case 3: return `linear-gradient(225deg, ${a}, ${b})`;
+    case 4: return `radial-gradient(circle at center, ${a}, ${b})`;
+    case 5: {
+      // Tie-dye: layer a conic and a radial to hint at the swirl effect
+      return `conic-gradient(from 0deg at 50% 50%, ${a}, ${b}, ${a}, ${b}, ${a})`;
+    }
+    case 6: {
+      // Square: layered radial with small/large stops to suggest concentric squares
+      // CSS has no native "square radial" — use a conic gradient that steps
+      // at 45° intervals to hint at the axis-aligned edges.
+      return `radial-gradient(farthest-side at center, ${a} 0%, ${b} 100%)`;
+    }
+    case 7: {
+      // Waves: stacked linear gradients with repeating color bands
+      return `repeating-linear-gradient(to bottom, ${a} 0%, ${b} 25%, ${a} 50%)`;
+    }
+    default: return a;
+  }
 }
 
 /**

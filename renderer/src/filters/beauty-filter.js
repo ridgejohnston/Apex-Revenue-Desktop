@@ -237,6 +237,9 @@ export class BeautyFilter {
       aspect:      gl.getUniformLocation(this.progComposite, 'u_aspect'),
       bgMode:      gl.getUniformLocation(this.progComposite, 'u_bgMode'),
       bgColor:     gl.getUniformLocation(this.progComposite, 'u_bgColor'),
+      bgGradA:     gl.getUniformLocation(this.progComposite, 'u_bgGradA'),
+      bgGradB:     gl.getUniformLocation(this.progComposite, 'u_bgGradB'),
+      bgGradStyle: gl.getUniformLocation(this.progComposite, 'u_bgGradStyle'),
       maskFeather: gl.getUniformLocation(this.progComposite, 'u_maskFeather'),
     };
 
@@ -570,6 +573,14 @@ export class BeautyFilter {
     gl.uniform1i(this.locComposite.bgMode,     effectiveBgMode);
     const bgRgb = hexToRgb(c.bgColor ?? '#1a1a22');
     gl.uniform3f(this.locComposite.bgColor,    bgRgb[0], bgRgb[1], bgRgb[2]);
+    // Gradient uniforms. These are always written, even when bgMode !== 3 —
+    // the shader's branch makes them no-ops in other modes, and writing
+    // constants is cheaper than a JS conditional. Keeps the hot path simple.
+    const gA = hexToRgb(c.bgGradientA ?? '#1a1a22');
+    const gB = hexToRgb(c.bgGradientB ?? '#cc0000');
+    gl.uniform3f(this.locComposite.bgGradA,    gA[0], gA[1], gA[2]);
+    gl.uniform3f(this.locComposite.bgGradB,    gB[0], gB[1], gB[2]);
+    gl.uniform1i(this.locComposite.bgGradStyle, (c.bgGradientStyle ?? 0) | 0);
     gl.uniform1f(this.locComposite.maskFeather, this._resolveFeather());
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }

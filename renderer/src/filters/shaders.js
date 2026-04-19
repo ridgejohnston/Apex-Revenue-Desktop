@@ -167,11 +167,86 @@ uniform float     u_saturation;  // -1..+1 — mix toward/away from grayscale
 uniform float     u_lowLight;    // 0..1 — shadow lift via gamma<1
 uniform float     u_radial;      // -1..+1 — vignette / key light
 uniform float     u_aspect;      // width / height for circular radial math
-uniform int       u_bgMode;      // 0=off, 1=blur, 2=color
+uniform int       u_bgMode;      // 0=off, 1=blur, 2=color, 3=gradient
 uniform vec3      u_bgColor;     // replacement color when u_bgMode == 2
+uniform vec3      u_bgGradA;     // gradient color A (from) when u_bgMode == 3
+uniform vec3      u_bgGradB;     // gradient color B (to)   when u_bgMode == 3
+uniform int       u_bgGradStyle; // 0..7 — gradient pattern style
 uniform float     u_maskFeather; // 0..1 — soften mask edges (default 0.15)
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+// ─── Gradient pattern generator ──────────────────────────────────────
+// Returns an interpolation parameter t in [0,1] for each pixel,
+// which is then used with mix(u_bgGradA, u_bgGradB, t) to produce
+// the final bg color. Each style is a different spatial function
+// of the UV coords.
+//
+// Aspect correction: for circular / square / tie-dye patterns we
+// use aspect-corrected centered coords so the pattern stays visually
+// round/square regardless of the webcam's native 16:9 or 4:3 ratio.
+// For linear gradients (vertical/horizontal/diagonal) and waves we
+// use raw UV — a 'horizontal' gradient should fill the full width
+// edge to edge, aspect-independent.
+float gradientT(vec2 uv, int style, float aspect) {
+  // Aspect-corrected centered coords for radially-symmetric patterns
+  vec2 cc = (uv - 0.5) * vec2(aspect, 1.0);
+
+  if (style == 0) {
+    // 0 — Vertical (top → bottom). UV origin is bottom-left in GL,
+    // so "top of screen" is v=1. We want A at top, B at bottom, so
+    // t is maximum (1) at the bottom. That puts B at the bottom.
+    // Invert if you'd prefer the opposite: most UIs show the first
+    // stop at the top of a vertical gradient, which is what this does.
+    return 1.0 - uv.y;
+  } else if (style == 1) {
+    // 1 — Horizontal (left → right). A on left, B on right.
+    return uv.x;
+  } else if (style == 2) {
+    // 2 — Diagonal ↘ (top-left → bottom-right). Average of horizontal
+    // and "1 - vertical". No aspect correction — a diagonal should
+    // span corner to corner regardless of aspect.
+    return (uv.x + (1.0 - uv.y)) * 0.5;
+  } else if (style == 3) {
+    // 3 — Diagonal ↙ (top-right → bottom-left).
+    return ((1.0 - uv.x) + (1.0 - uv.y)) * 0.5;
+  } else if (style == 4) {
+    // 4 — Circular (center → edge). Aspect-corrected so it's actually
+    // round, not elliptical. Normalized by sqrt(0.5² + 0.5²) ≈ 0.707
+    // so the corners reach t = 1.0 exactly.
+    return clamp(length(cc) / 0.7071, 0.0, 1.0);
+  } else if (style == 5) {
+    // 5 — Tie-dye (swirled organic). Polar coords with a swirl term
+    // that bends the radial gradient around the center. No noise
+    // texture needed — just angle + radius arithmetic produces
+    // a pleasing psychedelic swirl.
+    float r = length(cc);
+    float a = atan(cc.y, cc.x);
+    // The 3.0 multiplier on radius creates bands; the 6.0 swirl
+    // factor adds rotation that varies with radius (further from
+    // center = more rotation).
+    float swirl = sin(a * 5.0 + r * 8.0) * 0.5 + 0.5;
+    // Mix the swirl with a radial base so the overall gradient still
+    // reads A→B even at a glance, with the swirl adding character.
+    return clamp(mix(r * 1.4, swirl, 0.55), 0.0, 1.0);
+  } else if (style == 6) {
+    // 6 — Square (concentric squares, center → edge). Use Chebyshev
+    // distance (max of abs components) instead of Euclidean length.
+    // Aspect-corrected so it's an actual square.
+    float d = max(abs(cc.x), abs(cc.y));
+    // Normalize by max possible Chebyshev distance (0.5 on long axis)
+    return clamp(d / 0.5, 0.0, 1.0);
+  } else if (style == 7) {
+    // 7 — Waves (sinusoidal horizontal bands). Base vertical position
+    // plus a horizontal sine distortion creates a liquid-band feel.
+    // No aspect correction — bands should span full width.
+    float base = uv.y;
+    float wave = sin(uv.x * 6.283 * 1.5) * 0.08; // ~1.5 waves across width
+    return clamp(base + wave, 0.0, 1.0);
+  }
+  // Fallback — flat A color if unknown style
+  return 0.0;
+}
 
 void main() {
   vec3 original = texture(u_original, v_uv).rgb;
@@ -227,10 +302,10 @@ void main() {
   color *= lightFactor;
 
   // 9. Background composite — uses MediaPipe Selfie Segmentation mask to
-  //    isolate the person and substitute blur / color for the background.
-  //    The mask is a soft confidence map (0 = definite bg, 1 = definite
-  //    person) so edges feather naturally. When u_bgMode == 0 this stage
-  //    is skipped entirely.
+  //    isolate the person and substitute blur / color / gradient for the
+  //    background. The mask is a soft confidence map (0 = definite bg,
+  //    1 = definite person) so edges feather naturally. When u_bgMode
+  //    == 0 this stage is skipped entirely.
   if (u_bgMode != 0) {
     // Slight remap tightens the feather zone — without this, MediaPipe's
     // low-confidence band (≈0.2–0.5 around hair/shoulders) leaves a halo
@@ -242,8 +317,14 @@ void main() {
     vec3 bgSource;
     if (u_bgMode == 1) {
       bgSource = texture(u_bgBlurred, v_uv).rgb;
-    } else {
+    } else if (u_bgMode == 2) {
       bgSource = u_bgColor;
+    } else {
+      // u_bgMode == 3 — gradient. Compute per-pixel interpolation
+      // parameter from the chosen style, then blend between the two
+      // user-picked colors. Zero extra texture samples; pure ALU.
+      float t = gradientT(v_uv, u_bgGradStyle, u_aspect);
+      bgSource = mix(u_bgGradA, u_bgGradB, t);
     }
     color = mix(bgSource, color, personW);
   }
