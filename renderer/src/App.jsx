@@ -115,6 +115,14 @@ export default function App() {
   const [beautyConfig, setBeautyConfig] = useState(BEAUTY_DEFAULTS);
   const beautyConfigRef = useRef(BEAUTY_DEFAULTS);
   const beautyFiltersRef = useRef({});   // sourceId → BeautyFilter
+  // Set of source IDs currently being activated (between the initial
+  // guard check and the final sourceStreamsRef write). Prevents a race
+  // where two concurrent activateSource() calls for the same source
+  // both pass the existingStream check BEFORE either one has populated
+  // the ref — which was v3.4.37's confirmed root cause of duplicate
+  // BeautyFilter instances showing up with distinct _instanceIds in
+  // errors.log, even though the v3.4.34 guard was in place.
+  const pendingActivationsRef = useRef(new Set());
   useEffect(() => { beautyConfigRef.current = beautyConfig; }, [beautyConfig]);
 
   // MediaPipe WASM + model install state. Background effects in the
@@ -313,33 +321,49 @@ export default function App() {
   const activateSource = useCallback(async (source) => {
     const { id, type, properties } = source;
 
+    // RACE-PROOF GUARD (v3.4.38): synchronously claim this source-id
+    // in a pending-activations set BEFORE any await. This closes the
+    // window between the existingStream check and the ref write, which
+    // v3.4.37's instrumented errors.log proved was producing duplicate
+    // BeautyFilter instances (both at 19.5 fps with 51ms rafGap during
+    // streaming, causing the stream-kick cascade).
+    //
+    // Why the previous guard wasn't sufficient:
+    //   1. activateSource(src) fires
+    //   2. Checks sourceStreamsRef.current[id] — empty (first time)
+    //   3. await navigator.mediaDevices.getUserMedia(...)
+    //   4. activateSource(src) fires AGAIN (e.g. from effectivePlan
+    //      bounce, scene re-render, or mount effect re-run)
+    //   5. Checks sourceStreamsRef.current[id] — STILL empty because
+    //      step 3 hasn't resolved yet
+    //   6. Also starts getUserMedia — now two in flight
+    //   7. Both resolve; both construct BeautyFilters; both install
+    //      their own render loops; second write to beautyFiltersRef
+    //      orphans the first WITHOUT destroying its rAF callback
+    //   8. Forever after, TWO 1080p WebGL render pipelines compete
+    //      for the same GPU on every rAF tick
+    //
+    // Fix: synchronously mark source-id as pending before the await,
+    // and remove the mark in a finally block. Any call that sees the
+    // id already pending returns immediately as a no-op.
+    if (pendingActivationsRef.current.has(id)) {
+      return;
+    }
+
     // GUARD: if this source is already active (stream held in the
     // ref AND any associated BeautyFilter still alive), bail out.
-    // Without this guard, a second activateSource() call for the
-    // same source spawns an entire second capture pipeline:
-    //   • second getUserMedia call (may prompt again or steal the
-    //     device from the first instance)
-    //   • second BeautyFilter with its own WebGL context + rAF loop
-    //     + segmenter worker
-    //   • second MediaStream track that nobody downstream consumes
-    //
-    // v3.4.33's render-fps diagnostic confirmed this was happening
-    // in a user's live session: every [beauty-filter] breadcrumb
-    // showed up as two identical lines 1ms apart — proof of two
-    // render loops executing concurrently at 1080p. Two loops meant
-    // two WebGL contexts fighting for the same GPU, halving the
-    // effective frame rate to 16-20fps and causing the MediaRecorder
-    // output to fall below Chaturbate's 15fps kick threshold.
+    // This catches the non-racy case where activateSource is called
+    // cleanly for an already-active source (e.g. after all awaits
+    // from a previous activation have resolved).
     //
     // Double-invocation can happen via:
-    //   • React StrictMode's double-mount in dev (not our case, but
-    //     cheap to defend against)
     //   • The mount useEffect firing activateSource for every visible
     //     source after scenes.onUpdated re-fires mid-session
     //   • The effectivePlan-change useEffect bouncing webcam sources
     //     when the user's tier changes
     //   • handleAddSource calling activateSource directly when a new
     //     source is added, while the mount loop also catches it later
+    //   • React StrictMode's double-mount in dev
     //
     // The guard is structural: we can always recover a stale entry
     // via deactivateSource first, but we don't get to silently
@@ -362,6 +386,12 @@ export default function App() {
         delete beautyFiltersRef.current[id];
       }
     }
+
+    // Claim the activation synchronously. Must happen AFTER the
+    // stale-entry cleanup above (so deactivate/reactivate cycles
+    // within a single call work) but BEFORE any await in the body
+    // below. Cleared in the finally block regardless of success.
+    pendingActivationsRef.current.add(id);
 
     let stream = null;
     try {
@@ -489,6 +519,12 @@ export default function App() {
       }
     } catch (err) {
       console.warn(`[Apex] activateSource(${type}) failed:`, err.message);
+    } finally {
+      // Release the synchronous claim. Must happen regardless of
+      // success or failure — otherwise a getUserMedia denial would
+      // leave the id permanently "pending" and block all future
+      // activation attempts for that source.
+      pendingActivationsRef.current.delete(id);
     }
 
     if (stream) {
