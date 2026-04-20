@@ -868,6 +868,15 @@ export default function App() {
   const stopWebcamRecorder = useCallback(() => {
     const r = webcamRecorderRef.current;
     webcamRecorderRef.current = null;
+    // v3.4.44: pair stream-stop with turning off high-frequency
+    // render-loop telemetry. Continuing to log every 1s when no
+    // stream is running would waste errors.log bandwidth and could
+    // mask genuine warnings from other sources. Safe to call on every
+    // stop path even if we never started — setHighFrequencyLogging
+    // just restores the 5s default.
+    for (const f of Object.values(beautyFiltersRef.current || {})) {
+      try { f?.setHighFrequencyLogging?.(false); } catch {}
+    }
     if (!r) return;
     try {
       if (r.state !== 'inactive') r.stop();
@@ -1251,6 +1260,14 @@ export default function App() {
         // stays connected. Much better UX trade.
         for (const f of Object.values(beautyFiltersRef.current)) {
           try { f?.setQuietPeriod?.(3000); } catch {}
+          // v3.4.44: also switch the render-loop telemetry to 1s
+          // windows while streaming. The default 5s window captured
+          // zero during-stream datapoints on the v3.4.40 failing run
+          // because the stream died in 7.5s. 1s windows give us ~5
+          // datapoints during a 5s failing stream — enough to tell
+          // whether the renderer is GPU_BOUND, RAF_THROTTLED (e.g.
+          // occluded), or healthy when MediaRecorder starves.
+          try { f?.setHighFrequencyLogging?.(true); } catch {}
         }
         recorder.start(250);
         webcamRecorderRef.current = recorder;

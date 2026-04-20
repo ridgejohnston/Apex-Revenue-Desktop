@@ -269,6 +269,43 @@ export class BeautyFilter {
     console.log(`[BeautyFilter] segmenter quiet period: ${ms}ms`);
   }
 
+  /**
+   * Switch the render-loop telemetry window between normal (5 seconds,
+   * log only when fps<20) and high-frequency (1 second, log every
+   * window). App.jsx turns this on at stream start and off at stream
+   * stop, so a 5-second stream failure produces ~5 telemetry points
+   * instead of the 0-1 points the default 5s window captures.
+   *
+   * Also controls the log level: high-frequency entries go in at
+   * 'info' level so they don't inflate the 'warn/error' counts the
+   * way fps<20 warnings do, and they're tagged with highFreq=true
+   * in the context for easy grep filtering.
+   *
+   * Pass true or a number of ms to enable; false/0/undefined to
+   * disable (returns to the 5-second default).
+   */
+  setHighFrequencyLogging(enabled) {
+    if (enabled === true) {
+      this._perfWindowMs = 1000;
+    } else if (typeof enabled === 'number' && enabled >= 200 && enabled <= 5000) {
+      this._perfWindowMs = enabled;
+    } else {
+      this._perfWindowMs = 5000;
+    }
+    // Reset in-flight window counters so the next close is timed
+    // from now, not from whenever the last window started. Without
+    // this the first post-toggle window would be a partial window
+    // with inflated idle/gap numbers.
+    this._renderFrameCount = 0;
+    this._renderFpsStart   = 0;
+    this._frameMsSum       = 0;
+    this._frameMsMax       = 0;
+    this._rafGapSum        = 0;
+    this._rafGapCount      = 0;
+    // eslint-disable-next-line no-console
+    console.log(`[BeautyFilter] perf window: ${this._perfWindowMs}ms`);
+  }
+
   update(partial) {
     // Track which of the tuned sliders were just touched by the UI so
     // the auto-engine can grant them a grace period — respects the
@@ -774,7 +811,7 @@ export class BeautyFilter {
       this._renderFrameCount = (this._renderFrameCount || 0) + 1;
       if (!this._renderFpsStart) this._renderFpsStart = frameStart;
       const windowMs = frameEnd - this._renderFpsStart;
-      if (windowMs >= 5000) {
+      if (windowMs >= (this._perfWindowMs || 5000)) {
         const fps          = (this._renderFrameCount * 1000) / windowMs;
         const avgFrameMs   = this._frameMsSum / this._renderFrameCount;
         const maxFrameMs   = this._frameMsMax;
@@ -790,28 +827,43 @@ export class BeautyFilter {
           `avgRafGap=${avgRafGapMs.toFixed(1)}ms idle=${(idleRatio * 100).toFixed(0)}%`
         );
 
-        if (fps < 20) {
+        // verdict tag helps humans reading errors.log see the
+        // diagnosis at a glance: GPU_BOUND vs THROTTLED vs OK
+        let verdict;
+        if (avgFrameMs > 30)           verdict = 'GPU_BOUND';
+        else if (avgRafGapMs > 50)     verdict = 'RAF_THROTTLED';
+        else if (fps < 20)             verdict = 'UNKNOWN';
+        else                           verdict = 'OK';
+
+        // Adaptive segmenter backoff: if we're GPU-bound, the
+        // createImageBitmap readback in pushFrame is measurable
+        // contention against the composite passes. Stretch the
+        // cadence to 100ms (10Hz mask updates) until the next
+        // window shows recovery. Perceptual impact is minimal —
+        // the mask moves with the subject, not the render clock.
+        if (verdict === 'GPU_BOUND') {
+          this._segIntervalMs = 100;
+        }
+
+        // v3.4.44: during high-frequency logging (set by App.jsx at
+        // stream start), emit EVERY window to errors.log — not just
+        // the fps<20 cases. This gives us per-second render-loop
+        // telemetry during the actual failing window, which is what
+        // we lacked in the v3.4.40 logs: the stream died in 7.5s,
+        // the default 5s window only closed once, and we couldn't
+        // tell whether the renderer was throttling during the stream
+        // or only after it died. Outside of high-frequency mode
+        // (normal app use), keep the fps<20 gate so we don't spam
+        // the log during healthy operation.
+        const inHighFreq = (this._perfWindowMs || 5000) < 5000;
+        const shouldLog = inHighFreq || fps < 20;
+
+        if (shouldLog) {
           try {
-            // verdict tag helps humans reading errors.log see the
-            // diagnosis at a glance: GPU_BOUND vs THROTTLED vs OK
-            let verdict;
-            if (avgFrameMs > 30)           verdict = 'GPU_BOUND';
-            else if (avgRafGapMs > 50)     verdict = 'RAF_THROTTLED';
-            else                           verdict = 'UNKNOWN';
-
-            // Adaptive segmenter backoff: if we're GPU-bound, the
-            // createImageBitmap readback in pushFrame is measurable
-            // contention against the composite passes. Stretch the
-            // cadence to 100ms (10Hz mask updates) until the next
-            // window shows recovery. Perceptual impact is minimal —
-            // the mask moves with the subject, not the render clock.
-            if (verdict === 'GPU_BOUND') {
-              this._segIntervalMs = 100;
-            }
-
             window.electronAPI?.errors?.log?.(
-              'warn', 'beauty-filter',
-              `Render loop slow [${verdict}]: ${fps.toFixed(1)} fps, ` +
+              inHighFreq ? 'info' : 'warn',
+              'beauty-filter',
+              `Render loop [${verdict}]: ${fps.toFixed(1)} fps, ` +
               `frame=${avgFrameMs.toFixed(1)}ms (max ${maxFrameMs.toFixed(0)}ms), ` +
               `rafGap=${avgRafGapMs.toFixed(1)}ms, idle=${(idleRatio * 100).toFixed(0)}%`,
               {
@@ -833,10 +885,23 @@ export class BeautyFilter {
                 segmenterExists:  !!this._segmenter,
                 segmenterReady:   !!(this._segmenter && this._segmenter.ready),
                 segmenterLoading: !!this._segmenterInitStarted && !(this._segmenter && this._segmenter.ready),
+                // v3.4.44: capture renderer occlusion state to confirm
+                // or refute the RAF_THROTTLED hypothesis. If the renderer
+                // is hidden/occluded during a stream, Chromium throttles
+                // rAF to ~1Hz regardless of actual workload — and
+                // nothing in the filter itself can recover from that.
+                // Worker/OffscreenCanvas migration is the fix for that
+                // specific failure mode; knowing whether it's happening
+                // during streams decides whether that migration is
+                // urgent or future work.
+                docHidden:        (typeof document !== 'undefined') ? !!document.hidden : null,
+                visibility:       (typeof document !== 'undefined') ? (document.visibilityState || null) : null,
+                highFreq:         inHighFreq,
               }
             );
           } catch {}
-        } else if (fps >= 25) {
+        }
+        if (fps >= 25) {
           // Healthy window — reset segmenter cadence to baseline 20Hz
           // in case a previous window had stretched it to 10Hz. This
           // lets the mask tighten back up as soon as the render loop
