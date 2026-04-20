@@ -746,6 +746,16 @@ export class BeautyFilter {
             else if (avgRafGapMs > 50)     verdict = 'RAF_THROTTLED';
             else                           verdict = 'UNKNOWN';
 
+            // Adaptive segmenter backoff: if we're GPU-bound, the
+            // createImageBitmap readback in pushFrame is measurable
+            // contention against the composite passes. Stretch the
+            // cadence to 100ms (10Hz mask updates) until the next
+            // window shows recovery. Perceptual impact is minimal —
+            // the mask moves with the subject, not the render clock.
+            if (verdict === 'GPU_BOUND') {
+              this._segIntervalMs = 100;
+            }
+
             window.electronAPI?.errors?.log?.(
               'warn', 'beauty-filter',
               `Render loop slow [${verdict}]: ${fps.toFixed(1)} fps, ` +
@@ -773,6 +783,12 @@ export class BeautyFilter {
               }
             );
           } catch {}
+        } else if (fps >= 25) {
+          // Healthy window — reset segmenter cadence to baseline 20Hz
+          // in case a previous window had stretched it to 10Hz. This
+          // lets the mask tighten back up as soon as the render loop
+          // can afford the readback again.
+          this._segIntervalMs = 50;
         }
         this._renderFrameCount = 0;
         this._renderFpsStart   = frameEnd;
@@ -830,7 +846,34 @@ export class BeautyFilter {
     // fire-and-forget: it'll skip if an inference is still in flight,
     // and it'll skip if the segmenter isn't ready yet. No await — we
     // never block compositing on ML inference.
-    if (bgModeActive && this._segmenter) {
+    //
+    // Cadence gate (v3.4.40+): do NOT call pushFrame on every render
+    // frame. pushFrame's createImageBitmap requires a GPU-to-CPU
+    // readback before the bitmap can be postMessage'd to the worker,
+    // and that readback contends with the WebGL composite about to
+    // happen in the same frame. The v3.4.39 diagnostic logs showed
+    // this as GPU_BOUND (avgFrameMs=39ms → 14 fps) on integrated
+    // GPUs; the stream-pipe log from 04-20T00:19 recorded the
+    // downstream effect — MediaRecorder produced 161 kbps against
+    // a 3000 kbps target, Chaturbate dropped the stalled stream.
+    //
+    // The segmenter can't output masks faster than its inference
+    // latency anyway (~50ms on typical hardware → 20Hz ceiling), so
+    // invoking pushFrame at 30Hz just creates wasted readback pressure
+    // and the backpressure flag catches the overflow. Gating to a
+    // 50ms minimum interval (20Hz) trades ~0Hz of effective mask
+    // throughput for the GPU headroom the compositor needs to hit
+    // 30fps — a clean win.
+    //
+    // Adaptive: if the last 5s window classified GPU_BOUND (see the
+    // window-complete branch below, which adjusts _segIntervalMs
+    // based on verdict), the interval stretches to 100ms (10Hz)
+    // until the render loop recovers.
+    const segIntervalMs = this._segIntervalMs || 50;
+    const nowSeg = performance.now();
+    const segDue = !this._lastSegPushTime || (nowSeg - this._lastSegPushTime) >= segIntervalMs;
+    if (bgModeActive && this._segmenter && segDue) {
+      this._lastSegPushTime = nowSeg;
       this._segmenter.pushFrame(this.video);
     }
 
