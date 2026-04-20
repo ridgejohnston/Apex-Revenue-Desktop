@@ -15,6 +15,113 @@ const { BEAUTY_DEFAULTS, BEAUTY_STORE_KEY, clampConfig: clampBeauty, isBeautyUnl
 
 const api = window.electronAPI;
 
+// ─── Overlay descriptor builder (v3.4.47) ──────────────────
+//
+// Scene sources are laid out in 1920×1080 reference space (every
+// source.transform.{x,y,width,height} is defined relative to that).
+// The stream engine needs absolute pixel coordinates in the actual
+// target resolution, so we scale the transforms here before handing
+// them off. We also filter down to just the source types FFmpeg can
+// render (image / color / text / video file). Types that can't be
+// piped to FFmpeg (url browser views, image_url, image_slideshow)
+// are returned separately so App.jsx can surface a one-line console
+// note — they won't reach the stream in this version but we want
+// the user to know why, not silently drop them.
+//
+// References: FFmpeg filter_complex docs, OBS scene layer semantics.
+function buildOverlayList(scene, targetResolution) {
+  const list = [];
+  const skipped = [];
+  const sources = scene?.sources || [];
+  const tgtW = targetResolution?.width  || 1920;
+  const tgtH = targetResolution?.height || 1080;
+  // Reference-space → target-space scale. Transforms stored at 1920×1080,
+  // FFmpeg renders at tgtW × tgtH. If user targets 720p this shrinks
+  // every overlay proportionally — keeps the visual layout identical
+  // regardless of stream resolution.
+  const sx = tgtW / 1920;
+  const sy = tgtH / 1080;
+
+  sources.forEach((source, idx) => {
+    if (!source.visible) return;
+    // Skip the webcam itself — that's the main MediaRecorder pipe
+    // input (stream #0), not an overlay.
+    if (source.type === 'webcam') return;
+    // Skip video capture sources that share the webcam stream slot
+    // (screen / window / game capture). These don't have live
+    // MediaStream data available to FFmpeg from the renderer — they
+    // would need getDisplayMedia capture piped separately. Out of
+    // scope for Fix 1.
+    if (source.type === 'screen_capture' || source.type === 'window_capture' || source.type === 'game_capture') {
+      skipped.push(`${source.type}:${source.name}`);
+      return;
+    }
+    // URL / browser / remote-image / slideshow: genuinely can't be
+    // rendered inside FFmpeg from this side. These need Fix 2 (canvas
+    // capture + VP9). Note them and skip.
+    if (source.type === 'browser' || source.type === 'video_url' || source.type === 'image_url' || source.type === 'image_slideshow') {
+      skipped.push(`${source.type}:${source.name}`);
+      return;
+    }
+
+    const t = source.transform || {};
+    // Guard against malformed transforms (zero/negative sizes crash
+    // the FFmpeg scale filter with 'Invalid argument').
+    const w = Math.max(2, Math.round((t.width  || 0) * sx));
+    const h = Math.max(2, Math.round((t.height || 0) * sy));
+    const x = Math.round((t.x || 0) * sx);
+    const y = Math.round((t.y || 0) * sy);
+    const opacity = typeof source.opacity === 'number' ? source.opacity : 1;
+    const base = { zIndex: idx, x, y, w, h, opacity, name: source.name };
+
+    const p = source.properties || {};
+
+    if (source.type === 'image') {
+      if (!p.path) return;
+      list.push({ ...base, type: 'image', path: p.path });
+
+    } else if (source.type === 'color') {
+      list.push({ ...base, type: 'color', color: p.color || '#000000' });
+
+    } else if (source.type === 'text') {
+      list.push({
+        ...base,
+        type: 'text',
+        text:       p.text || '',
+        fontSize:   Math.max(8, Math.round((p.fontSize || 48) * sy)),
+        fontFamily: p.fontFamily || 'Arial',
+        color:      p.color || '#ffffff',
+        bgColor:    'rgba(0,0,0,0.3)',
+      });
+
+    } else if (source.type === 'media') {
+      // Local video file. FFmpeg can read these as a regular input.
+      // Audio on video-file overlays is NOT mixed here (Fix 1 keeps
+      // MediaRecorder as the single audio source via the webcam pipe);
+      // the audio-mix layering is a separate concern tracked for
+      // after Fix 2 stabilizes.
+      if (!p.path) return;
+      list.push({
+        ...base,
+        type: 'video',
+        path: p.path,
+        loop: p.loop !== false,
+      });
+
+    } else {
+      // Unknown type — surface for diagnostics but don't crash.
+      skipped.push(`${source.type}:${source.name}`);
+    }
+  });
+
+  // zIndex sort already matches the source array order, but make it
+  // explicit so downstream consumers don't have to trust ordering.
+  list.sort((a, b) => a.zIndex - b.zIndex);
+  // Expose skipped list as a non-enumerable-ish property; main side
+  // ignores it, renderer uses it for console diagnostic only.
+  return { list, _skipped: skipped };
+}
+
 // ─── Error Boundary ────────────────────────────────────────
 export class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -1112,6 +1219,25 @@ export default function App() {
           }
         } catch { /* advisory is best-effort */ }
 
+        // v3.4.47: gather compositable overlay sources (image, color,
+        // text, video file) from the active scene and hand them off
+        // to the stream engine. FFmpeg builds the composite via
+        // filter_complex — MediaRecorder stays on the raw webcam
+        // MediaStream (the v3.4.44 proven-working path), so we don't
+        // regress the stream-pipe stability we got back with the
+        // v3.4.46 revert. URL/browser sources can't be composited
+        // here — FFmpeg has no way to read a Chromium BrowserView —
+        // so they're skipped with a console note. Those need the
+        // Fix 2 pipeline (canvas+VP9) which we'll layer on top in a
+        // later version.
+        const overlays = buildOverlayList(scene, settings?.resolution);
+        if (overlays._skipped?.length) {
+          console.log(
+            '[Apex] overlays: skipping non-compositable sources (need Fix 2):',
+            overlays._skipped
+          );
+        }
+
         // Pass pipeHasAudio through settings so the stream engine
         // knows whether to map input 0's audio track or use the
         // silent-lavfi fallback. (Setting a transient field on the
@@ -1122,6 +1248,7 @@ export default function App() {
           _pipeCodec:     pipeCodec,
           _pipeSrcWidth:  pipeSrcWidth,
           _pipeSrcHeight: pipeSrcHeight,
+          _overlays:      overlays.list,
         });
 
         console.log('[Apex] Starting webcam pipe-stream, mimeType:', mimeType,

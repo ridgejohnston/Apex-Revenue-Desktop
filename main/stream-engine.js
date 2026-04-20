@@ -188,6 +188,180 @@ class StreamEngine extends EventEmitter {
     return [...scaleArgs, ...base, ...presetArgs];
   }
 
+  // v3.4.47 — Build FFmpeg filter_complex graph for scene-overlay
+  // compositing over the webcam pipe.
+  //
+  // The renderer (App.jsx buildOverlayList) hands us a list of overlay
+  // descriptors already translated into target-resolution absolute
+  // pixel coords. This method generates:
+  //
+  //   - extraInputArgs : additional `-i` flags for image/video overlay
+  //                       inputs. These are appended AFTER the pipe
+  //                       input so the pipe stays at input index 0
+  //                       (the existing -fflags/-thread_queue_size
+  //                       flags are per-input and need to bind to the
+  //                       matroska pipe, not an image).
+  //   - filterComplex  : the full `-filter_complex` string describing
+  //                       the composite pipeline. Pipe input 0 is
+  //                       scaled to target resolution, then each
+  //                       overlay is applied in z-order.
+  //   - outputLabel    : the final filter label to `-map` for encoding.
+  //                       Always '[out]' when overlays are present.
+  //   - textFiles      : tmp .txt files created for drawtext sources
+  //                       (drawtext's textfile= option avoids the
+  //                       escaping nightmare of inline text with
+  //                       colons/backslashes/commas). Caller cleans
+  //                       these up when the stream stops.
+  //
+  // Overlay type handling:
+  //   image : extra -i input, scale to overlay w/h, optional alpha
+  //           mix via format=yuva420p,colorchannelmixer=aa=opacity,
+  //           then overlay=x:y onto the running base.
+  //   video : same as image but with -stream_loop -1 when loop=true.
+  //           Audio tracks are IGNORED — this commit does video-only
+  //           compositing; mixing video-file audio is deferred.
+  //   color : drawbox filter on the running base, no extra input.
+  //   text  : drawtext filter with textfile= for safe escaping.
+  _buildOverlayFilterComplex(overlays, resolution) {
+    if (!overlays || !overlays.length) return null;
+
+    const path = require('path');
+    const os = require('os');
+    const fs = require('fs');
+
+    const tgtW = resolution.width;
+    const tgtH = resolution.height;
+    const chains = [];
+    const extraInputArgs = [];
+    const textFiles = [];
+
+    // Base: scale the pipe input to exact target resolution in yuv420p.
+    // filter_complex expects labeled inputs via [index:stream] syntax —
+    // pipe is input 0, video track 0, so [0:v].
+    chains.push(`[0:v]scale=${tgtW}:${tgtH},format=yuv420p[base0]`);
+    let currentLabel = 'base0';
+    let nextInputIdx = 1; // image/video overlays get -i at index 1, 2, 3...
+
+    overlays.forEach((ov, i) => {
+      const nextLabel = `base${i + 1}`;
+      const opacity = typeof ov.opacity === 'number' ? Math.max(0, Math.min(1, ov.opacity)) : 1;
+
+      if (ov.type === 'image') {
+        // Still image loop: -loop 1 -framerate 30 -i PATH
+        // Without -framerate the encoder sees one duration-less frame
+        // and filter_complex hangs waiting for more.
+        extraInputArgs.push('-loop', '1', '-framerate', '30', '-i', ov.path);
+        const alphaChain = (opacity < 1)
+          ? `,format=yuva420p,colorchannelmixer=aa=${opacity.toFixed(3)}`
+          : `,format=yuva420p`;
+        const srcLabel = `src${i}`;
+        chains.push(`[${nextInputIdx}:v]scale=${ov.w}:${ov.h}${alphaChain}[${srcLabel}]`);
+        chains.push(`[${currentLabel}][${srcLabel}]overlay=${ov.x}:${ov.y}[${nextLabel}]`);
+        nextInputIdx++;
+        currentLabel = nextLabel;
+
+      } else if (ov.type === 'video') {
+        // Looping video file. -stream_loop -1 before the input wraps
+        // playback infinitely. Applies per-input; this is input-level,
+        // not filter-level.
+        if (ov.loop) extraInputArgs.push('-stream_loop', '-1');
+        extraInputArgs.push('-i', ov.path);
+        const alphaChain = (opacity < 1)
+          ? `,format=yuva420p,colorchannelmixer=aa=${opacity.toFixed(3)}`
+          : '';
+        const srcLabel = `src${i}`;
+        chains.push(`[${nextInputIdx}:v]scale=${ov.w}:${ov.h}${alphaChain}[${srcLabel}]`);
+        chains.push(`[${currentLabel}][${srcLabel}]overlay=${ov.x}:${ov.y}[${nextLabel}]`);
+        nextInputIdx++;
+        currentLabel = nextLabel;
+
+      } else if (ov.type === 'color') {
+        // Flat color rect via drawbox — no extra input needed.
+        // FFmpeg's color syntax accepts 0xRRGGBB@opacity.
+        const hex = (ov.color || '#000000').replace(/^#/, '');
+        chains.push(
+          `[${currentLabel}]drawbox=x=${ov.x}:y=${ov.y}:w=${ov.w}:h=${ov.h}:color=0x${hex}@${opacity.toFixed(3)}:t=fill[${nextLabel}]`
+        );
+        currentLabel = nextLabel;
+
+      } else if (ov.type === 'text') {
+        // Text via drawtext. Write the literal text to a tmp file and
+        // reference it with textfile=PATH, bypassing the escape rules
+        // that apply to inline drawtext=text= strings (colons,
+        // backslashes, percent signs, commas all need escaping, and
+        // Windows paths make it worse). The tmp file is cleaned up
+        // by the caller when the stream stops.
+        const tmpPath = path.join(os.tmpdir(), `apex-text-${process.pid}-${Date.now()}-${i}.txt`);
+        try {
+          fs.writeFileSync(tmpPath, String(ov.text || ''), 'utf8');
+          textFiles.push(tmpPath);
+        } catch (e) {
+          // If we can't write the tmp file, skip this overlay rather
+          // than crash the whole stream.
+          console.warn('[stream-engine] overlay text write failed:', e.message);
+          // Pass through the previous label as the next one so the
+          // chain stays contiguous.
+          chains.push(`[${currentLabel}]null[${nextLabel}]`);
+          currentLabel = nextLabel;
+          return;
+        }
+        // Escape the path for filter-string use. Inside filter
+        // strings FFmpeg treats ':' and '\' as metacharacters.
+        // Quadruple-backslash = single backslash in the final string
+        // because JS escapes once and FFmpeg parses once more.
+        const escPath = tmpPath
+          .replace(/\\/g, '\\\\\\\\')
+          .replace(/:/g, '\\:');
+        const colorHex = (ov.color || '#ffffff').replace(/^#/, '');
+        // Center the text vertically within the source box; draw a
+        // translucent background box for legibility against varied
+        // scene content (matches the PreviewCanvas rendering style).
+        const baselineY = ov.y + Math.round(ov.h / 2) - Math.round(ov.fontSize / 2);
+        chains.push(
+          `[${currentLabel}]drawtext=textfile=${escPath}` +
+          `:x=${ov.x + 8}:y=${baselineY}` +
+          `:fontsize=${ov.fontSize}:fontcolor=0x${colorHex}@${opacity.toFixed(3)}` +
+          `:box=1:boxcolor=black@0.3:boxborderw=8` +
+          `[${nextLabel}]`
+        );
+        currentLabel = nextLabel;
+
+      } else {
+        // Unknown overlay type — pass through unchanged so the chain
+        // stays contiguous (don't let a typo in one overlay break the
+        // whole composite).
+        chains.push(`[${currentLabel}]null[${nextLabel}]`);
+        currentLabel = nextLabel;
+      }
+    });
+
+    // Rename the final label to [out] for uniform downstream mapping.
+    if (currentLabel !== 'out') {
+      chains.push(`[${currentLabel}]null[out]`);
+    }
+
+    return {
+      filterComplex: chains.join(';'),
+      extraInputArgs,
+      outputLabel: '[out]',
+      textFiles,
+    };
+  }
+
+  // Small util used by startStreamFromPipe to strip the `-vf scale=...`
+  // pair out of _videoEncodeArgs when filter_complex is producing the
+  // output (the two can't coexist — FFmpeg errors out with 'Filtergraph
+  // simple/complex conflict'). Keeps all the encoder bitrate/gop/preset
+  // args intact.
+  _stripVfArgs(args) {
+    const out = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-vf') { i++; continue; }
+      out.push(args[i]);
+    }
+    return out;
+  }
+
   // Each H.264 encoder uses its own preset vocabulary. Mixing them produces
   // cryptic "Invalid argument" errors at startup — e.g. NVENC rejects the
   // x264 name 'veryfast' because NVENC's presets are p1 (fastest) through
@@ -1721,6 +1895,19 @@ class StreamEngine extends EventEmitter {
     this._routingDiag = [];
     this._diag('route: pipe (MediaRecorder -> stdin -> FFmpeg)');
 
+    // v3.4.47: best-effort cleanup of any overlay text tmp files
+    // from a prior session that didn't run stopStreamFromPipe (e.g.
+    // FFmpeg was killed by the watchdog, or the app was force-quit).
+    // Without this the %TEMP% folder accumulates apex-text-*.txt
+    // files across sessions.
+    if (this._overlayTextFiles && this._overlayTextFiles.length) {
+      const fs = require('fs');
+      for (const p of this._overlayTextFiles) {
+        try { fs.unlinkSync(p); } catch { /* harmless */ }
+      }
+      this._overlayTextFiles = [];
+    }
+
     const resolvedPath = findFFmpegPath();
     if (!resolvedPath) {
       const err = new Error('FFmpeg is not installed. Open Settings -> Streaming and click "Install FFmpeg".');
@@ -1784,10 +1971,38 @@ class StreamEngine extends EventEmitter {
       typeof _tgtW === 'number' && typeof _tgtH === 'number' &&
       _srcW === _tgtW && _srcH === _tgtH;
     const _userForcedEncoder = !!settings.videoEncoder;
+    // v3.4.47: overlays force re-encode. filter_complex can't run
+    // through `-c:v copy` because copy bypasses the filter graph
+    // entirely — packets are forwarded verbatim from input to output.
+    // When the user's scene has any compositable overlay source,
+    // we must decode the pipe, run the overlay filter chain, and
+    // re-encode the composite. canStreamCopy becomes false.
+    const _hasOverlays = Array.isArray(settings._overlays) && settings._overlays.length > 0;
     const canStreamCopy =
       settings._pipeCodec === 'h264' &&
       _resolutionsMatch &&
-      !_userForcedEncoder;
+      !_userForcedEncoder &&
+      !_hasOverlays;
+
+    // Precompute the overlay filter_complex + extra input args. Null
+    // when no overlays are present — keeps the hot path unchanged
+    // for scenes that are webcam-only.
+    const overlayPlan = _hasOverlays
+      ? this._buildOverlayFilterComplex(settings._overlays, resolution)
+      : null;
+    // Stash text-file paths on the instance so stopStreamFromPipe
+    // (or the next startStreamFromPipe) can unlink them. These are
+    // small (usually a few bytes each) but we don't want them
+    // accumulating in %TEMP% across sessions.
+    if (overlayPlan && overlayPlan.textFiles.length) {
+      this._overlayTextFiles = (this._overlayTextFiles || []).concat(overlayPlan.textFiles);
+    }
+    if (_hasOverlays) {
+      this._diag(`overlays: ${settings._overlays.length} compositing via filter_complex`);
+      settings._overlays.forEach((o, i) => {
+        this._diag(`  [${i}] ${o.type}: ${o.name} at ${o.x},${o.y} ${o.w}x${o.h} op=${o.opacity}`);
+      });
+    }
 
     // Resolve destinations and build output args. Same helper used
     // by the direct-path startStream, so simulcast works identically
@@ -1901,13 +2116,30 @@ class StreamEngine extends EventEmitter {
       '-f', 'matroska',
       '-i', 'pipe:0',
 
+      // v3.4.47: extra inputs for image/video overlays. These are
+      // added AFTER the pipe input so the pipe stays at input index 0
+      // (the -fflags/-thread_queue_size flags above are per-next-input
+      // and need to bind to the matroska pipe specifically; they would
+      // misapply to a still image otherwise). Each image adds a
+      // `-loop 1 -framerate 30 -i PATH`; each looping video adds
+      // `-stream_loop -1 -i PATH`. Empty array when no overlays.
+      ...(overlayPlan ? overlayPlan.extraInputArgs : []),
+
       // Audio input (dshow device, lavfi silent, or empty if audio
       // rides in through the Matroska pipe)
       ...audioInputArgs,
 
-      // Explicit mapping: video from pipe (input 0), audio from
-      // whichever source was chosen above.
-      '-map', '0:v:0',
+      // v3.4.47: -filter_complex for the overlay graph when present.
+      // Without overlays we skip this entirely and fall through to the
+      // simpler -vf scale path that _videoEncodeArgs emits inside the
+      // encode args block below.
+      ...(overlayPlan ? ['-filter_complex', overlayPlan.filterComplex] : []),
+
+      // Explicit mapping: video from filter_complex output when
+      // overlays are present (the [out] label produced by
+      // _buildOverlayFilterComplex), otherwise from pipe input 0.
+      // Audio always maps from whichever source audioInputArgs selected.
+      '-map', (overlayPlan ? overlayPlan.outputLabel : '0:v:0'),
       '-map', audioMap,
 
       // Video encode — copy when MediaRecorder's output already matches
@@ -1918,7 +2150,21 @@ class StreamEngine extends EventEmitter {
       // (MediaRecorder already emits it) but we don't specify it here —
       // -c:v copy forwards packets verbatim without pixel-format
       // negotiation.
-      ...(canStreamCopy ? ['-c:v', 'copy'] : this._videoEncodeArgs(encoder, videoBitrate, fps, resolution)),
+      // v3.4.47: when overlayPlan is present, filter_complex has
+      // already scaled the composite to target resolution and emitted
+      // it as [out]. We must NOT pass -vf scale here — FFmpeg rejects
+      // combined -filter_complex + -vf with 'Filtergraph simple/complex
+      // conflict'. _stripVfArgs drops the `-vf scale=WxH` pair and
+      // keeps the bitrate / gop / preset args intact.
+      ...(
+        canStreamCopy
+          ? ['-c:v', 'copy']
+          : (
+            overlayPlan
+              ? this._stripVfArgs(this._videoEncodeArgs(encoder, videoBitrate, fps, resolution))
+              : this._videoEncodeArgs(encoder, videoBitrate, fps, resolution)
+          )
+      ),
 
       // Audio encode
       //
@@ -2114,6 +2360,25 @@ class StreamEngine extends EventEmitter {
     }
     this.status.streaming = false;
     if (this._uptimeInterval) clearInterval(this._uptimeInterval);
+
+    // v3.4.47: unlink the tmp text files created for drawtext overlays.
+    // These are small (usually under 1 KB each) but we don't want them
+    // accumulating in %TEMP% across sessions, and leaving them around
+    // makes next-run disk lookups noisier for no benefit. Best-effort —
+    // failures to unlink are silently logged, not thrown, since by this
+    // point the FFmpeg process has already released its handles to them.
+    if (this._overlayTextFiles && this._overlayTextFiles.length) {
+      const fs = require('fs');
+      for (const p of this._overlayTextFiles) {
+        try { fs.unlinkSync(p); } catch (e) {
+          // Already gone, or permission issue — not worth surfacing.
+          if (e && e.code !== 'ENOENT') {
+            console.warn('[StreamEngine] overlay text unlink failed:', p, e.code);
+          }
+        }
+      }
+      this._overlayTextFiles = [];
+    }
 
     // Close the ledger session on pipe-mode user stop. Same analytics-
     // only semantics as stopStream — no enforcement.
