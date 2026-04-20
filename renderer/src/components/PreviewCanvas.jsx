@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 
 const api = window.electronAPI;
 
@@ -160,7 +160,10 @@ function drawPlaceholder(ctx, x, y, w, h, color, name, status, scaleX, scaleY, s
   ctx.fillText(status, x + w / 2, y + h / 2 + bigFont * 0.8);
 }
 
-export default function PreviewCanvas({ scene, streamStatus, sourceStreams = {} }) {
+const PreviewCanvas = forwardRef(function PreviewCanvas(
+  { scene, streamStatus, sourceStreams = {}, outputResolution },
+  ref
+) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const rafRef = useRef(null);
@@ -169,24 +172,64 @@ export default function PreviewCanvas({ scene, streamStatus, sourceStreams = {} 
   // (not state) so updating it doesn't retrigger the draw-loop useEffect,
   // which would tear down and recreate the requestAnimationFrame chain.
   const slideshowFolderListRef = useRef({});
-  const [canvasSize, setCanvasSize] = useState({ width: 1920, height: 1080 });
+
+  // v3.4.45: split the canvas drawing surface from its display size.
+  //
+  //   - DRAWING SURFACE (canvas.width / canvas.height attributes): fixed
+  //     at the stream output resolution. This is what captureStream()
+  //     feeds to MediaRecorder, so it MUST match the configured stream
+  //     resolution — otherwise canStreamCopy in stream-engine won't
+  //     fire (it gates on source width/height matching target) and
+  //     FFmpeg falls through to libopenh264 re-encode. Also: this is
+  //     the ONLY surface that carries the composited output of every
+  //     visible scene source. Before v3.4.45 the MediaRecorder was
+  //     reading from the raw webcam MediaStream directly, so only the
+  //     webcam made it to the RTMP stream and every other source
+  //     (images, URL browsers, videos, text overlays) was silently
+  //     dropped on the way out — visible in preview, invisible to
+  //     viewers.
+  //
+  //   - DISPLAY SIZE (CSS width/height): whatever fits the preview
+  //     pane. The canvas scales down via the browser's native canvas
+  //     resampling. Decouples the user's preview pane size from the
+  //     stream resolution they actually broadcast.
+  const outputW = (outputResolution && outputResolution.width)  || 1920;
+  const outputH = (outputResolution && outputResolution.height) || 1080;
+  const [displaySize, setDisplaySize] = useState({ width: outputW, height: outputH });
   const [selectedSource, setSelectedSource] = useState(null);
 
-  // Fit canvas to container while maintaining 16:9
+  // Expose the raw canvas DOM node to parent components (App.jsx) so
+  // they can call canvas.captureStream(fps) at stream start to get a
+  // composited MediaStream that includes every visible scene source,
+  // not just the webcam.
+  useImperativeHandle(ref, () => ({
+    getCanvas: () => canvasRef.current,
+    // Convenience: return a MediaStream of the composited output at
+    // the given fps. Callers still need to merge audio tracks
+    // themselves; captureStream is video-only.
+    captureStream: (fps = 30) => {
+      const c = canvasRef.current;
+      if (!c || typeof c.captureStream !== 'function') return null;
+      return c.captureStream(fps);
+    },
+  }), []);
+
+  // Fit canvas DISPLAY size to container while maintaining 16:9.
+  // Drawing surface stays fixed at outputW × outputH regardless.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     const observer = new ResizeObserver(() => {
       const rect = container.getBoundingClientRect();
-      const aspectRatio = 16 / 9;
+      const aspectRatio = outputW / outputH;
       let w = rect.width - 16;
       let h = w / aspectRatio;
       if (h > rect.height - 16) { h = rect.height - 16; w = h * aspectRatio; }
-      setCanvasSize({ width: Math.floor(w), height: Math.floor(h) });
+      setDisplaySize({ width: Math.floor(w), height: Math.floor(h) });
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [outputW, outputH]);
 
   // Clean up cached media elements for sources that no longer exist or
   // whose backing content has changed. Runs whenever scene sources or
@@ -462,14 +505,17 @@ export default function PreviewCanvas({ scene, streamStatus, sourceStreams = {} 
 
     rafRef.current = requestAnimationFrame(draw);
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-  }, [scene, canvasSize, selectedSource, sourceStreams]);
+  }, [scene, outputW, outputH, selectedSource, sourceStreams]);
 
   const handleCanvasClick = useCallback((e) => {
     if (!scene?.sources?.length) return;
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
-    const mx = ((e.clientX - rect.left) / rect.width) * 1920;
-    const my = ((e.clientY - rect.top) / rect.height) * 1080;
+    // Normalize click to the canvas drawing-surface coordinate space
+    // (outputW × outputH) regardless of the display size CSS scales
+    // it to. Sources are positioned in drawing-surface coords.
+    const mx = ((e.clientX - rect.left) / rect.width)  * outputW;
+    const my = ((e.clientY - rect.top)  / rect.height) * outputH;
     for (let i = scene.sources.length - 1; i >= 0; i--) {
       const s = scene.sources[i];
       if (!s.visible) continue;
@@ -480,7 +526,7 @@ export default function PreviewCanvas({ scene, streamStatus, sourceStreams = {} 
       }
     }
     setSelectedSource(null);
-  }, [scene]);
+  }, [scene, outputW, outputH]);
 
   return (
     <div
@@ -508,14 +554,16 @@ export default function PreviewCanvas({ scene, streamStatus, sourceStreams = {} 
 
       <canvas
         ref={canvasRef}
-        width={canvasSize.width}
-        height={canvasSize.height}
+        width={outputW}
+        height={outputH}
         onClick={handleCanvasClick}
-        style={{ width: canvasSize.width, height: canvasSize.height, borderRadius: 4, cursor: 'crosshair' }}
+        style={{ width: displaySize.width, height: displaySize.height, borderRadius: 4, cursor: 'crosshair' }}
       />
     </div>
   );
-}
+});
+
+export default PreviewCanvas;
 
 function formatUptime(seconds) {
   if (!seconds) return '00:00:00';

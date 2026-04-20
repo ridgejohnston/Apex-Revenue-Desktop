@@ -318,6 +318,43 @@ export default function App() {
   const sourceStreamsRef = useRef({});   // sourceId → MediaStream (live, not React state)
   const [sourceStreams, setSourceStreams] = useState({}); // mirrors ref for re-renders
 
+  // Imperative handle on the PreviewCanvas so the stream-start path
+  // can call captureStream() on the composited output canvas. Before
+  // v3.4.45 the MediaRecorder was reading the raw webcam MediaStream
+  // directly, which meant every non-webcam source in the scene
+  // (images, videos, URL browser views, text, alerts, tip menus, etc.)
+  // was visible in preview but silently dropped from the RTMP stream.
+  // captureStream() on the composited canvas is what carries ALL
+  // visible sources to the encoder.
+  const previewCanvasRef = useRef(null);
+
+  // React-state mirror of obsSettings.resolution so the PreviewCanvas
+  // knows what dimensions to lock its drawing surface to. The canvas
+  // drawing surface dictates captureStream()'s video track dimensions,
+  // which must match settings.resolution for stream-copy to fire in
+  // the FFmpeg pipe (otherwise it falls back to libopenh264 re-encode
+  // — one of the iGPU frame-starvation triggers we fixed in v3.4.40).
+  // Loaded once on mount and refreshed at stream start; users who
+  // change resolution in Settings and immediately start a stream will
+  // see it update via the handleStartStream sync below.
+  const [streamResolution, setStreamResolution] = useState({ width: 1920, height: 1080 });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await api.store.get('obsSettings');
+        if (cancelled) return;
+        const r = s?.resolution;
+        if (r && Number.isFinite(r.width) && Number.isFinite(r.height)) {
+          setStreamResolution({ width: r.width, height: r.height });
+        }
+      } catch {
+        // Non-fatal — default 1920×1080 is correct for most users.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // Start live capture for a source immediately after it is added
   const activateSource = useCallback(async (source) => {
     const { id, type, properties } = source;
@@ -926,6 +963,18 @@ export default function App() {
 
     try {
       const settings = await api.store.get('obsSettings');
+      // v3.4.45: keep the PreviewCanvas drawing surface in sync with
+      // the resolution the stream engine is about to use. If the user
+      // changed resolution in Settings and went straight to Start
+      // Stream, the compositor needs to know before captureStream()
+      // fires — otherwise the first stream after a resolution change
+      // would broadcast at the stale canvas size.
+      if (settings?.resolution?.width && settings?.resolution?.height) {
+        setStreamResolution({
+          width:  settings.resolution.width,
+          height: settings.resolution.height,
+        });
+      }
 
       // WEBCAM: use the MediaRecorder pipe path so the renderer keeps
       // the camera handle. Preview canvas keeps rendering during the
@@ -947,11 +996,41 @@ export default function App() {
           alert('No visible webcam source in the active scene. Add one from the Sources panel or toggle it on.');
           return;
         }
-        const stream = sourceStreamsRef.current[webcamSource.id];
-        if (!stream) {
+        const webcamStream = sourceStreamsRef.current[webcamSource.id];
+        if (!webcamStream) {
           alert('The webcam source has no active video stream yet. Wait a moment for the preview to load and try again.');
           return;
         }
+
+        // v3.4.45: build the MediaRecorder input as a COMPOSITE stream,
+        // not the raw webcam feed. The PreviewCanvas has been drawing
+        // every visible scene source on its canvas via rAF since day
+        // one — we just weren't reading from it. Before this change,
+        // MediaRecorder consumed sourceStreamsRef.current[webcamId]
+        // directly, so cam platforms only ever received the webcam.
+        // Images, videos, URL browser overlays, text, alerts, tip
+        // menus — all visible in preview, invisible to viewers.
+        //
+        // captureStream() on the composite canvas is video-only (the
+        // canvas has no audio), so we merge the webcam's audio track
+        // back in. If the scene contains video files with their own
+        // audio, that's a separate audio-mixing problem the compositor
+        // doesn't solve yet — but the webcam mic path, which is what
+        // every cam-platform stream needs, works exactly as before.
+        const compositeFps = settings.fps || 30;
+        const canvasStream = previewCanvasRef.current?.captureStream?.(compositeFps);
+        const compositeVideoTrack = canvasStream?.getVideoTracks?.()[0] || null;
+        if (!compositeVideoTrack) {
+          alert(
+            'The preview canvas is not ready yet. Wait a moment for the scene to render, then try again. ' +
+            'If this persists, check that at least one visible source is in your active scene.'
+          );
+          return;
+        }
+        const webcamAudioTrack = webcamStream.getAudioTracks?.()[0] || null;
+        const stream = new MediaStream(
+          [compositeVideoTrack, webcamAudioTrack].filter(Boolean)
+        );
 
         // Does this stream actually carry audio? Determines whether
         // FFmpeg will map audio from the Matroska pipe (input 0) or
@@ -998,16 +1077,31 @@ export default function App() {
         // flow straight into the RTMP muxer.
         const mimeType = pickWebmMimeType();
         const pipeCodec = /avc1|h264/i.test(mimeType) ? 'h264' : null;
-        let pipeSrcWidth = null;
-        let pipeSrcHeight = null;
+        // v3.4.45: the MediaRecorder now reads from the composited
+        // canvas (captureStream on the PreviewCanvas), whose drawing
+        // surface is locked to settings.resolution. That means the
+        // encoded frames arriving at FFmpeg's stdin are ALWAYS
+        // exactly settings.resolution — no scaling, no inheritance
+        // from whatever the physical webcam negotiated. So the
+        // stream-copy gate can use the configured resolution
+        // directly instead of reading the webcam track's settings
+        // (which previously could return 640×480 or some other
+        // webcam-native size and defeat canStreamCopy even when
+        // everything downstream agreed on 1920×1080).
+        let pipeSrcWidth  = settings?.resolution?.width  || null;
+        let pipeSrcHeight = settings?.resolution?.height || null;
+        // Belt-and-suspenders: if for some reason the track reports
+        // different dimensions than the canvas (shouldn't happen, but
+        // some Chromium builds have historically lied about
+        // captureStream dimensions during the first frame), prefer
+        // the track's reported values since that's what the H.264
+        // bitstream will actually contain.
         try {
-          const preVTracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
-          const preVSettings = preVTracks[0]?.getSettings?.() || {};
-          if (Number.isFinite(preVSettings.width))  pipeSrcWidth  = preVSettings.width;
-          if (Number.isFinite(preVSettings.height)) pipeSrcHeight = preVSettings.height;
+          const tSettings = compositeVideoTrack?.getSettings?.() || {};
+          if (Number.isFinite(tSettings.width)  && tSettings.width  > 0) pipeSrcWidth  = tSettings.width;
+          if (Number.isFinite(tSettings.height) && tSettings.height > 0) pipeSrcHeight = tSettings.height;
         } catch {
-          // getSettings can throw on some track types — non-fatal,
-          // just means stream engine will re-encode instead of copy.
+          // Non-fatal; stream engine will re-encode instead of copy.
         }
 
         // v3.4.43: non-intrusive advisory for users on integrated GPUs
@@ -1633,9 +1727,11 @@ export default function App() {
         {/* Center: Preview + Controls */}
         <div className="flex-col flex-1" style={{ overflow: 'hidden' }}>
           <PreviewCanvas
+            ref={previewCanvasRef}
             scene={activeScene}
             streamStatus={streamStatus}
             sourceStreams={sourceStreams}
+            outputResolution={streamResolution}
           />
           <ControlsDock
             streamStatus={streamStatus}
