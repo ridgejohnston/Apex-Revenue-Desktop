@@ -980,8 +980,136 @@ export default function App() {
         }
 
         const recorder = new MediaRecorder(stream, recorderOpts);
+
+        // ── MediaRecorder output diagnostic ──
+        //
+        // Distinguishes between two failure modes we can't tell apart
+        // from the stream-pipe log alone:
+        //
+        //   A. captureStream(30) under-delivering — Chromium's dirty
+        //      tracking skips emissions when canvas output looks similar
+        //      frame-to-frame, so MediaRecorder's input is sparse.
+        //   B. MediaRecorder's internal encoder dropping frames under
+        //      CPU pressure, so canvas IS delivering 30 fps but the
+        //      encoder is only producing ~5 fps of encoded output.
+        //
+        // v3.4.38's test showed 20 video frames over 3.71s of MediaRecorder
+        // content despite a render loop confirmed at 30+ fps. Need to
+        // know WHICH side of MediaRecorder is dropping.
+        //
+        // What this logs to errors.log (every 5 seconds while recording):
+        //   • chunks per second (should be ~4 at 250ms timeslice)
+        //   • bytes per chunk (size proves encoder is producing output)
+        //   • avgChunkGap (should be ~250ms)
+        //   • effectiveBitrate (compare to target videoBitrate)
+        //   • videoTrack.getSettings() snapshot — what Chromium thinks
+        //     the canvas-captured track's frame rate is
+        //
+        // Interpretation guide:
+        //   chunks~4/s + small bytes → captureStream under-delivered
+        //                              (fewer frames to encode)
+        //   chunks~4/s + normal bytes but still 5fps in FFmpeg → pipe
+        //                              I/O or demux issue
+        //   chunks<4/s → MediaRecorder's encoder stalled
+        //   effectiveBitrate << target → encoder or capture loss
+        //
+        // The diagnostic has zero effect on stream behavior — pure
+        // measurement. Can be removed once the hypothesis is confirmed.
+        const mrStats = {
+          startedAt: performance.now(),
+          windowStart: performance.now(),
+          lastChunkAt: null,
+          chunkCount: 0,
+          chunkBytes: 0,
+          chunkGapSum: 0,
+          chunkGapCount: 0,
+          windowChunkCount: 0,
+          windowChunkBytes: 0,
+          windowGapSum: 0,
+          windowGapCount: 0,
+        };
+
+        // Snapshot the video track settings as MediaRecorder sees it.
+        // Chromium reports the track's current frameRate here — if it
+        // says 30 but MediaRecorder produces 5 fps, the capture-to-
+        // encoder hop is dropping. If it says 5, the track itself is
+        // underdelivering from the canvas.
+        try {
+          const videoTracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
+          const vSettings   = videoTracks[0]?.getSettings?.() || {};
+          window.electronAPI?.errors?.log?.(
+            'info', 'media-recorder',
+            `MediaRecorder starting: videoTrack frameRate=${vSettings.frameRate ?? '?'}, ` +
+            `size=${vSettings.width ?? '?'}x${vSettings.height ?? '?'}, ` +
+            `mimeType=${recorderOpts.mimeType}, ` +
+            `videoBitsPerSecond=${recorderOpts.videoBitsPerSecond ?? 'default'}`,
+            {
+              videoTrackSettings: vSettings,
+              audioTracks: stream.getAudioTracks?.().length ?? 0,
+              videoTracks: videoTracks.length,
+              mimeType:          recorderOpts.mimeType,
+              videoBitsPerSecond: recorderOpts.videoBitsPerSecond ?? null,
+              audioBitsPerSecond: recorderOpts.audioBitsPerSecond ?? null,
+              timeslice:         250,
+            }
+          );
+        } catch {}
+
         recorder.ondataavailable = async (e) => {
           if (!e.data || e.data.size === 0) return;
+          // Update diagnostic stats before the IPC send so we measure
+          // what MediaRecorder actually produced, not what got through
+          // after IPC roundtrip.
+          const nowTs = performance.now();
+          if (mrStats.lastChunkAt !== null) {
+            const gap = nowTs - mrStats.lastChunkAt;
+            mrStats.chunkGapSum    += gap;
+            mrStats.chunkGapCount  += 1;
+            mrStats.windowGapSum   += gap;
+            mrStats.windowGapCount += 1;
+          }
+          mrStats.lastChunkAt        = nowTs;
+          mrStats.chunkCount        += 1;
+          mrStats.chunkBytes        += e.data.size;
+          mrStats.windowChunkCount  += 1;
+          mrStats.windowChunkBytes  += e.data.size;
+
+          // Window report every 5s — mirrors beauty-filter cadence
+          const windowMs = nowTs - mrStats.windowStart;
+          if (windowMs >= 5000) {
+            const chunksPerSec        = (mrStats.windowChunkCount * 1000) / windowMs;
+            const avgChunkBytes       = mrStats.windowChunkBytes / Math.max(1, mrStats.windowChunkCount);
+            const avgChunkGapMs       = mrStats.windowGapCount > 0
+              ? mrStats.windowGapSum / mrStats.windowGapCount
+              : 0;
+            // Effective bitrate in kbps based on the window's throughput.
+            // Combines video + audio since MediaRecorder muxes both.
+            const effBitrateKbps      = (mrStats.windowChunkBytes * 8) / windowMs;
+            try {
+              window.electronAPI?.errors?.log?.(
+                'info', 'media-recorder',
+                `MediaRecorder output: ${chunksPerSec.toFixed(2)} chunks/s, ` +
+                `avgChunk=${(avgChunkBytes / 1024).toFixed(1)}KB, ` +
+                `avgGap=${avgChunkGapMs.toFixed(0)}ms, ` +
+                `effBitrate=${effBitrateKbps.toFixed(0)}kbps`,
+                {
+                  chunksPerSec:   Number(chunksPerSec.toFixed(2)),
+                  avgChunkBytes:  Math.round(avgChunkBytes),
+                  avgChunkGapMs:  Math.round(avgChunkGapMs),
+                  effBitrateKbps: Math.round(effBitrateKbps),
+                  windowChunks:   mrStats.windowChunkCount,
+                  windowBytes:    mrStats.windowChunkBytes,
+                  windowMs:       Math.round(windowMs),
+                }
+              );
+            } catch {}
+            mrStats.windowStart      = nowTs;
+            mrStats.windowChunkCount = 0;
+            mrStats.windowChunkBytes = 0;
+            mrStats.windowGapSum     = 0;
+            mrStats.windowGapCount   = 0;
+          }
+
           try {
             const buf = await e.data.arrayBuffer();
             // Electron structured clone supports ArrayBuffer over IPC.
@@ -994,9 +1122,43 @@ export default function App() {
         };
         recorder.onerror = (e) => {
           console.error('[Apex] MediaRecorder error:', e.error?.message || e);
+          try {
+            window.electronAPI?.errors?.log?.(
+              'error', 'media-recorder',
+              `MediaRecorder error: ${e.error?.message || String(e)}`,
+              { errorName: e.error?.name ?? null }
+            );
+          } catch {}
         };
         recorder.onstop = () => {
           console.log('[Apex] MediaRecorder stopped');
+          // Final tally: total chunks + bytes + duration. Lets us
+          // cross-check against the FFmpeg stream-pipe log's
+          // "video:X KB audio:Y KB" numbers to confirm all chunks
+          // made it through IPC to FFmpeg's stdin.
+          try {
+            const totalMs  = performance.now() - mrStats.startedAt;
+            const avgCps   = (mrStats.chunkCount * 1000) / Math.max(1, totalMs);
+            const avgBytes = mrStats.chunkBytes / Math.max(1, mrStats.chunkCount);
+            const avgGap   = mrStats.chunkGapCount > 0
+              ? mrStats.chunkGapSum / mrStats.chunkGapCount
+              : 0;
+            window.electronAPI?.errors?.log?.(
+              'info', 'media-recorder',
+              `MediaRecorder final: ${mrStats.chunkCount} chunks, ` +
+              `${(mrStats.chunkBytes / 1024).toFixed(1)}KB total, ` +
+              `${avgCps.toFixed(2)} chunks/s, avgGap=${avgGap.toFixed(0)}ms, ` +
+              `ran ${(totalMs / 1000).toFixed(1)}s`,
+              {
+                totalChunks:   mrStats.chunkCount,
+                totalBytes:    mrStats.chunkBytes,
+                totalMs:       Math.round(totalMs),
+                avgChunksPerSec: Number(avgCps.toFixed(2)),
+                avgChunkBytes:   Math.round(avgBytes),
+                avgChunkGapMs:   Math.round(avgGap),
+              }
+            );
+          } catch {}
         };
 
         // 250ms timeslice — ~4 chunks/sec. Low enough latency for
