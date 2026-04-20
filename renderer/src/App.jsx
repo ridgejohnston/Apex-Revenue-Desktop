@@ -996,41 +996,35 @@ export default function App() {
           alert('No visible webcam source in the active scene. Add one from the Sources panel or toggle it on.');
           return;
         }
-        const webcamStream = sourceStreamsRef.current[webcamSource.id];
-        if (!webcamStream) {
+        const stream = sourceStreamsRef.current[webcamSource.id];
+        if (!stream) {
           alert('The webcam source has no active video stream yet. Wait a moment for the preview to load and try again.');
           return;
         }
 
-        // v3.4.45: build the MediaRecorder input as a COMPOSITE stream,
-        // not the raw webcam feed. The PreviewCanvas has been drawing
-        // every visible scene source on its canvas via rAF since day
-        // one — we just weren't reading from it. Before this change,
-        // MediaRecorder consumed sourceStreamsRef.current[webcamId]
-        // directly, so cam platforms only ever received the webcam.
-        // Images, videos, URL browser overlays, text, alerts, tip
-        // menus — all visible in preview, invisible to viewers.
-        //
-        // captureStream() on the composite canvas is video-only (the
-        // canvas has no audio), so we merge the webcam's audio track
-        // back in. If the scene contains video files with their own
-        // audio, that's a separate audio-mixing problem the compositor
-        // doesn't solve yet — but the webcam mic path, which is what
-        // every cam-platform stream needs, works exactly as before.
-        const compositeFps = settings.fps || 30;
-        const canvasStream = previewCanvasRef.current?.captureStream?.(compositeFps);
-        const compositeVideoTrack = canvasStream?.getVideoTracks?.()[0] || null;
-        if (!compositeVideoTrack) {
-          alert(
-            'The preview canvas is not ready yet. Wait a moment for the scene to render, then try again. ' +
-            'If this persists, check that at least one visible source is in your active scene.'
-          );
-          return;
-        }
-        const webcamAudioTrack = webcamStream.getAudioTracks?.()[0] || null;
-        const stream = new MediaStream(
-          [compositeVideoTrack, webcamAudioTrack].filter(Boolean)
-        );
+        // v3.4.46 (REVERT): the v3.4.45 compositor route regressed the
+        // stream. Ridge's 2026-04-20T14:40 test on v3.4.45 produced a
+        // -10053 disconnect with zero MediaRecorder telemetry in
+        // errors.log — the MediaRecorder either silently threw on
+        // construction from the canvas.captureStream track with
+        // avc1 mime, or delivered no chunks because the canvas rAF
+        // loop wasn't producing frames at 30Hz. Meanwhile v3.4.44
+        // streamed cleanly for 132 seconds with raw-webcam input
+        // (449 chunks, 8.6MB, no disconnect). Reverting the
+        // MediaRecorder source to the raw webcam MediaStream
+        // restores the known-working path. The PreviewCanvas
+        // forwardRef + outputResolution plumbing added in v3.4.45
+        // stays because it's harmless and we'll reuse it when we
+        // re-attempt the composite fix properly (see known limitations
+        // below). Ridge's original bug — scene composite not reaching
+        // the viewer — is NOT fixed by this revert and will need a
+        // different implementation. Likely path forward: webm/vp9
+        // MediaRecorder mime (compatible with canvas streams) +
+        // server-side transcode in FFmpeg, OR do compositing in
+        // FFmpeg itself via overlay filter_complex chains, OR route
+        // through MediaStreamTrackProcessor/Generator on an
+        // OffscreenCanvas worker. All three need design work before
+        // a second implementation attempt.
 
         // Does this stream actually carry audio? Determines whether
         // FFmpeg will map audio from the Matroska pipe (input 0) or
@@ -1077,31 +1071,16 @@ export default function App() {
         // flow straight into the RTMP muxer.
         const mimeType = pickWebmMimeType();
         const pipeCodec = /avc1|h264/i.test(mimeType) ? 'h264' : null;
-        // v3.4.45: the MediaRecorder now reads from the composited
-        // canvas (captureStream on the PreviewCanvas), whose drawing
-        // surface is locked to settings.resolution. That means the
-        // encoded frames arriving at FFmpeg's stdin are ALWAYS
-        // exactly settings.resolution — no scaling, no inheritance
-        // from whatever the physical webcam negotiated. So the
-        // stream-copy gate can use the configured resolution
-        // directly instead of reading the webcam track's settings
-        // (which previously could return 640×480 or some other
-        // webcam-native size and defeat canStreamCopy even when
-        // everything downstream agreed on 1920×1080).
-        let pipeSrcWidth  = settings?.resolution?.width  || null;
-        let pipeSrcHeight = settings?.resolution?.height || null;
-        // Belt-and-suspenders: if for some reason the track reports
-        // different dimensions than the canvas (shouldn't happen, but
-        // some Chromium builds have historically lied about
-        // captureStream dimensions during the first frame), prefer
-        // the track's reported values since that's what the H.264
-        // bitstream will actually contain.
+        let pipeSrcWidth = null;
+        let pipeSrcHeight = null;
         try {
-          const tSettings = compositeVideoTrack?.getSettings?.() || {};
-          if (Number.isFinite(tSettings.width)  && tSettings.width  > 0) pipeSrcWidth  = tSettings.width;
-          if (Number.isFinite(tSettings.height) && tSettings.height > 0) pipeSrcHeight = tSettings.height;
+          const preVTracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
+          const preVSettings = preVTracks[0]?.getSettings?.() || {};
+          if (Number.isFinite(preVSettings.width))  pipeSrcWidth  = preVSettings.width;
+          if (Number.isFinite(preVSettings.height)) pipeSrcHeight = preVSettings.height;
         } catch {
-          // Non-fatal; stream engine will re-encode instead of copy.
+          // getSettings can throw on some track types — non-fatal,
+          // just means stream engine will re-encode instead of copy.
         }
 
         // v3.4.43: non-intrusive advisory for users on integrated GPUs
