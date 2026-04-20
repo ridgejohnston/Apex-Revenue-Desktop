@@ -160,6 +160,58 @@ class ErrorLogger {
     return this._inMemory.slice(-count).join('\n');
   }
 
+  // Scan the in-memory ring buffer for recent entries matching both a
+  // source tag AND a message/context regex, within the last `withinMs`
+  // milliseconds. Returns an array of { ts, level, source, message,
+  // context } objects, newest LAST. Used by stream-engine's hint
+  // classifier to correlate FFmpeg stderr errors with renderer-side
+  // telemetry (beauty-filter fps, MediaRecorder output bitrate) that
+  // was written to the same ring buffer moments before.
+  //
+  // Why in-memory and not file: the ring buffer is always current
+  // within the same app session, whereas readAll() includes entries
+  // from previous sessions after rotation. We want signals from NOW.
+  findRecent(source, regex, withinMs = 15000) {
+    if (!this._inMemory.length) return [];
+    const now = Date.now();
+    const cutoff = now - withinMs;
+    const matches = [];
+    // Each line: [ISO_TS] [LEVEL] [source] message {optional JSON}
+    const lineRe = /^\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+(.*)$/;
+    for (const line of this._inMemory) {
+      const m = line.match(lineRe);
+      if (!m) continue;
+      const ts = Date.parse(m[1]);
+      if (!Number.isFinite(ts) || ts < cutoff) continue;
+      if (m[3] !== source) continue;
+      const rest = m[4];
+      if (regex && !regex.test(rest)) continue;
+      // Split message vs JSON context. The logger format puts JSON
+      // (starting with '{') at the tail of the line after a space.
+      // Use the last '{...}' substring as the context candidate.
+      let message = rest;
+      let context = null;
+      const jsonStart = rest.indexOf('{');
+      if (jsonStart > 0) {
+        const candidate = rest.slice(jsonStart);
+        try {
+          context = JSON.parse(candidate);
+          message = rest.slice(0, jsonStart).trim();
+        } catch {
+          // Not parseable JSON — leave message as the full rest
+        }
+      }
+      matches.push({
+        ts,
+        level: m[2],
+        source: m[3],
+        message,
+        context,
+      });
+    }
+    return matches;
+  }
+
   // Read the current log file from disk, plus any in-memory entries
   // not yet flushed. Used by the "view full log" path.
   readAll() {

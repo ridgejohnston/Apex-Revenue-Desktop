@@ -10,6 +10,7 @@ const path = require('path');
 const fs = require('fs');
 const { app } = require('electron');
 const { findFFmpegPath } = require('./ffmpeg-installer');
+const errorLogger = require('./error-logger');
 
 function findFFmpeg() {
   return findFFmpegPath() || 'ffmpeg';
@@ -1212,6 +1213,90 @@ class StreamEngine extends EventEmitter {
     return true;
   }
 
+  // Correlate FFmpeg stderr errors with renderer-side telemetry to
+  // distinguish "source starved the encoder" from "platform kicked for
+  // bitrate cap" when both surface as the same -10053 socket abort.
+  //
+  // Reads the ErrorLogger ring buffer for the last 15 seconds and
+  // extracts two signals:
+  //
+  //   1. beauty-filter "Render loop slow" warnings — these carry a
+  //      structured context with fps, avgFrameMs, rafGap, verdict.
+  //      fps < 25 in the last 5s window means the WebGL compositor
+  //      was producing frames slower than 30fps capture target, so
+  //      MediaRecorder had very little to encode.
+  //
+  //   2. media-recorder "MediaRecorder output" breadcrumbs — these
+  //      carry effBitrate in kbps. When effBitrate < 50% of the
+  //      configured target, MediaRecorder was effectively idle (the
+  //      source pipeline starved it). The stream-pipe logs leading
+  //      to the v3.4.39 -10053 showed 161 kbps against a 3000 kbps
+  //      target — a 20× shortfall, unmistakable starvation.
+  //
+  // Returns:
+  //   { starving: true,  reason: "<human string>" }
+  //     when EITHER signal crosses threshold
+  //   { starving: false, healthyBitrate: true }
+  //     when effBitrate reached ≥80% of target and fps was ≥25 —
+  //     stream was running normally before the abort
+  //   { starving: false, healthyBitrate: false }
+  //     when there's no telemetry either way (stream barely ran, or
+  //     logger was disabled)
+  _detectFrameStarvation() {
+    let fpsEntry = null;
+    let mrEntry  = null;
+    try {
+      const fpsMatches = errorLogger.findRecent('beauty-filter', /Render loop slow/, 15000);
+      if (fpsMatches.length) fpsEntry = fpsMatches[fpsMatches.length - 1];
+      const mrMatches  = errorLogger.findRecent('media-recorder', /MediaRecorder output/, 15000);
+      if (mrMatches.length)  mrEntry  = mrMatches[mrMatches.length - 1];
+    } catch (err) {
+      // Logger query failed — fall through to "no telemetry" result.
+      console.warn('[StreamEngine] Telemetry query failed:', err.message);
+    }
+
+    const fps       = fpsEntry?.context?.fps;
+    const verdict   = fpsEntry?.context?.verdict;
+    const effKbps   = mrEntry?.context?.effBitrateKbps;
+    // The target bitrate is the value the renderer asked MediaRecorder
+    // to produce (in kbps). Surfaced in the 'starting' log entry but
+    // not the 'output' one; infer it from the most recent starting
+    // log, falling back to 3000 (the app's default at the time of
+    // writing — any mismatch just loosens the starvation threshold).
+    let targetKbps = 3000;
+    try {
+      const startMatches = errorLogger.findRecent('media-recorder', /MediaRecorder starting/, 30000);
+      const last = startMatches[startMatches.length - 1];
+      const vbps = last?.context?.videoBitsPerSecond;
+      if (Number.isFinite(vbps) && vbps > 0) targetKbps = Math.round(vbps / 1000);
+    } catch {}
+
+    const fpsStarving = Number.isFinite(fps) && fps < 25;
+    const bitrateStarving = Number.isFinite(effKbps) && effKbps < targetKbps * 0.5;
+
+    if (fpsStarving || bitrateStarving) {
+      const bits = [];
+      if (fpsStarving) {
+        bits.push(`the filter was rendering at ${fps.toFixed(1)} fps${verdict ? ` (${verdict})` : ''} instead of 30`);
+      }
+      if (bitrateStarving) {
+        bits.push(`MediaRecorder produced ${effKbps} kbps vs ${targetKbps} kbps target (${Math.round(100 * effKbps / targetKbps)}% of intended bitrate)`);
+      }
+      return {
+        starving: true,
+        reason: `The source couldn't keep up: ${bits.join('; ')}.`,
+      };
+    }
+
+    const fpsHealthy     = Number.isFinite(fps)     && fps >= 25;
+    const bitrateHealthy = Number.isFinite(effKbps) && effKbps >= targetKbps * 0.8;
+    // Healthy = both signals present and both healthy, OR bitrate healthy
+    // and no fps signal (filter might be disabled — no news is good news).
+    const healthyBitrate = bitrateHealthy && (fpsHealthy || fps === undefined);
+
+    return { starving: false, healthyBitrate };
+  }
+
   // Extract the most informative error line from FFmpeg stderr.
   //
   // The naive approach — "last line matching /error|failed/i" — picks up
@@ -1381,14 +1466,43 @@ class StreamEngine extends EventEmitter {
     // Check BEFORE the more generic branches below so the specific
     // explanation wins.
     if (/error number -10053/i.test(stderr) || /-10053 occurred/i.test(stderr)) {
-      // The most common cause of -10053 in practice (confirmed via full
-      // FFmpeg stderr captured from a failing v3.4.26 stream) is the
-      // streaming platform kicking the connection seconds after it
-      // opens because the video bitrate exceeded the platform's ceiling.
-      // v3.4.28 fixes this server-side by lowering defaults AND enabling
-      // libopenh264 frame-skip, but a user who restored settings from
-      // backup or manually raised bitrate could still hit it.
-      return 'Hint: the stream connected successfully but was disconnected by the platform shortly after (Windows error -10053). Most common cause: video bitrate exceeds the platform cap — Chaturbate kicks streams over ~4000 kbps at 1080p. Open Settings > Streaming and set Video Bitrate to 3500 (1080p) or 3000 (720p). Less common: the stream key was revoked mid-session, Windows Defender / antivirus interfered, or — if this fired when you pressed Stop Stream — it is harmless. If bitrate is already under the cap, check the Chaturbate broadcaster page for session status and re-copy the stream key.';
+      // -10053 is WSAECONNABORTED: the local Winsock stack gave up on
+      // the TCP connection to the RTMP ingest. FFmpeg surfaces it when
+      // trying to flush the final packets. Three distinct upstream
+      // causes share this error code, and giving the wrong hint wastes
+      // the user's time bisecting their setup. We branch on renderer
+      // telemetry (beauty-filter fps + MediaRecorder effective bitrate)
+      // captured in the ring buffer over the seconds leading up to
+      // failure:
+      //
+      //   A. FRAME STARVATION — the renderer couldn't sustain capture
+      //      fps, so MediaRecorder delivered near-empty chunks, so
+      //      Chaturbate's ingest sees a stalled stream and RSTs. The
+      //      signature is beauty-filter fps < 25 in the last 5s window
+      //      OR media-recorder effBitrate < 50% of target. This is the
+      //      case that motivated the v3.4.40 rewrite — the previous
+      //      hint blamed bitrate-cap and sent users chasing the wrong
+      //      root cause.
+      //
+      //   B. BITRATE CAP — stream opened cleanly, ran fine, then got
+      //      kicked for exceeding the platform's ingest ceiling
+      //      (~4000 kbps at 1080p for Chaturbate). Only relevant when
+      //      effective bitrate actually reached target.
+      //
+      //   C. NORMAL STOP — user clicked Stop Stream; FFmpeg tried to
+      //      send the RTMP trailer after the server already closed.
+      //      Harmless. No telemetry signal either way, but the stream
+      //      ran for long enough that both starvation and bitrate
+      //      signals would have surfaced if they were real causes.
+      const starvation = this._detectFrameStarvation();
+      if (starvation.starving) {
+        return `Hint: your stream was disconnected because the video source couldn't keep up with the encoder (Windows error -10053, platform dropped a stalled stream). ${starvation.reason} Fix: open Settings > Filters and lower "Background Blur" quality, turn off background effects, or reduce capture resolution to 720p. If you're on an integrated GPU, background blur at 1080p is the most common culprit.`;
+      }
+      if (starvation.healthyBitrate) {
+        return 'Hint: the stream connected and was running at target bitrate, then the platform dropped the connection (Windows error -10053). Most common cause at this point: bitrate exceeds the platform cap — Chaturbate kicks streams over ~4000 kbps at 1080p. Open Settings > Streaming and set Video Bitrate to 3500 (1080p) or 3000 (720p). Less common: the stream key was revoked mid-session, Windows Defender / antivirus interfered, or — if this fired when you pressed Stop Stream — it is harmless.';
+      }
+      // No telemetry either way — conservative both-possibilities hint.
+      return 'Hint: the stream was disconnected by the platform (Windows error -10053). Two possible causes: (1) the video source stalled (background blur or other filter starved the encoder of frames — try disabling filters and retry), or (2) bitrate exceeded the platform cap (try lowering Video Bitrate to 3500 in Settings > Streaming). If this fired right after you pressed Stop Stream it is harmless.';
     }
     if (/error number -10054/i.test(stderr) || /-10054 occurred/i.test(stderr)) {
       return 'Hint: the broadcast platform forcibly closed your connection (Windows error -10054, connection reset by peer). This usually means the platform revoked your stream key, your account was temporarily banned, or the ingest server restarted. Copy a fresh stream key from your broadcaster page and retry.';
@@ -1573,6 +1687,45 @@ class StreamEngine extends EventEmitter {
       });
     }
 
+    // Decide whether we can skip video re-encoding entirely.
+    //
+    // Chrome's MediaRecorder already emits H.264 (Baseline) when the
+    // mimeType was 'video/x-matroska;codecs=avc1' — which is our first
+    // candidate in App.jsx#pickWebmMimeType — so in the common case
+    // FFmpeg only needs to remux into FLV. We re-encode ONLY when at
+    // least one of the following forces our hand:
+    //
+    //   • MediaRecorder output is NOT H.264 (browser fell back to
+    //     VP8/VP9 on a build without HW H.264 — rare on modern Windows
+    //     but possible in Electron forks or on machines without
+    //     Intel/AMD/NVIDIA H.264 encoders).
+    //   • User's target resolution differs from the webcam's native
+    //     capture resolution. A scale filter requires decode → scale →
+    //     encode; copy would leave the frames at the wrong size.
+    //   • User explicitly picked a non-copy encoder in Settings (the
+    //     obsSettings.videoEncoder field is a deliberate override —
+    //     honor it even when copy would have worked).
+    //
+    // When copy is eligible, we skip the software encoder path entirely.
+    // That's significant because libopenh264 (our software fallback)
+    // has been the source of every v3.4.35–39 failure: the '[OpenH264]
+    // profile(578) unsupported, change to UNSPECIFIC' warning, the
+    // frame-skip quirk, and the general high CPU cost that contributes
+    // to MediaRecorder/beauty-filter starvation on weaker machines.
+    const _srcW = settings._pipeSrcWidth;
+    const _srcH = settings._pipeSrcHeight;
+    const _tgtW = resolution && resolution.width;
+    const _tgtH = resolution && resolution.height;
+    const _resolutionsMatch =
+      typeof _srcW === 'number' && typeof _srcH === 'number' &&
+      typeof _tgtW === 'number' && typeof _tgtH === 'number' &&
+      _srcW === _tgtW && _srcH === _tgtH;
+    const _userForcedEncoder = !!settings.videoEncoder;
+    const canStreamCopy =
+      settings._pipeCodec === 'h264' &&
+      _resolutionsMatch &&
+      !_userForcedEncoder;
+
     // Resolve destinations and build output args. Same helper used
     // by the direct-path startStream, so simulcast works identically
     // for webcam (pipe) and non-webcam (direct) sources.
@@ -1583,8 +1736,8 @@ class StreamEngine extends EventEmitter {
     destinations.forEach((d, i) => {
       this._diag(`  [${i}] ${d.name}: ${d.url}/<REDACTED>`);
     });
-    this._diag(`encoder: ${encoder}`);
-    this._diag(`bitrate: ${videoBitrate}k video / ${audioBitrate}k audio`);
+    this._diag(`encoder: ${canStreamCopy ? 'copy (MediaRecorder H.264 passthrough)' : encoder}`);
+    this._diag(`bitrate: ${canStreamCopy ? `passthrough (MediaRecorder target ${videoBitrate}k)` : `${videoBitrate}k video`} / ${audioBitrate}k audio`);
     // resolution is typically { width, height } — stringifying the raw
     // object yields "[object Object]" which is useless in the log.
     // Format defensively: handle both the object form and the (rare)
@@ -1694,8 +1847,15 @@ class StreamEngine extends EventEmitter {
       '-map', '0:v:0',
       '-map', audioMap,
 
-      // Video encode — re-use per-encoder args from the direct path
-      ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
+      // Video encode — copy when MediaRecorder's output already matches
+      // the user's target (see canStreamCopy above), otherwise re-encode
+      // via the per-encoder args used by the direct path.
+      //
+      // The copy path still sets -pix_fmt yuv420p on the logical level
+      // (MediaRecorder already emits it) but we don't specify it here —
+      // -c:v copy forwards packets verbatim without pixel-format
+      // negotiation.
+      ...(canStreamCopy ? ['-c:v', 'copy'] : this._videoEncodeArgs(encoder, videoBitrate, fps, resolution)),
 
       // Audio encode
       //
