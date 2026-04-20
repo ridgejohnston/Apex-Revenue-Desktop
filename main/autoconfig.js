@@ -126,34 +126,51 @@ async function probeEncoderRuntime(ffmpegPath, encoder) {
   }
 }
 
+// Cam platforms (Chaturbate, Stripchat, MyFreeCams, xTease) only accept
+// 16:9 ingests at a small set of standard resolutions. Produce anything
+// else and the RTMP ingest either rejects the stream or forces a
+// server-side re-encode that ends in a -10053 kick. This whitelist is
+// what the Settings > Resolution picker also offers — keep them aligned.
+const STREAM_RESOLUTIONS_16_9 = [
+  { width: 1920, height: 1080 },
+  { width: 1280, height: 720  },
+  { width: 854,  height: 480  },
+  { width: 640,  height: 360  },
+];
+
+// Pick the best 16:9 stream resolution for a given display. We IGNORE
+// the display aspect ratio entirely — the webcam always produces 16:9
+// output regardless of monitor aspect, so preserving a 16:10 desktop's
+// aspect ratio just produces non-ingestable resolutions like 1728x1080
+// (which is what a 1920x1200 laptop display was downscaling to before
+// v3.4.41). Pick the largest whitelisted resolution whose height fits
+// inside the display's physical height.
+function pickStreamResolution(physicalHeight) {
+  for (const r of STREAM_RESOLUTIONS_16_9) {
+    if (r.height <= physicalHeight) return r;
+  }
+  // Display smaller than our smallest preset (extremely rare).
+  return STREAM_RESOLUTIONS_16_9[STREAM_RESOLUTIONS_16_9.length - 1];
+}
+
 /**
  * Recommend a stream resolution based on the primary display.
- * Caps at 1080p — cam platforms encode at ≤1080p anyway, and downscaling
- * a 4K desktop capture at stream time wastes CPU/GPU cycles.
+ * Always returns one of STREAM_RESOLUTIONS_16_9 — never a derived
+ * resolution that depends on display aspect ratio. See pickStreamResolution
+ * for the reasoning.
  */
 function recommendResolution(screenModule) {
   try {
     const primary = screenModule.getPrimaryDisplay();
     // Electron's display.size returns DIP (device-independent pixels,
     // "logical" pixels at the current Windows display scaling setting).
-    // For screen capture via gdigrab we want PHYSICAL pixels — so
-    // multiply by scaleFactor. Without this, a 1920x1080 monitor at
-    // 125% display scaling reports as 1536x864 and we stream downscaled
-    // output for no reason.
+    // Multiply by scaleFactor to get physical pixels — what the monitor
+    // actually has. Used only as a ceiling for which whitelisted
+    // resolution we can stream at; we never stream at the display's
+    // raw dimensions.
     const scale = primary.scaleFactor || 1;
-    const width = Math.round(primary.size.width * scale);
-    const height = Math.round(primary.size.height * scale);
-
-    const MAX_H = 1080;
-    if (height <= MAX_H) {
-      // Snap to common even dimensions (720, 900, 1080) for encoder friendliness
-      return { width: Math.round(width / 2) * 2, height: Math.round(height / 2) * 2 };
-    }
-    const downScale = MAX_H / height;
-    return {
-      width:  Math.round((width * downScale) / 2) * 2,
-      height: MAX_H,
-    };
+    const physicalHeight = Math.round(primary.size.height * scale);
+    return pickStreamResolution(physicalHeight);
   } catch {
     return { width: 1920, height: 1080 };
   }
@@ -254,6 +271,8 @@ module.exports = {
   detectAvailableEncoders,
   recommendBitrate,
   recommendResolution,
+  pickStreamResolution,
+  STREAM_RESOLUTIONS_16_9,
   ENCODER_LABELS,
   ENCODER_PREFERENCE,
   HARDWARE_ENCODERS,

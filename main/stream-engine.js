@@ -11,6 +11,7 @@ const fs = require('fs');
 const { app } = require('electron');
 const { findFFmpegPath } = require('./ffmpeg-installer');
 const errorLogger = require('./error-logger');
+const { STREAM_RESOLUTIONS_16_9 } = require('./autoconfig');
 
 function findFFmpeg() {
   return findFFmpegPath() || 'ffmpeg';
@@ -1025,8 +1026,12 @@ class StreamEngine extends EventEmitter {
     }
 
     const {
-      videoBitrate, audioBitrate, resolution, fps,
+      videoBitrate, audioBitrate, fps,
     } = settings;
+    // Non-const so _sanitizeResolution can coerce a stale non-16:9
+    // stored value (e.g. 1728x1080 from the pre-v3.4.41 autoconfig bug)
+    // to the nearest cam-platform standard before we hand it to FFmpeg.
+    let resolution = this._sanitizeResolution(settings.resolution);
 
     // Resolve H.264 encoder: honor the user's choice from obsSettings
     // when it's actually usable on this machine, otherwise auto-pick a
@@ -1211,6 +1216,56 @@ class StreamEngine extends EventEmitter {
 
     this.emit('status', { ...this.status });
     return true;
+  }
+
+  // Coerce an arbitrary stored resolution to the nearest 16:9 cam-platform
+  // standard (1920x1080, 1280x720, 854x480, 640x360). Cam RTMP ingests
+  // (Chaturbate, Stripchat, MyFreeCams, xTease) reject non-standard
+  // dimensions in practice — a stream at 1728x1080 connects, accepts
+  // a few seconds of packets, then gets dropped with -10053. The
+  // v3.4.39–40 stream-pipe logs showed exactly this chain.
+  //
+  // Where bad stored values came from: autoconfig.recommendResolution()
+  // before v3.4.41 multiplied display DIP by scaleFactor, then snapped
+  // the result to "common even dimensions" without enforcing a 16:9
+  // aspect. On a 1920x1200 laptop (16:10, common on HP/Dell/Lenovo
+  // business-class machines), that produced 1728x1080 — mathematically
+  // correct for preserving 16:10 inside a 1080p height ceiling, but
+  // not a resolution any cam platform ingests cleanly.
+  //
+  // Strategy: if the stored resolution is already on the whitelist,
+  // return it unchanged. Otherwise, pick the closest-HEIGHT whitelisted
+  // entry and log a one-time diag explaining the substitution. Height
+  // is the right dimension to match on because the webcam is always
+  // 16:9 regardless of display aspect — only the stream output was
+  // ever miscomputed.
+  //
+  // Returns a plain { width, height } object. Never throws. Falls back
+  // to 1920x1080 on any unexpected input shape.
+  _sanitizeResolution(res) {
+    const fallback = { width: 1920, height: 1080 };
+    if (!res || typeof res !== 'object') return fallback;
+    const w = Number(res.width);
+    const h = Number(res.height);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+      return fallback;
+    }
+
+    // Exact-match fast path — already on whitelist, pass through.
+    for (const r of STREAM_RESOLUTIONS_16_9) {
+      if (r.width === w && r.height === h) return { width: w, height: h };
+    }
+
+    // Not on whitelist — pick closest by height. Prefer ≤ the user's
+    // stored height so we don't upscale a user who set 480p to 1080p.
+    let best = STREAM_RESOLUTIONS_16_9[STREAM_RESOLUTIONS_16_9.length - 1];
+    for (const r of STREAM_RESOLUTIONS_16_9) {
+      if (r.height <= h) { best = r; break; }
+    }
+
+    this._diag(`resolution sanitized: ${w}x${h} is not a cam-platform-standard 16:9 size, using ${best.width}x${best.height} instead`);
+    console.warn(`[StreamEngine] Non-standard resolution ${w}x${h} coerced to ${best.width}x${best.height}`);
+    return { width: best.width, height: best.height };
   }
 
   // Correlate FFmpeg stderr errors with renderer-side telemetry to
@@ -1675,8 +1730,16 @@ class StreamEngine extends EventEmitter {
     this.ffmpegPath = resolvedPath;
 
     const {
-      videoBitrate, audioBitrate, resolution, fps,
+      videoBitrate, audioBitrate, fps,
     } = settings;
+    // Sanitize resolution BEFORE building any FFmpeg args or computing
+    // canStreamCopy. This is what unblocks stream-copy for users whose
+    // stored obsSettings.resolution came from the pre-v3.4.41 autoconfig
+    // bug (1920x1200 laptop displays -> 1728x1080 saved value). After
+    // sanitization, a source track at 1920x1080 matches the coerced
+    // target of 1920x1080 and canStreamCopy fires instead of invoking
+    // the libopenh264 re-encode that was starving MediaRecorder.
+    let resolution = this._sanitizeResolution(settings.resolution);
 
     const encoder = this._detectH264Encoder(settings.videoEncoder);
     if (settings.videoEncoder && encoder !== settings.videoEncoder) {
