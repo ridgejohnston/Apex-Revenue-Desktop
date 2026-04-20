@@ -2079,7 +2079,18 @@ class StreamEngine extends EventEmitter {
       typeof _srcW === 'number' && typeof _srcH === 'number' &&
       typeof _tgtW === 'number' && typeof _tgtH === 'number' &&
       _srcW === _tgtW && _srcH === _tgtH;
-    const _userForcedEncoder = !!settings.videoEncoder;
+    // Software encoder labels (OpenH264, x264) must NOT disable H.264 passthrough.
+    // When the browser already emits avc1/H.264 at the target resolution, `-c:v copy`
+    // remuxes into FLV — no FFmpeg video encode step. Treating any non-empty
+    // videoEncoder as "forced" made the Chaturbate preset (libopenh264) and the
+    // default store seed (libx264) force a full decode + re-encode, which starved
+    // MediaRecorder (~200 kbps vs target) and triggered RTMP -10053 kicks.
+    // Hardware encoders (NVENC, QSV, AMF, MF) still imply a deliberate re-encode path.
+    const _enc = settings.videoEncoder && String(settings.videoEncoder).trim();
+    const _encLower = _enc.toLowerCase();
+    const _userForcedEncoder = !!_enc &&
+      _encLower !== 'libopenh264' &&
+      _encLower !== 'libx264';
     // v3.4.47: overlays force re-encode. filter_complex can't run
     // through `-c:v copy` because copy bypasses the filter graph
     // entirely — packets are forwarded verbatim from input to output.
