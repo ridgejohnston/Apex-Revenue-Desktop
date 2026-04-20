@@ -162,4 +162,5 @@ module.exports = {
   // Getter so the AI Coach module can reuse the initialized client
   // rather than building its own. Returns null until init() runs.
   getBedrockClient: () => bedrockClient,
+  getS3Client: () => s3Client || null,
 };

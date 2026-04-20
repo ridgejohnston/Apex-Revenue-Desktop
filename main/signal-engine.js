@@ -13,9 +13,26 @@
  */
 
 const { ipcMain } = require('electron');
+const Store = require('electron-store');
 const { detectSignals } = require('../shared/signals');
 const { buildPrompts } = require('../shared/prompt-builder');
 const { scorePrompts } = require('../shared/prompt-scoring');
+
+// Same store as main.js — fan/signal profiling only after in-app ownership verification.
+let policyStore = null;
+function isPlatformOwnershipVerified() {
+  try {
+    if (!policyStore) {
+      policyStore = new Store({
+        name: 'apex-revenue-v2',
+        encryptionKey: 'apex-revenue-v2-enc-key-2025',
+      });
+    }
+    return !!policyStore.get('platformOwnershipVerified');
+  } catch {
+    return false;
+  }
+}
 
 class SignalEngine {
   constructor() {
@@ -60,6 +77,7 @@ class SignalEngine {
 
   handleLiveUpdate(snapshot) {
     if (!snapshot) return;
+    if (!isPlatformOwnershipVerified()) return;
 
     // detectSignals mutates viewerHistory (append + prune).
     const sig = detectSignals(

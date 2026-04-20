@@ -42,6 +42,8 @@ module.exports = {
   // S3
   S3_SESSIONS_BUCKET: 'apex-revenue-sessions-994438967527',
   S3_UPDATES_BUCKET: 'apex-revenue-app-994438967527',
+  /** Encrypted coach profile blobs per Cognito sub (client-side AES-GCM). */
+  S3_USER_DATA_BUCKET: 'apex-revenue-user-data',
 
   // ─── Bedrock model selection ────────────────────────────
   // ALL four AI features (AI Coach, AI Filters/Auto-Beauty,

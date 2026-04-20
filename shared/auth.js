@@ -86,4 +86,11 @@ function getEmail(session) {
   return claims?.email || null;
 }
 
-module.exports = { signIn, refreshSession, isSessionValid, getEmail, parseJwt };
+/** Cognito `sub` — stable per user, used for S3 prefixes and sync key material. */
+function getSub(session) {
+  if (!session?.idToken) return null;
+  const claims = parseJwt(session.idToken);
+  return claims?.sub || null;
+}
+
+module.exports = { signIn, refreshSession, isSessionValid, getEmail, getSub, parseJwt };

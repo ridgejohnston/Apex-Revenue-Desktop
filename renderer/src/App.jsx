@@ -770,16 +770,12 @@ export default function App() {
       );
       const streamSource = visibleInCategory.length > 0 ? visibleInCategory[0] : source;
       const current = (await api.store.get('obsSettings')) || {};
-      const patch =
-        streamSource.type === 'webcam'
-          ? {
-              videoSource: 'webcam',
-              webcamDevice:
-                streamSource.properties?.deviceLabel ||
-                streamSource.properties?.deviceName ||
-                '',
-            }
-          : { videoSource: 'screen' };
+      // Must use the same mapping as toggle/handleToggleCategory — the old
+      // webcam-vs-screen ternary set videoSource to 'screen' for Image,
+      // Media, Video URL, etc., so FFmpeg streamed gdigrab (desktop) while
+      // the preview showed the image. buildPatchForSource sets imagePath,
+      // mediaPath, videoUrl, slideshow fields the stream engine expects.
+      const patch = buildPatchForSource(streamSource);
       await api.store.set('obsSettings', { ...current, ...patch });
     }
   }, [activeSceneId, activateSource, scenes]);
@@ -826,7 +822,14 @@ export default function App() {
   // Keyed off the first-visible source's type. Each type contributes
   // its own property fields (webcamDevice, mediaPath, videoUrl, etc.)
   // that stream-engine.js reads in its per-type _build*Input methods.
-  const computeStreamPatchFromSources = (sourcesAfterToggle) => {
+  const computeStreamPatchFromSources = (sourcesAfterToggle, multiViewCfg) => {
+    const mv = multiViewCfg || {};
+    if (mv.multiOutputEnabled && mv.defaultWebcamSourceId) {
+      const primary = sourcesAfterToggle.find((s) => s.id === mv.defaultWebcamSourceId);
+      if (primary && getVideoCategory(primary.type)) {
+        return buildPatchForSource(primary);
+      }
+    }
     const firstVisibleVideo = sourcesAfterToggle.find(
       (s) => s.visible && getVideoCategory(s.type)
     );
@@ -921,7 +924,8 @@ export default function App() {
         return s;
       });
       const current = (await api.store.get('obsSettings')) || {};
-      const patch = computeStreamPatchFromSources(sourcesAfter);
+      const mv = await api.store.get('multiViewSettings');
+      const patch = computeStreamPatchFromSources(sourcesAfter, mv);
       await api.store.set('obsSettings', { ...current, ...patch });
     }
   }, [activeSceneId, scenes]);
@@ -975,10 +979,15 @@ export default function App() {
           .map((s) => api.sources.toggleVisible(activeSceneId, s.id))
       );
 
-      // Stream from the first source in this category (list order).
-      const first = inCategory[0];
       const current = (await api.store.get('obsSettings')) || {};
-      const patch = buildPatchForSource(first);
+      const mv = await api.store.get('multiViewSettings');
+      let patch;
+      if (category === 'webcam' && mv?.multiOutputEnabled && mv?.defaultWebcamSourceId) {
+        const prim = inCategory.find((s) => s.id === mv.defaultWebcamSourceId);
+        patch = buildPatchForSource(prim || inCategory[0]);
+      } else {
+        patch = buildPatchForSource(inCategory[0]);
+      }
       await api.store.set('obsSettings', { ...current, ...patch });
     }
   }, [activeSceneId, scenes]);

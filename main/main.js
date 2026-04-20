@@ -24,6 +24,8 @@ const EarningsTracker = require('../shared/earnings-tracker');
 const { VERSION } = require('../shared/apex-config');
 const signalEngine = require('./signal-engine');
 const cloudSync = require('./cloud-sync');
+const profileCloudSync = require('./profile-cloud-sync');
+const multiView = require('./multi-view');
 
 // ─── Persistent Store ──────────────────────────────────
 const store = new Store({
@@ -59,6 +61,28 @@ const store = new Store({
     activeSceneId: null,
     audioDevices: {},
     virtualCamEnabled: false,
+    // When true, the user has completed in-app platform ownership
+    // verification (Settings → Streaming). Cam-derived tips, fan leaderboard,
+    // whale history, and signal-engine profiling run only after this is set.
+    platformOwnershipVerified: false,
+    // Local-only — never uploaded; used only to derive AES key client-side.
+    profileSyncPassphrase: '',
+    multiViewSettings: {
+      enabled: false,
+      tipThresholdTokens: 25,
+      holdSeconds: 8,
+      defaultWebcamSourceId: null,
+      alternateSourceIds: [],
+      /** Primary stays on main RTMP; up to 8 extra RTMP outputs from Multi-View slots. */
+      multiOutputEnabled: false,
+      multiOutputs: Array.from({ length: 8 }, () => ({
+        sourceId: null,
+        triggerTokens: 25,
+        durationSeconds: 8,
+        streamUrl: '',
+        streamKey: '',
+      })),
+    },
   },
 });
 
@@ -175,6 +199,13 @@ ipcMain.handle('store:set', (_, key, value) => {
     }
   }
   const ret = store.set(key, value);
+  // Revoking platform ownership clears tip/fan session state so analytics
+  // cannot leak across the boundary.
+  if (key === 'platformOwnershipVerified' && value === false) {
+    const plat = tracker.platform;
+    tracker.reset();
+    if (plat) tracker.start(plat);
+  }
   // Keep Scene Properties (OBS panel) in sync when obsSettings is written
   // from any path (e.g. Settings → Streaming preset), not only local panel saves.
   if (key === 'obsSettings' && mainWindow && !mainWindow.isDestroyed()) {
@@ -723,16 +754,26 @@ ipcMain.on('cam:reload', () => { camView?.webContents.reload(); });
 
 // Cam → Main → Renderer relay
 ipcMain.on('cam:live-update', (_, data) => {
+  const ownershipOk = !!store.get('platformOwnershipVerified');
   tracker.updateViewers(data.viewers || 0);
-  if (data.tips) {
+  if (ownershipOk && data.tips) {
     data.tips.forEach((t) => tracker.addTip(t.username, t.amount, t.timestamp));
   }
   const snapshot = tracker.getSnapshot(data.viewers || 0);
-  snapshot.fans = data.fans || [];
+  if (ownershipOk) {
+    snapshot.fans = data.fans || [];
+  } else {
+    snapshot.fans = [];
+    snapshot.platformAnalyticsBlocked = true;
+    snapshot.platformAnalyticsBlockReason = 'ownership';
+  }
   mainWindow?.webContents.send('live-update', snapshot);
 
-  // AI trigger detection
-  checkAiTriggers(snapshot);
+  // AI trigger detection (uses tips/whales — only when ownership verified)
+  if (ownershipOk) checkAiTriggers(snapshot);
+  if (ownershipOk && data.tips?.length) {
+    try { multiView.onTipsReceived(data.tips); } catch (e) { console.warn('[multi-view]', e.message); }
+  }
 });
 
 ipcMain.on('cam:platform-detected', (_, platform) => {
@@ -844,8 +885,19 @@ ipcMain.handle('coach:profile-get', async () => {
   catch (err) { return { error: err?.message || String(err) }; }
 });
 ipcMain.handle('coach:profile-update', async (_, patch) => {
-  try { return { ok: true, profile: await coachProfile.update(patch || {}) }; }
-  catch (err) { return { ok: false, error: err?.message || String(err) }; }
+  try {
+    const profile = await coachProfile.update(patch || {});
+    profileCloudSync.afterLocalMutation().catch(() => {});
+    return { ok: true, profile };
+  } catch (err) { return { ok: false, error: err?.message || String(err) }; }
+});
+ipcMain.handle('profile-sync:sync-now', async () => {
+  try {
+    const r = await profileCloudSync.syncOnStartup();
+    return { ok: true, result: r, profile: await coachProfile.get() };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
 });
 ipcMain.handle('coach:profile-clear', async () => {
   try { await coachProfile.clear(); return { ok: true }; }
@@ -1479,6 +1531,11 @@ app.whenReady().then(async () => {
   // knowledge artifacts. Loads lazily on first get/update.
   try {
     coachProfile.init(app);
+    profileCloudSync.init({
+      store,
+      coachProfile,
+      getS3: () => awsServices.getS3Client(),
+    });
     console.log('[main] coach-profile initialized at', app.getPath('userData'));
   } catch (err) {
     console.error('[main] coach-profile init failed:', err.message);
@@ -1557,6 +1614,22 @@ app.whenReady().then(async () => {
       scenes: sceneManager.getAll(),
       activeId: sceneManager.getActiveId(),
     });
+  });
+
+  multiView.init({
+    store,
+    sceneManager,
+    getMainWindow: () => mainWindow,
+    streamEngine,
+  });
+
+  ipcMain.handle('multi-view:apply-primary-stream', () => {
+    try {
+      multiView.applyPrimaryStreamFromScene();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e?.message || String(e) };
+    }
   });
 
   // Stream status updates — forward to the renderer for the LIVE/FPS
@@ -1644,6 +1717,13 @@ app.whenReady().then(async () => {
   try { await awsServices.init(store); }
   catch (e) { console.error('AWS init error:', e); }
 
+  try {
+    const pr = await profileCloudSync.syncOnStartup();
+    if (pr && !pr.skipped) console.log('[profile-cloud-sync] startup:', pr.direction || pr);
+  } catch (e) {
+    console.warn('[profile-cloud-sync] startup sync failed:', e.message);
+  }
+
   // Check FFmpeg availability and notify renderer
   const ffmpegPath = ffmpegInstaller.findFFmpegPath();
   if (ffmpegPath) {
@@ -1717,6 +1797,14 @@ let updateReady = false;
 let downloadedInstallerPath = null; // captured from update-downloaded event
 
 function setupAutoUpdater() {
+  // Unsigned NSIS builds: Windows updater defaults to verifying Authenticode.
+  // Without a cert, verification fails and updates never become "available".
+  // build.win.verifyUpdateCodeSignature is also set false in package.json.
+  if (process.platform === 'win') {
+    try {
+      autoUpdater.verifyUpdateCodeSignature = false;
+    } catch (_) { /* older electron-updater */ }
+  }
   autoUpdater.autoDownload = true;
   // Disable auto-install on quit — we handle install explicitly via IPC
   // Having both autoInstallOnAppQuit=true AND calling quitAndInstall() causes a
@@ -1775,14 +1863,29 @@ function setupAutoUpdater() {
 // errors.log for every manual update check. We extract just the
 // fields the renderer actually needs.
 ipcMain.handle('updates:check', async () => {
+  const currentVersion = app.getVersion();
   try {
     const result = await autoUpdater.checkForUpdates();
-    if (!result || !result.updateInfo) {
-      return { ok: true, updateInfo: null };
+    // checkForUpdates() resolves null when the updater is inactive (unpackaged app
+    // without forceDevUpdateConfig) — no feed is queried, no events fire.
+    if (result == null) {
+      return {
+        ok: true,
+        currentVersion,
+        updaterInactive: true,
+        updateInfo: null,
+        isUpdateAvailable: false,
+      };
+    }
+    if (!result.updateInfo) {
+      return { ok: true, currentVersion, updaterInactive: false, updateInfo: null, isUpdateAvailable: false };
     }
     const { version, releaseDate, releaseName, releaseNotes } = result.updateInfo;
     return {
       ok: true,
+      currentVersion,
+      updaterInactive: false,
+      isUpdateAvailable: !!result.isUpdateAvailable,
       updateInfo: {
         version: version || null,
         releaseDate: releaseDate || null,
@@ -1793,7 +1896,7 @@ ipcMain.handle('updates:check', async () => {
       },
     };
   } catch (e) {
-    return { ok: false, error: e?.message || String(e) };
+    return { ok: false, currentVersion, error: e?.message || String(e) };
   }
 });
 

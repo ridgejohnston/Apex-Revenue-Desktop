@@ -11,11 +11,17 @@ export default function SettingsModal({ onClose }) {
     awsIotEnabled: false,
     awsPromptMode: 'bedrock',
     virtualCamEnabled: false,
+    // Live cam analytics (tips, fans, signals) require explicit verification
+    platformOwnershipVerified: false,
   });
   const [tab, setTab] = useState('general');
   const [appVersion, setAppVersion] = useState('...');
   const [updateCheck, setUpdateCheck] = useState({ state: 'idle' });
   const [chaturbatePresetNotice, setChaturbatePresetNotice] = useState('');
+  const [profileSyncEnabled, setProfileSyncEnabled] = useState(false);
+  const [profileSyncPass, setProfileSyncPass] = useState('');
+  const [profileSyncBusy, setProfileSyncBusy] = useState(false);
+  const [profileSyncMsg, setProfileSyncMsg] = useState('');
   // state: 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'ready' | 'error'
 
   // ─── AI Services Account (Settings → AWS/AI tab) ─────────
@@ -51,6 +57,15 @@ export default function SettingsModal({ onClose }) {
         const sub = await api.subscription?.get?.();
         setAiPlan(sub?.plan || 'free');
       } catch { setAiPlan(null); }
+
+      try {
+        const p = await api.coach.profileGet();
+        if (p && !p.error) setProfileSyncEnabled(!!p.syncEnabled);
+      } catch { setProfileSyncEnabled(false); }
+      try {
+        const phrase = await api.store.get('profileSyncPassphrase');
+        setProfileSyncPass(typeof phrase === 'string' ? phrase : '');
+      } catch { setProfileSyncPass(''); }
     })();
 
     // Mirror the global update status into our local state while modal is open
@@ -142,14 +157,37 @@ export default function SettingsModal({ onClose }) {
   const handleCheckUpdates = async () => {
     setUpdateCheck({ state: 'checking' });
     try {
-      await api.updates.check();
-      // Result comes back via the onStatus listener above;
-      // if nothing fires within 6s, assume up-to-date
-      setTimeout(() => {
+      const res = await api.updates.check();
+      if (!res.ok) {
+        setUpdateCheck({ state: 'error', message: res.error || 'Update check failed' });
+        return;
+      }
+      if (res.updaterInactive) {
+        setUpdateCheck({
+          state: 'error',
+          message: 'Updates apply to the installed app from the setup installer. Dev mode and unpackaged runs do not query the update server.',
+        });
+        return;
+      }
+      // When no newer semver exists, electron-updater still returns the feed's
+      // latest version — use it so "no update" is distinguishable from misconfiguration.
+      if (res.updateInfo?.version && !res.isUpdateAvailable) {
+        setUpdateCheck({
+          state: 'up-to-date',
+          feedVersion: res.updateInfo.version,
+          currentVersion: res.currentVersion,
+        });
+        return;
+      }
+      // Newer version: onStatus usually already fired (available / downloading).
+      // Fallback if events were missed (e.g. race): still show something sane.
+      if (res.isUpdateAvailable && res.updateInfo?.version) {
         setUpdateCheck((prev) =>
-          prev.state === 'checking' ? { state: 'up-to-date' } : prev
+          prev.state === 'checking' || prev.state === 'idle'
+            ? { state: 'available', version: res.updateInfo.version }
+            : prev
         );
-      }, 6000);
+      }
     } catch {
       setUpdateCheck({ state: 'error', message: 'Could not reach update server' });
     }
@@ -220,7 +258,15 @@ export default function SettingsModal({ onClose }) {
                 {/* Status feedback */}
                 {updateCheck.state === 'up-to-date' && (
                   <div style={{ fontSize: 10, color: 'var(--success, #2DD4A0)' }}>
-                    ✓ You're on the latest version.
+                    <div>✓ You're on the latest version.</div>
+                    {updateCheck.feedVersion != null && (
+                      <div style={{ marginTop: 4, color: 'var(--text-dim)', fontWeight: 400 }}>
+                        Installed v{updateCheck.currentVersion ?? appVersion} · Update feed lists v{updateCheck.feedVersion}
+                        {updateCheck.feedVersion === (updateCheck.currentVersion ?? appVersion) && (
+                          <span> — bump package.json version before building to publish an update.</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
                 {updateCheck.state === 'available' && (
@@ -324,6 +370,111 @@ export default function SettingsModal({ onClose }) {
                 )}
               </div>
 
+              <div style={{
+                padding: '12px 14px',
+                background: 'var(--bg-elevated, #111)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                marginBottom: 4,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 8, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+                  Profile sync (encrypted)
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
+                  Encrypts your coach profile with a passphrase only you know, then stores it under your Apex account on S3.
+                  Apex cannot read the contents — a bucket leak is ciphertext only. Use the same passphrase on each device.
+                </div>
+                <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'block', marginBottom: 6 }}>
+                  Passphrase (min 4 characters)
+                  <input
+                    type="password"
+                    className="input"
+                    style={{ width: '100%', marginTop: 4, fontSize: 11 }}
+                    value={profileSyncPass}
+                    onChange={(e) => setProfileSyncPass(e.target.value)}
+                    placeholder="Same on every device"
+                    autoComplete="off"
+                  />
+                </label>
+                <div className="flex gap-2" style={{ marginBottom: 10 }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    style={{ fontSize: 10 }}
+                    disabled={profileSyncBusy || profileSyncPass.length < 4}
+                    onClick={async () => {
+                      setProfileSyncBusy(true);
+                      setProfileSyncMsg('');
+                      try {
+                        await api.store.set('profileSyncPassphrase', profileSyncPass);
+                        setProfileSyncMsg('Passphrase saved on this computer.');
+                      } catch (e) {
+                        setProfileSyncMsg(e?.message || 'Could not save');
+                      } finally {
+                        setProfileSyncBusy(false);
+                      }
+                    }}
+                  >
+                    Save passphrase
+                  </button>
+                </div>
+                <SettingToggle
+                  label="Sync profile across devices (encrypted)"
+                  value={profileSyncEnabled}
+                  onChange={async () => {
+                    setProfileSyncBusy(true);
+                    setProfileSyncMsg('');
+                    try {
+                      const next = !profileSyncEnabled;
+                      if (next && profileSyncPass.length < 4) {
+                        setProfileSyncMsg('Set and save a passphrase (4+ characters) first.');
+                        return;
+                      }
+                      const r = await api.coach.profileUpdate({ syncEnabled: next });
+                      if (r.ok && r.profile) setProfileSyncEnabled(!!r.profile.syncEnabled);
+                      else setProfileSyncMsg(r.error || 'Update failed');
+                      if (next && profileSyncPass.length >= 4) {
+                        await api.store.set('profileSyncPassphrase', profileSyncPass);
+                        const s = await api.profileSync.syncNow();
+                        if (!s.ok) setProfileSyncMsg(s.error || 'Sync failed');
+                        else setProfileSyncMsg(s.result?.direction ? `Synced (${s.result.direction})` : 'Synced');
+                      }
+                    } catch (e) {
+                      setProfileSyncMsg(e?.message || 'Error');
+                    } finally {
+                      setProfileSyncBusy(false);
+                    }
+                  }}
+                />
+                <div className="flex gap-2" style={{ marginTop: 10 }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-accent"
+                    style={{ fontSize: 10 }}
+                    disabled={profileSyncBusy || !profileSyncEnabled || profileSyncPass.length < 4}
+                    onClick={async () => {
+                      setProfileSyncBusy(true);
+                      setProfileSyncMsg('');
+                      try {
+                        await api.store.set('profileSyncPassphrase', profileSyncPass);
+                        const s = await api.profileSync.syncNow();
+                        if (!s.ok) setProfileSyncMsg(s.error || 'Sync failed');
+                        else setProfileSyncMsg(s.result?.direction ? `Done (${s.result.direction})` : 'Done');
+                      } catch (e) {
+                        setProfileSyncMsg(e?.message || 'Error');
+                      } finally {
+                        setProfileSyncBusy(false);
+                      }
+                    }}
+                  >
+                    Sync now
+                  </button>
+                </div>
+                {profileSyncMsg && (
+                  <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 8 }}>{profileSyncMsg}</div>
+                )}
+              </div>
+
               {/* ── Service toggles (existing) ───────────── */}
               <SettingToggle label="AI Prompts (Bedrock)" value={settings.awsPromptMode === 'bedrock'} onChange={() => toggle('awsPromptMode')} />
               <SettingToggle label="Voice Alerts (Polly)" value={settings.awsVoiceEnabled} onChange={() => toggle('awsVoiceEnabled')} />
@@ -371,6 +522,39 @@ export default function SettingsModal({ onClose }) {
               </div>
 
               <SettingToggle label="Virtual Camera" value={settings.virtualCamEnabled} onChange={() => toggle('virtualCamEnabled')} />
+
+              <div style={{
+                padding: '12px 14px',
+                background: 'var(--bg-elevated, #111)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                marginTop: 4,
+              }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 6, letterSpacing: 0.4 }}>
+                  PLATFORM OWNERSHIP VERIFICATION
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.55, marginBottom: 10 }}>
+                  Tip streams, fan leaderboard, whale history, session analytics, and live signal prompts read metadata from the
+                  Platform browser panel. Turn this on only after you are logged into <strong>your own</strong> broadcaster
+                  room (or dashboard) in that panel so Apex processes data you are authorized to use.
+                </div>
+                <ol style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5, margin: '0 0 10px 18px', padding: 0 }}>
+                  <li>Open the Platform panel and sign in as the broadcaster.</li>
+                  <li>Go to your live room or broadcaster page as you would while streaming.</li>
+                  <li>Enable the toggle below to confirm and activate session analytics for this app.</li>
+                </ol>
+                <SettingToggle
+                  label="I verify platform ownership — enable live analytics & fan profiling"
+                  value={settings.platformOwnershipVerified}
+                  onChange={() => toggle('platformOwnershipVerified')}
+                />
+                {settings.platformOwnershipVerified && (
+                  <div style={{ fontSize: 9, color: 'var(--success, #2DD4A0)', marginTop: 8, lineHeight: 1.45 }}>
+                    ✓ Session analytics active. Turn off anytime to stop processing tips/fans and clear this session&apos;s counters.
+                  </div>
+                )}
+              </div>
+
               <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 8 }}>
                 FFmpeg is required for streaming and recording.
                 Place ffmpeg.exe in the app's ffmpeg/ folder or install it to your system PATH.

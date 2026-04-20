@@ -12,6 +12,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (key, value) => ipcRenderer.invoke('store:set', key, value),
   },
 
+  // Multi-View: sync primary webcam → obsSettings when dual-output toggles
+  multiView: {
+    applyPrimaryStream: () => ipcRenderer.invoke('multi-view:apply-primary-stream'),
+  },
+
   // ─── OBS Settings Autoconfig ─────────────────────────
   // detect() returns { recommendations, specs, encoderLabels } WITHOUT
   // saving — used by the UI to show the user what would change before
@@ -142,8 +147,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     knowledgeDelete: (filename) => ipcRenderer.invoke('coach:knowledge-delete', filename),
     knowledgeStats:  () => ipcRenderer.invoke('coach:knowledge-stats'),
     // Performer profile — niche, goals, hard NOs, regulars, style prefs.
-    // Changes here affect every subsequent coach response (injected
-    // into the system prompt). Local-only, not synced anywhere.
+    // Optional encrypted S3 sync when profile.syncEnabled (see profileSync).
     profileGet:    () => ipcRenderer.invoke('coach:profile-get'),
     profileUpdate: (patch) => ipcRenderer.invoke('coach:profile-update', patch),
     profileClear:  () => ipcRenderer.invoke('coach:profile-clear'),
@@ -251,6 +255,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // tiers both include unlimited broadcasting.
   broadcast: {
     getTodayUsage: () => ipcRenderer.invoke('broadcast:get-today-usage'),
+  },
+
+  // ─── Encrypted profile sync (S3, Cognito sub) ─────────
+  profileSync: {
+    syncNow: () => ipcRenderer.invoke('profile-sync:sync-now'),
   },
 
   // ─── Live Data ───────────────────────────────────────

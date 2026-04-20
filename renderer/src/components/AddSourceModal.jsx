@@ -13,6 +13,9 @@ const SOURCE_TYPES = [
   { type: 'text',            name: 'Text (GDI+)',       icon: '📝', category: 'Display', desc: 'Custom text overlay' },
   { type: 'browser',         name: 'Browser Source',    icon: '🌐', category: 'Display', desc: 'Embed a webpage/widget' },
   { type: 'color',           name: 'Color Source',      icon: '🎨', category: 'Display', desc: 'Solid color background' },
+  { type: 'color', preset: 'wifi', name: 'wifi',       icon: '📶', category: 'Display', desc: 'Solid color — preset title wifi' },
+  { type: 'color', preset: 'bluetooth', name: 'bluetooth', icon: '🔷', category: 'Display', desc: 'Solid color — preset title bluetooth' },
+  { type: 'color', preset: 'usb', name: 'usb',          icon: '🔌', category: 'Display', desc: 'Solid color — preset title usb' },
   { type: 'audio_input',     name: 'Audio Input',       icon: '🎤', category: 'Audio',  desc: 'Microphone/line input' },
   { type: 'audio_output',    name: 'Audio Output',      icon: '🔊', category: 'Audio',  desc: 'Desktop/system audio' },
   // Cam-site specific
@@ -91,8 +94,12 @@ export default function AddSourceModal({ onAdd, onClose }) {
                 </div>
                 {SOURCE_TYPES.filter((s) => s.category === cat).map((s) => (
                   <div
-                    key={s.type}
-                    className={`list-item ${selected?.type === s.type ? 'active' : ''}`}
+                    key={s.preset ? `${s.type}:${s.preset}` : s.type}
+                    className={`list-item ${
+                      selected?.type === s.type && (s.preset || '') === (selected?.preset || '')
+                        ? 'active'
+                        : ''
+                    }`}
                     onClick={() => handleSelect(s)}
                   >
                     <span style={{ fontSize: 13 }}>{s.icon}</span>

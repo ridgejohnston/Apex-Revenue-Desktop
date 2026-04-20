@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import BeautyPanel from './BeautyPanel';
 import CoachPanel from './CoachPanel';
+import MultiViewPanel from './MultiViewPanel';
 const { hasFeature } = require('../../../shared/feature-map');
 
 // Source-type → Stream Source category mapping. MUST stay in sync with
@@ -62,7 +63,7 @@ export default function RightPanel({
       {/* Panel Header */}
       <div className="section-header">
         <span>
-          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI Prompt Engine' : activeTab === 'coach' ? '💬 AI Coach' : activeTab === 'beauty' ? '✨ Filters' : '🔗 Toy Sync'}
+          {activeTab === 'obs' ? '🎬 Scene Properties' : activeTab === 'live' ? '📊 Live Analytics' : activeTab === 'fans' ? '👥 Fan Leaderboard' : activeTab === 'ai' ? '🤖 AI Prompt Engine' : activeTab === 'coach' ? '💬 AI Coach' : activeTab === 'beauty' ? '✨ Filters' : activeTab === 'multiview' ? '🎥 Multi-View' : '🔗 Toy Sync'}
         </span>
       </div>
 
@@ -80,6 +81,7 @@ export default function RightPanel({
           />
         )}
         {activeTab === 'sync' && <SyncPanel />}
+        {activeTab === 'multiview' && <MultiViewPanel activeScene={activeScene} />}
         {activeTab === 'beauty' && (
           <BeautyPanel
             config={beautyConfig}
@@ -844,6 +846,21 @@ function LivePanel({ liveData, sessionTimer, formatTime, platform, user, aiPromp
 
   return (
     <div className="flex-col gap-3">
+      {d.platformAnalyticsBlocked && (
+        <div style={{
+          padding: 10,
+          background: 'rgba(251, 191, 36, 0.08)',
+          border: '1px solid rgba(251, 191, 36, 0.35)',
+          borderRadius: 6,
+          fontSize: 10,
+          lineHeight: 1.5,
+          color: 'var(--text-secondary)',
+        }}>
+          <strong style={{ color: 'var(--warning, #fbbf24)' }}>Analytics paused.</strong>{' '}
+          Open <strong>Settings → Streaming</strong> and enable <strong>Platform ownership verification</strong> to use tips,
+          conversion, whales, and AI triggers from your session.
+        </div>
+      )}
       {/* AI Prompt Banner */}
       {aiPrompt && (
         <div style={{
@@ -948,11 +965,16 @@ function LivePanel({ liveData, sessionTimer, formatTime, platform, user, aiPromp
 // ─── Fans Sub-panel ─────────────────────────────────────
 function FansPanel({ liveData, whaleTiers }) {
   const fans = liveData?.fans || [];
+  const blocked = liveData?.platformAnalyticsBlocked;
 
   return (
     <div className="flex-col">
       <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>FAN LEADERBOARD</div>
-      {fans.length === 0 ? (
+      {blocked ? (
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', textAlign: 'center', padding: 16, lineHeight: 1.5 }}>
+          Fan leaderboard and behavior signals require <strong>Platform ownership verification</strong> in Settings → Streaming.
+        </div>
+      ) : fans.length === 0 ? (
         <div style={{ fontSize: 10, color: 'var(--text-dim)', textAlign: 'center', padding: 16 }}>
           No fans detected yet. Open a cam site to start tracking.
         </div>

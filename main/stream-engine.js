@@ -53,10 +53,15 @@ class StreamEngine extends EventEmitter {
     this.streamProcess = null;
     this.recordProcess = null;
     this.virtualCamProcess = null;
+    /** Up to 8 extra FFmpeg outputs (Multi-View): one process per slot index. */
+    this.alternateStreamProcesses = new Array(8).fill(null);
     this.status = {
       streaming: false,
       recording: false,
       virtualCam: false,
+      alternateRtmp: false,
+      alternateRtmpSlots: new Array(8).fill(false),
+      alternateRtmpErrors: new Array(8).fill(null),
       streamUptime: 0,
       recordDuration: 0,
       droppedFrames: 0,
@@ -2444,6 +2449,7 @@ class StreamEngine extends EventEmitter {
   // exiting — cleaner than SIGTERM. Followed by a 3s safety timeout
   // in case FFmpeg hangs on the RTMP server's FIN-ACK.
   stopStreamFromPipe() {
+    this.stopAlternateRtmpStream();
     if (this.streamProcess) {
       try {
         if (this.streamProcess.stdin && !this.streamProcess.stdin.destroyed) {
@@ -2494,7 +2500,147 @@ class StreamEngine extends EventEmitter {
     this.emit('status', { ...this.status });
   }
 
+  _syncAlternateAggregateStatus() {
+    const slots = this.status.alternateRtmpSlots;
+    this.status.alternateRtmp = Array.isArray(slots) && slots.some(Boolean);
+  }
+
+  /**
+   * Multi-View: RTMP encode for an extra physical camera on slot 0..7.
+   * Main broadcast stays on primary (renderer pipe); each slot is independent.
+   */
+  async startAlternateRtmpStream(slotIndex, opts) {
+    if (slotIndex < 0 || slotIndex > 7 || slotIndex !== Math.floor(slotIndex)) {
+      throw new Error('Alternate slot index must be 0–7.');
+    }
+    this.stopAlternateRtmpStreamSlot(slotIndex);
+
+    const resolvedPath = findFFmpegPath();
+    if (!resolvedPath) {
+      const err = new Error('FFmpeg is not installed.');
+      err.code = 'FFMPEG_NOT_INSTALLED';
+      throw err;
+    }
+    this.ffmpegPath = resolvedPath;
+
+    const {
+      webcamDevice,
+      streamUrl,
+      streamKey,
+      videoBitrate = 2500,
+      audioBitrate = 128,
+      fps = 30,
+      resolution,
+      videoEncoder,
+    } = opts || {};
+
+    if (!webcamDevice || String(webcamDevice).trim() === '') {
+      const err = new Error('Alternate stream needs a webcam device name.');
+      err.code = 'ALT_WEBCAM_MISSING';
+      throw err;
+    }
+
+    const destList = this._resolveDestinations({
+      streamUrl,
+      streamKey,
+      destinations: [],
+    });
+    if (destList.length !== 1) {
+      throw new Error('Alternate stream needs a valid RTMP URL and stream key.');
+    }
+
+    const res = this._sanitizeResolution(resolution || { width: 1920, height: 1080 });
+    const encoder = this._detectH264Encoder(videoEncoder);
+
+    const settings = { videoSource: 'webcam', webcamDevice };
+    const videoInputArgs = await this._videoInputArgs(settings, fps);
+    const outputArgs = this._buildOutputArgs(destList);
+
+    const args = [
+      ...videoInputArgs,
+      '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+      '-map', '0:v:0',
+      '-map', '1:a:0',
+      ...this._videoEncodeArgs(encoder, videoBitrate, fps, res),
+      '-c:a', 'aac',
+      '-b:a', `${audioBitrate}k`,
+      '-ar', '44100',
+      ...outputArgs,
+    ];
+
+    const proc = spawn(this.ffmpegPath, args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    this.alternateStreamProcesses[slotIndex] = proc;
+    this.status.alternateRtmpSlots[slotIndex] = true;
+    this.status.alternateRtmpErrors[slotIndex] = null;
+    this._syncAlternateAggregateStatus();
+
+    let stderrBuf = '';
+    proc.stderr.on('data', (chunk) => {
+      stderrBuf = (stderrBuf + chunk.toString()).slice(-6000);
+    });
+    proc.on('close', (code) => {
+      if (this.alternateStreamProcesses[slotIndex] === proc) {
+        this.alternateStreamProcesses[slotIndex] = null;
+        this.status.alternateRtmpSlots[slotIndex] = false;
+        if (code !== 0 && code !== null) {
+          const errLine = this._extractErrorLine(stderrBuf);
+          this.status.alternateRtmpErrors[slotIndex] = errLine || `FFmpeg exited with code ${code}`;
+          console.warn(`[StreamEngine] Alternate slot ${slotIndex}:`, this.status.alternateRtmpErrors[slotIndex]);
+        } else {
+          this.status.alternateRtmpErrors[slotIndex] = null;
+        }
+        this._syncAlternateAggregateStatus();
+        this.emit('status', { ...this.status });
+      }
+    });
+    proc.on('error', (err) => {
+      console.warn(`[StreamEngine] Alternate slot ${slotIndex} spawn error:`, err.message);
+      if (this.alternateStreamProcesses[slotIndex] === proc) {
+        this.alternateStreamProcesses[slotIndex] = null;
+        this.status.alternateRtmpSlots[slotIndex] = false;
+        this.status.alternateRtmpErrors[slotIndex] = err.message;
+        this._syncAlternateAggregateStatus();
+        this.emit('status', { ...this.status });
+      }
+    });
+
+    this.emit('status', { ...this.status });
+    return { ok: true };
+  }
+
+  stopAlternateRtmpStreamSlot(slotIndex, silent = false) {
+    if (slotIndex < 0 || slotIndex > 7) return;
+    const proc = this.alternateStreamProcesses[slotIndex];
+    if (!proc) return;
+    try {
+      proc.kill('SIGTERM');
+    } catch (e) {
+      /* ignore */
+    }
+    this.alternateStreamProcesses[slotIndex] = null;
+    this.status.alternateRtmpSlots[slotIndex] = false;
+    this.status.alternateRtmpErrors[slotIndex] = null;
+    this._syncAlternateAggregateStatus();
+    if (!silent) this.emit('status', { ...this.status });
+  }
+
+  /** @deprecated use stopAlternateRtmpStreamSlot — kept for any old callers */
+  stopAlternateRtmpStream() {
+    this.stopAllAlternateRtmpStreams();
+  }
+
+  stopAllAlternateRtmpStreams() {
+    for (let i = 0; i < 8; i++) {
+      this.stopAlternateRtmpStreamSlot(i, true);
+    }
+    this.emit('status', { ...this.status });
+  }
+
   stopStream() {
+    this.stopAllAlternateRtmpStreams();
     if (this.streamProcess) {
       this.streamProcess.stdin.write('q');
       setTimeout(() => {
@@ -2656,6 +2802,7 @@ class StreamEngine extends EventEmitter {
   }
 
   cleanup() {
+    this.stopAlternateRtmpStream();
     this.stopStream();
     this.stopRecording();
     this.stopVirtualCam();

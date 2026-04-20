@@ -11,7 +11,9 @@
  *     One file.
  *
  * Storage decision: electron-store pattern (plain JSON file under
- * Electron's userData directory). NOT DynamoDB. Rationale:
+ * Electron's userData directory). NOT DynamoDB. Optional encrypted
+ * multi-device sync via main/profile-cloud-sync.js when syncEnabled.
+ * Rationale:
  *
  *   1. PRIVACY — performer profile data is the most sensitive in the
  *      app. Niche, hard NOs, whale names, comfort boundaries. Every
@@ -83,6 +85,8 @@ function _emptyProfile() {
       tone: null,                // 'direct' | 'warm' | 'playful' | null
       length: null,              // 'brief' | 'standard' | 'detailed' | null
     },
+    // Opt-in: encrypted sync to S3 (see main/profile-cloud-sync.js)
+    syncEnabled: false,
   };
 }
 
@@ -103,6 +107,7 @@ async function get() {
     return {
       ...defaults,
       ...parsed,
+      syncEnabled: typeof parsed.syncEnabled === 'boolean' ? parsed.syncEnabled : defaults.syncEnabled,
       niche:       { ...defaults.niche,       ...(parsed.niche       || {}) },
       goals:       { ...defaults.goals,       ...(parsed.goals       || {}) },
       preferences: { ...defaults.preferences, ...(parsed.preferences || {}) },
