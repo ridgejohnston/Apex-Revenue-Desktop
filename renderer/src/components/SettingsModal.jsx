@@ -116,7 +116,7 @@ export default function SettingsModal({ onClose }) {
   };
 
   // Chaturbate RTMP + conservative video targets to reduce disconnects
-  // (1080p30, software OpenH264, moderate bitrate). Does not overwrite stream key.
+  // (1080p30, software OpenH264; 4000 kbps matches Chaturbate ingest cap). Does not overwrite stream key.
   const applyChaturbateSafePreset = async () => {
     setChaturbatePresetNotice('');
     try {
@@ -125,14 +125,14 @@ export default function SettingsModal({ onClose }) {
         streamUrl: 'rtmp://global.live.mmcdn.com/live-origin',
         resolution: { width: 1920, height: 1080 },
         fps: 30,
-        videoBitrate: 4500,
+        videoBitrate: 4000,
         videoEncoder: 'libopenh264',
         preset: 'veryfast',
         audioBitrate: 128,
       };
       await api.store.set('obsSettings', { ...cur, ...patch });
       setChaturbatePresetNotice(
-        'Chaturbate-safe preset applied: 1080p30, 4500 kbps video, OpenH264. Your stream key was not changed.',
+        'Chaturbate-safe preset applied: 1080p30, 4000 kbps video (platform max), OpenH264. Your stream key was not changed.',
       );
     } catch {
       setChaturbatePresetNotice('Could not apply preset. Try again or edit values in Scene Properties.');
@@ -339,7 +339,7 @@ export default function SettingsModal({ onClose }) {
               <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5 }}>
                 Full stream controls (URL, key, resolution, encoder) live in{' '}
                 <strong>Scene Properties</strong> on the right. Use the preset below for a
-                stable baseline on Chaturbate (moderate bitrate for 1080p; lower in Scene Properties if your uplink is tight).
+                stable baseline on Chaturbate (video capped at 4000 kbps — their ingest maximum).
               </div>
 
               <div style={{
@@ -352,7 +352,7 @@ export default function SettingsModal({ onClose }) {
                   CHATURBATE-SAFE PRESET
                 </div>
                 <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
-                  Sets RTMP URL to Chaturbate origin, 1920×1080 @ 30&nbsp;fps, 4500&nbsp;kbps video,
+                  Sets RTMP URL to Chaturbate origin, 1920×1080 @ 30&nbsp;fps, 4000&nbsp;kbps video (Chaturbate max),
                   OpenH264 (software), veryfast preset, 128&nbsp;kbps audio. Your stream key is left unchanged.
                 </div>
                 <button
