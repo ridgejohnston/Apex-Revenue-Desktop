@@ -962,14 +962,50 @@ export default function App() {
         // get dropped — Matroska parsers are unforgiving about
         // missing EBML headers.
         //
+        // Pre-compute the MediaRecorder mime + source resolution BEFORE
+        // startPipe so the stream engine can pick the stream-copy path
+        // when conditions are met. The main-side branch (stream-engine
+        // startStreamFromPipe) gates on settings._pipeCodec === 'h264'
+        // AND _pipeSrcWidth/Height matching the configured resolution;
+        // without those three fields it falls through to re-encode.
+        //
+        // v3.4.39 stream-pipe logs showed FFmpeg re-encoding 1920x1080
+        // H.264 → 1728x1080 libopenh264 (scaled AND software re-encoded)
+        // even though MediaRecorder was delivering hardware-encoded H.264
+        // at exactly the target resolution. That's pure waste of iGPU
+        // headroom, and it's what produced the GPU_BOUND render loop
+        // warnings that starved MediaRecorder and triggered Chaturbate's
+        // -10053 disconnect. Stream-copy skips the decode+encode round
+        // trip entirely and lets the browser's hardware H.264 packets
+        // flow straight into the RTMP muxer.
+        const mimeType = pickWebmMimeType();
+        const pipeCodec = /avc1|h264/i.test(mimeType) ? 'h264' : null;
+        let pipeSrcWidth = null;
+        let pipeSrcHeight = null;
+        try {
+          const preVTracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
+          const preVSettings = preVTracks[0]?.getSettings?.() || {};
+          if (Number.isFinite(preVSettings.width))  pipeSrcWidth  = preVSettings.width;
+          if (Number.isFinite(preVSettings.height)) pipeSrcHeight = preVSettings.height;
+        } catch {
+          // getSettings can throw on some track types — non-fatal,
+          // just means stream engine will re-encode instead of copy.
+        }
+
         // Pass pipeHasAudio through settings so the stream engine
         // knows whether to map input 0's audio track or use the
         // silent-lavfi fallback. (Setting a transient field on the
         // settings object avoids changing the IPC shape.)
-        await api.stream.startPipe({ ...settings, _pipeHasAudio: hasAudio });
+        await api.stream.startPipe({
+          ...settings,
+          _pipeHasAudio:  hasAudio,
+          _pipeCodec:     pipeCodec,
+          _pipeSrcWidth:  pipeSrcWidth,
+          _pipeSrcHeight: pipeSrcHeight,
+        });
 
-        const mimeType = pickWebmMimeType();
-        console.log('[Apex] Starting webcam pipe-stream, mimeType:', mimeType);
+        console.log('[Apex] Starting webcam pipe-stream, mimeType:', mimeType,
+          `| src=${pipeSrcWidth}x${pipeSrcHeight} codec=${pipeCodec || 'unknown'}`);
 
         const recorderOpts = {
           mimeType,
