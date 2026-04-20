@@ -451,6 +451,48 @@ async function maybeFirstRunObsAutoconfig() {
           store.set('obsSettings', { ...current, _bitrateCappedAt: new Date().toISOString() });
         }
       }
+
+      // v3.4.42 one-time migration: normalize stored resolution to the
+      // 16:9 cam-platform whitelist. The pre-v3.4.41 autoconfig seeded
+      // stored obsSettings.resolution by downscaling the display to a
+      // 1080p height ceiling while preserving aspect. On 16:10 laptop
+      // displays (1920x1200, very common on HP/Dell/Lenovo business
+      // machines) that produced {1728, 1080} — not a resolution any
+      // cam RTMP ingest accepts. v3.4.41 added a stream-time sanitizer
+      // that coerces at ffmpeg-arg-build time, which fixes the stream
+      // but leaves the stored value stale: the Settings > Resolution
+      // dropdown can't match 1728x1080 against its {1920x1080, 1280x720,
+      // 854x480, 640x360} options and shows no selection. This
+      // migration rewrites the stored value once so the dropdown
+      // reflects reality. Runs ONCE per install, stamped by
+      // _resolutionNormalizedAt.
+      //
+      // Idempotent: if the stored resolution is already on the
+      // whitelist, we only write the stamp (no functional change).
+      if (!current._resolutionNormalizedAt) {
+        const res = current.resolution;
+        const refreshed = store.get('obsSettings') || current;
+        const onWhitelist = res && autoconfig.STREAM_RESOLUTIONS_16_9.some(
+          (r) => r.width === res.width && r.height === res.height
+        );
+        if (res && !onWhitelist) {
+          const coerced = autoconfig.pickStreamResolution(res.height || 1080);
+          store.set('obsSettings', {
+            ...refreshed,
+            resolution: coerced,
+            _resolutionNormalizedAt: new Date().toISOString(),
+            _resolutionNormalizedFrom: { width: res.width, height: res.height },
+          });
+          console.log(
+            `[Apex] v3.4.42 migration: normalized stored resolution ${res.width}x${res.height} -> ${coerced.width}x${coerced.height} (16:9 cam-platform whitelist)`
+          );
+        } else {
+          store.set('obsSettings', {
+            ...refreshed,
+            _resolutionNormalizedAt: new Date().toISOString(),
+          });
+        }
+      }
       return;
     }
 
@@ -473,6 +515,7 @@ async function maybeFirstRunObsAutoconfig() {
       outputPath:   current.outputPath   || recommendations.outputPath,
       _autoconfiguredAt: new Date().toISOString(),
       _bitrateCappedAt:  new Date().toISOString(),
+      _resolutionNormalizedAt: new Date().toISOString(),
       _autoconfigSpecs: specs,
     };
     store.set('obsSettings', merged);
