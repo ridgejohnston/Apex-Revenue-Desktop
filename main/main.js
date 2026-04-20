@@ -174,7 +174,13 @@ ipcMain.handle('store:set', (_, key, value) => {
       value = { ...value, _encoderUserSelectedAt: new Date().toISOString() };
     }
   }
-  return store.set(key, value);
+  const ret = store.set(key, value);
+  // Keep Scene Properties (OBS panel) in sync when obsSettings is written
+  // from any path (e.g. Settings → Streaming preset), not only local panel saves.
+  if (key === 'obsSettings' && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('obs-settings:auto-refreshed', { source: 'store:set' });
+  }
+  return ret;
 });
 
 // Window controls

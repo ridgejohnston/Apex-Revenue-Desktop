@@ -1475,7 +1475,7 @@ class StreamEngine extends EventEmitter {
     let fpsEntry = null;
     let mrEntry  = null;
     try {
-      const fpsMatches = errorLogger.findRecent('beauty-filter', /Render loop slow/, 15000);
+      const fpsMatches = errorLogger.findRecent('beauty-filter', /Render loop/, 15000);
       if (fpsMatches.length) fpsEntry = fpsMatches[fpsMatches.length - 1];
       const mrMatches  = errorLogger.findRecent('media-recorder', /MediaRecorder output/, 15000);
       if (mrMatches.length)  mrEntry  = mrMatches[mrMatches.length - 1];

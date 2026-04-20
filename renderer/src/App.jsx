@@ -223,6 +223,9 @@ export default function App() {
   const [beautyConfig, setBeautyConfig] = useState(BEAUTY_DEFAULTS);
   const beautyConfigRef = useRef(BEAUTY_DEFAULTS);
   const beautyFiltersRef = useRef({});   // sourceId → BeautyFilter
+  // Per-stream temporary background-mode downgrades applied for stability.
+  // Keyed by sourceId so we can restore the user's prior bgMode on stop.
+  const streamBgModeRestoreRef = useRef({});
   // Set of source IDs currently being activated (between the initial
   // guard check and the final sourceStreamsRef write). Prevents a race
   // where two concurrent activateSource() calls for the same source
@@ -1021,6 +1024,18 @@ export default function App() {
     for (const f of Object.values(beautyFiltersRef.current || {})) {
       try { f?.setHighFrequencyLogging?.(false); } catch {}
     }
+    // Restore any temporary stream-safe background-mode downgrades.
+    for (const [sourceId, priorBgMode] of Object.entries(streamBgModeRestoreRef.current || {})) {
+      const f = beautyFiltersRef.current[sourceId];
+      if (!f) continue;
+      try {
+        f.update({
+          bgMode: priorBgMode,
+          mediapipeInstalled: mediapipeInstalledRef.current,
+        });
+      } catch {}
+    }
+    streamBgModeRestoreRef.current = {};
     if (!r) return;
     try {
       if (r.state !== 'inactive') r.stop();
@@ -1468,6 +1483,37 @@ export default function App() {
           // whether the renderer is GPU_BOUND, RAF_THROTTLED (e.g.
           // occluded), or healthy when MediaRecorder starves.
           try { f?.setHighFrequencyLogging?.(true); } catch {}
+        }
+        // Stream-safe filter fallback for integrated GPUs:
+        // background segmentation is the heaviest filter path and is the
+        // most common trigger for stream starvation/kicks on low-end iGPUs.
+        // Keep core beauty adjustments enabled, but temporarily disable only
+        // background effects while streaming. Restore on stop.
+        if (isLowEndGpu()) {
+          for (const [sourceId, f] of Object.entries(beautyFiltersRef.current || {})) {
+            const priorBgMode = f?.config?.bgMode ?? 0;
+            if (priorBgMode > 0) {
+              streamBgModeRestoreRef.current[sourceId] = priorBgMode;
+              try {
+                f.update({
+                  bgMode: 0,
+                  mediapipeInstalled: mediapipeInstalledRef.current,
+                });
+              } catch {}
+            }
+          }
+          if (Object.keys(streamBgModeRestoreRef.current).length > 0) {
+            const msg =
+              'Stream-safe mode enabled: background effects were temporarily disabled ' +
+              'for this stream to prevent platform disconnects on integrated GPUs.';
+            console.warn('[Apex]', msg);
+            try {
+              window.electronAPI?.errors?.log?.('warn', 'stream-advisory', msg, {
+                feature: 'stream_safe_filters',
+                gpuTier: 'integrated',
+              });
+            } catch {}
+          }
         }
         recorder.start(250);
         webcamRecorderRef.current = recorder;

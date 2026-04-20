@@ -15,6 +15,7 @@ export default function SettingsModal({ onClose }) {
   const [tab, setTab] = useState('general');
   const [appVersion, setAppVersion] = useState('...');
   const [updateCheck, setUpdateCheck] = useState({ state: 'idle' });
+  const [chaturbatePresetNotice, setChaturbatePresetNotice] = useState('');
   // state: 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'ready' | 'error'
 
   // ─── AI Services Account (Settings → AWS/AI tab) ─────────
@@ -112,6 +113,30 @@ export default function SettingsModal({ onClose }) {
     const newVal = !settings[key];
     setSettings((prev) => ({ ...prev, [key]: newVal }));
     await api.store.set(key, newVal);
+  };
+
+  // Chaturbate RTMP + conservative video targets to reduce disconnects
+  // (720p30, software OpenH264, moderate bitrate). Does not overwrite stream key.
+  const applyChaturbateSafePreset = async () => {
+    setChaturbatePresetNotice('');
+    try {
+      const cur = (await api.store.get('obsSettings')) || {};
+      const patch = {
+        streamUrl: 'rtmp://global.live.mmcdn.com/live-origin',
+        resolution: { width: 1280, height: 720 },
+        fps: 30,
+        videoBitrate: 3000,
+        videoEncoder: 'libopenh264',
+        preset: 'veryfast',
+        audioBitrate: 128,
+      };
+      await api.store.set('obsSettings', { ...cur, ...patch });
+      setChaturbatePresetNotice(
+        'Chaturbate-safe preset applied: 720p30, 3000 kbps video, OpenH264. Your stream key was not changed.',
+      );
+    } catch {
+      setChaturbatePresetNotice('Could not apply preset. Try again or edit values in Scene Properties.');
+    }
   };
 
   const handleCheckUpdates = async () => {
@@ -311,9 +336,40 @@ export default function SettingsModal({ onClose }) {
 
           {tab === 'streaming' && (
             <div className="flex-col gap-3">
-              <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                Streaming settings are available in the OBS properties panel (right side).
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5 }}>
+                Full stream controls (URL, key, resolution, encoder) live in{' '}
+                <strong>Scene Properties</strong> on the right. Use the preset below for a
+                stable baseline on Chaturbate (conservative bitrate and 720p to ease CPU/GPU load).
               </div>
+
+              <div style={{
+                padding: '12px 14px',
+                background: 'var(--bg-elevated, #111)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+              }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 8, letterSpacing: 0.4 }}>
+                  CHATURBATE-SAFE PRESET
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
+                  Sets RTMP URL to Chaturbate origin, 1280×720 @ 30&nbsp;fps, 3000&nbsp;kbps video,
+                  OpenH264 (software), veryfast preset, 128&nbsp;kbps audio. Your stream key is left unchanged.
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-accent"
+                  style={{ fontSize: 10 }}
+                  onClick={applyChaturbateSafePreset}
+                >
+                  Apply Chaturbate-safe preset
+                </button>
+                {chaturbatePresetNotice && (
+                  <div style={{ fontSize: 10, color: 'var(--success, #2DD4A0)', marginTop: 10, lineHeight: 1.45 }}>
+                    {chaturbatePresetNotice}
+                  </div>
+                )}
+              </div>
+
               <SettingToggle label="Virtual Camera" value={settings.virtualCamEnabled} onChange={() => toggle('virtualCamEnabled')} />
               <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 8 }}>
                 FFmpeg is required for streaming and recording.
