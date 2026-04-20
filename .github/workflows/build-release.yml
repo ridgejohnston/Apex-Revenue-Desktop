@@ -1,9 +1,22 @@
+# Builds Windows installers on every push to main and publishes artifacts + latest.yml
+# to S3 so electron-updater (generic provider) can serve auto-updates.
+#
+# Requirements for a *new* version clients will download:
+#   1. Bump "version" in package.json before merging to main.
+#   2. GitHub repo secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (S3 PutObject on the bucket).
+#   3. Bucket must allow public (or CloudFront) GET for objects — see package.json build.publish.url.
+
 name: Build & Release
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-s3-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-windows:
@@ -32,7 +45,20 @@ jobs:
       - name: Build installer
         run: npx electron-builder --win --publish never
 
-      - name: Upload to S3
+      - name: Verify update metadata exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "dist/latest.yml")) {
+            Write-Error "dist/latest.yml missing — electron-builder did not emit update metadata. Auto-update will break."
+            exit 1
+          }
+          $exes = Get-ChildItem dist -File -Filter "*.exe"
+          if ($exes.Count -lt 1) {
+            Write-Error "No .exe artifacts in dist/."
+            exit 1
+          }
+
+      - name: Upload installers and sidecars to S3
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -42,12 +68,25 @@ jobs:
           $version = (Get-Content package.json | ConvertFrom-Json).version
           $bucket  = "s3://apex-revenue-updates-994438967527"
 
-          # Upload all build artifacts (exes + blockmaps) except the unpacked folder
-          Get-ChildItem dist -File | Where-Object { $_.Name -notlike "builder-*" } | ForEach-Object {
-            Write-Host "Uploading $($_.Name)..."
-            aws s3 cp $_.FullName "$bucket/$($_.Name)"
+          # Everything the updater needs except latest.yml (published last).
+          # Includes .exe, .blockmap (if enabled later), auxiliary yml; excludes builder-* noise.
+          $artifacts = Get-ChildItem dist -File | Where-Object {
+            $_.Name -notlike "builder-*" -and $_.Name -ne "latest.yml"
+          }
+          if ($artifacts.Count -eq 0) {
+            Write-Error "No artifacts to upload under dist/"
+            exit 1
+          }
+          foreach ($f in $artifacts) {
+            Write-Host "Uploading $($f.Name)..."
+            aws s3 cp $f.FullName "$bucket/$($f.Name)" --only-show-errors
           }
 
-          # Upload latest.yml last — this is what triggers the update on installed apps
-          Write-Host "Publishing latest.yml (v$version)..."
-          aws s3 cp dist\latest.yml "$bucket/latest.yml"
+          # latest.yml last — points clients at the new installers; short cache so CDNs pick up changes quickly
+          Write-Host "Publishing latest.yml (v$version) — this enables auto-update..."
+          aws s3 cp dist\latest.yml "$bucket/latest.yml" `
+            --cache-control "max-age=120,must-revalidate" `
+            --content-type "text/yaml; charset=utf-8" `
+            --only-show-errors
+
+          Write-Host "Done. Update feed: https://apex-revenue-updates-994438967527.s3.amazonaws.com/latest.yml"
