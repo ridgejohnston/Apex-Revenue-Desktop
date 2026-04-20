@@ -153,13 +153,72 @@ function pickStreamResolution(physicalHeight) {
   return STREAM_RESOLUTIONS_16_9[STREAM_RESOLUTIONS_16_9.length - 1];
 }
 
+// ─── GPU tier classification ──────────────────────────────────
+// Mirrors renderer/src/gpu-tier.js but lives here so the main-process
+// autoconfig can classify without an IPC round-trip. When updating
+// heuristics, update BOTH files — the renderer uses its copy for the
+// beauty-filter skipSegmenterPrewarm decision and to log gpu info at
+// app start; autoconfig uses its copy to pick a conservative default
+// resolution for the first-run seed.
+const _DISCRETE_PATTERNS = [
+  /GeForce/i,
+  /Quadro/i,
+  /\bTesla\b/i,
+  /\bRTX\b/i,
+  /\bGTX\b/i,
+  /NVIDIA/i,
+  /Radeon (RX|Pro) [0-9]/i,
+  /\bArc\s*A[0-9]/i,
+];
+const _INTEGRATED_PATTERNS = [
+  /Intel\(?R?\)?\s+(HD|UHD|Iris|Xe)/i,
+  /Intel\(?R?\)?\s+Graphics\s*[36789][0-9]{2}/i,
+  /Intel.* (HD|UHD|Iris|Xe) Graphics/i,
+  /AMD.* Radeon.* Vega.* Graphics/i,
+  /Radeon\s*\(TM\)\s*Graphics/i,
+  /Apple (M[1-9]|GPU)/i,
+];
+
+function classifyRendererString(renderer) {
+  if (!renderer || typeof renderer !== 'string') return 'unknown';
+  for (const re of _DISCRETE_PATTERNS)   if (re.test(renderer)) return 'discrete';
+  for (const re of _INTEGRATED_PATTERNS) if (re.test(renderer)) return 'integrated';
+  return 'unknown';
+}
+
 /**
- * Recommend a stream resolution based on the primary display.
- * Always returns one of STREAM_RESOLUTIONS_16_9 — never a derived
- * resolution that depends on display aspect ratio. See pickStreamResolution
- * for the reasoning.
+ * Classify the primary GPU from Electron's app.getGPUInfo('basic')
+ * result. The structure is:
+ *   { auxAttributes: { glRenderer, glVendor, ... }, gpuDevice: [...] }
+ * We prefer glRenderer because the same regex heuristics apply to both
+ * the renderer-side UNMASKED_RENDERER_WEBGL string and this one —
+ * Chromium populates both from the same source.
+ *
+ * Returns 'integrated' | 'discrete' | 'unknown'. Caller should treat
+ * 'unknown' as a hint to be conservative (same way renderer's
+ * isLowEndGpu() does).
  */
-function recommendResolution(screenModule) {
+function classifyGpuTier(gpuInfo) {
+  if (!gpuInfo || typeof gpuInfo !== 'object') return 'unknown';
+  const renderer = gpuInfo.auxAttributes && gpuInfo.auxAttributes.glRenderer;
+  return classifyRendererString(renderer);
+}
+
+/**
+ * Recommend a stream resolution based on the primary display AND the
+ * detected GPU tier. Integrated GPUs (Intel HD/UHD/Iris/Xe, AMD Vega
+ * on Ryzen APUs, Apple Silicon) can't sustain the combination of
+ * WebGL bilateral blur + MediaPipe segmentation + hardware H.264
+ * encode at 1080p30 without stalling MediaRecorder and triggering
+ * Chaturbate's -10053 kick. Cap their default at 720p; discrete
+ * users get 1080p. Either group can manually change via Settings.
+ *
+ * Always returns one of STREAM_RESOLUTIONS_16_9 — never a derived
+ * resolution that depends on display aspect ratio. See
+ * pickStreamResolution for the reasoning.
+ */
+function recommendResolution(screenModule, gpuTier) {
+  let physicalHeight;
   try {
     const primary = screenModule.getPrimaryDisplay();
     // Electron's display.size returns DIP (device-independent pixels,
@@ -169,11 +228,20 @@ function recommendResolution(screenModule) {
     // resolution we can stream at; we never stream at the display's
     // raw dimensions.
     const scale = primary.scaleFactor || 1;
-    const physicalHeight = Math.round(primary.size.height * scale);
-    return pickStreamResolution(physicalHeight);
+    physicalHeight = Math.round(primary.size.height * scale);
   } catch {
     return { width: 1920, height: 1080 };
   }
+
+  // Cap at 720p for integrated GPUs. 'unknown' stays on 1080p because
+  // we don't want to punish users whose Chromium build stripped the
+  // debug-renderer extension — most of those are on capable hardware
+  // behind a privacy-hardened browser. (If we later see stream failures
+  // from 'unknown' users, we can flip this.)
+  if (gpuTier === 'integrated' && physicalHeight >= 720) {
+    return { width: 1280, height: 720 };
+  }
+  return pickStreamResolution(physicalHeight);
 }
 
 /**
@@ -223,7 +291,7 @@ function recommendBitrate(height, encoder) {
  *   • main.js on first launch (seed-and-save)
  *   • IPC handler 'obs-settings:detect' (re-run on user request)
  */
-async function detectRecommendedObsSettings({ ffmpegPath, screenModule, videosPath }) {
+async function detectRecommendedObsSettings({ ffmpegPath, screenModule, videosPath, gpuInfo }) {
   const availableEncoders = await detectAvailableEncoders(ffmpegPath);
 
   // Pick the first available encoder from our preference order.
@@ -238,7 +306,14 @@ async function detectRecommendedObsSettings({ ffmpegPath, screenModule, videosPa
   // libx264 which is not in our bundle, which is how Ridge ended up with
   // an unusable NVENC setting when the probe couldn't run pre-install.
   const encoder = availableEncoders[0] || 'libopenh264';
-  const resolution = recommendResolution(screenModule);
+  // Classify GPU tier from Electron's gpuInfo. When main.js passes
+  // through app.getGPUInfo('basic'), auxAttributes.glRenderer gets us
+  // the same signal that renderer-side gpu-tier.js classifies from
+  // UNMASKED_RENDERER_WEBGL. When gpuInfo is absent (legacy caller,
+  // or detection failed), the tier is 'unknown' and we default to
+  // 1080p — conservative on recommendResolution, not on fps.
+  const gpuTier = classifyGpuTier(gpuInfo);
+  const resolution = recommendResolution(screenModule, gpuTier);
   const videoBitrate = recommendBitrate(resolution.height, encoder);
 
   const cpus = os.cpus();
@@ -249,6 +324,8 @@ async function detectRecommendedObsSettings({ ffmpegPath, screenModule, videosPa
     platform: `${os.platform()} ${os.release()}`,
     detectedEncoders: availableEncoders,
     ffmpegAvailable: availableEncoders.length > 0,
+    gpuTier,
+    glRenderer: gpuInfo?.auxAttributes?.glRenderer || null,
   };
 
   return {
@@ -272,6 +349,8 @@ module.exports = {
   recommendBitrate,
   recommendResolution,
   pickStreamResolution,
+  classifyGpuTier,
+  classifyRendererString,
   STREAM_RESOLUTIONS_16_9,
   ENCODER_LABELS,
   ENCODER_PREFERENCE,

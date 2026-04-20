@@ -410,6 +410,20 @@ async function ensureFFmpegInstalled() {
 // button in the OBS panel is the only path that overwrites user choices,
 // and it goes through 'obs-settings:apply-detected' with explicit
 // user confirmation.
+// v3.4.43: shared GPU probe for autoconfig call sites. app.getGPUInfo
+// populates from a Chromium internal cache after the GPU process is up,
+// so this call is fast but still async. Returns null on any failure —
+// the autoconfig classifier interprets null as 'unknown' tier and picks
+// 1080p defaults (the pre-v3.4.43 behavior). Never throws.
+async function _gpuInfoForAutoconfig() {
+  try {
+    return await app.getGPUInfo('basic');
+  } catch (err) {
+    console.warn('[Apex] app.getGPUInfo failed, autoconfig defaults to unknown GPU tier:', err.message);
+    return null;
+  }
+}
+
 async function maybeFirstRunObsAutoconfig() {
   try {
     const current = store.get('obsSettings') || {};
@@ -496,10 +510,22 @@ async function maybeFirstRunObsAutoconfig() {
       return;
     }
 
+// v3.4.43: probe the GPU before autoconfig so we can default
+    // integrated-GPU machines to 720p instead of 1080p. Electron's
+    // app.getGPUInfo('basic') is cheap (returns a cached descriptor
+    // populated at GPU process startup) but still async; we await it
+    // here because autoconfig is a one-time first-run cost and adding
+    // ~50ms is imperceptible. On failure (rare — the GPU info service
+    // is part of every Chromium build) the tier resolves to 'unknown'
+    // and autoconfig picks the 1080p default, matching pre-v3.4.43
+    // behavior exactly.
+    const gpuInfo = await _gpuInfoForAutoconfig();
+
     const { recommendations, specs } = await autoconfig.detectRecommendedObsSettings({
       ffmpegPath: ffmpegInstaller.findFFmpegPath(),
       screenModule: screen,
       videosPath: app.getPath('videos'),
+      gpuInfo,
     });
 
     // Preserve any user-meaningful fields that shouldn't be auto-derived:
@@ -546,6 +572,7 @@ async function refreshEncoderForFreshInstall() {
       ffmpegPath: ffmpegInstaller.findFFmpegPath(),
       screenModule: screen,
       videosPath: app.getPath('videos'),
+      gpuInfo: await _gpuInfoForAutoconfig(),
     });
     if (recommendations.videoEncoder && recommendations.videoEncoder !== current.videoEncoder) {
       const merged = {
@@ -574,6 +601,7 @@ ipcMain.handle('obs-settings:detect', async () => {
     ffmpegPath: ffmpegInstaller.findFFmpegPath(),
     screenModule: screen,
     videosPath: app.getPath('videos'),
+    gpuInfo: await _gpuInfoForAutoconfig(),
   });
 });
 
@@ -589,6 +617,7 @@ ipcMain.handle('obs-settings:apply-detected', async (_, payload) => {
     ffmpegPath: ffmpegInstaller.findFFmpegPath(),
     screenModule: screen,
     videosPath: app.getPath('videos'),
+    gpuInfo: await _gpuInfoForAutoconfig(),
   });
   const patch = {};
   for (const key of fields) {

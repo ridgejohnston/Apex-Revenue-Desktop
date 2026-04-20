@@ -10,6 +10,7 @@ import AddSourceModal from './components/AddSourceModal';
 import DebugPanel from './components/DebugPanel';
 import BeautyPanel from './components/BeautyPanel';
 import { BeautyFilter } from './filters/beauty-filter';
+import { detectGpuTier, isLowEndGpu } from './gpu-tier';
 const { BEAUTY_DEFAULTS, BEAUTY_STORE_KEY, clampConfig: clampBeauty, isBeautyUnlocked } = require('../../shared/beauty-config');
 
 const api = window.electronAPI;
@@ -471,6 +472,14 @@ export default function App() {
                 onAutoBeautyUpdate: (updates) => {
                   handleBeautyChange({ ...beautyConfigRef.current, ...updates });
                 },
+                // v3.4.43: skip the idle segmenter prewarm on integrated
+                // GPUs. Prewarm is a 1-2s GPU work burst that's cheap on
+                // discrete hardware but can destabilize a stream about
+                // to start on iGPUs. Those users pay a ~1-2s first-toggle
+                // delay if they later enable Blur — acceptable trade for
+                // a stable stream ramp-up. See gpu-tier.js for the
+                // classification heuristics.
+                skipSegmenterPrewarm: isLowEndGpu(),
               }
             );
             const filteredStream = filter.getStream();
@@ -992,6 +1001,35 @@ export default function App() {
           // just means stream engine will re-encode instead of copy.
         }
 
+        // v3.4.43: non-intrusive advisory for users on integrated GPUs
+        // streaming at 1080p. We don't force-downgrade (fps is a
+        // platform-discovery-ranking concern — Chaturbate ranks 30fps
+        // higher than 24fps) and we don't block the stream. But we
+        // leave a one-line breadcrumb in errors.log so if the stream
+        // later disconnects with -10053, a user sharing logs has the
+        // context to understand the correlation. Runs at most once
+        // per stream start; the console log and errors.log channel
+        // both get it so devs and users can both see it without UI
+        // surface area.
+        try {
+          const gpuInfo = detectGpuTier();
+          const tgtH = settings?.resolution?.height ?? 0;
+          if (gpuInfo.tier === 'integrated' && tgtH >= 1080) {
+            const msg =
+              `Integrated GPU (${gpuInfo.renderer || 'unknown renderer'}) streaming at 1080p. ` +
+              `If stream disconnects, consider lowering to 720p in Settings > Resolution, ` +
+              `or 24fps in Settings > FPS — both reduce GPU pressure on the encoder pipeline.`;
+            console.log('[Apex]', msg);
+            window.electronAPI?.errors?.log?.('info', 'stream-advisory', msg, {
+              gpuTier: gpuInfo.tier,
+              renderer: gpuInfo.renderer,
+              vendor: gpuInfo.vendor,
+              resolution: settings.resolution,
+              fps: settings.fps,
+            });
+          }
+        } catch { /* advisory is best-effort */ }
+
         // Pass pipeHasAudio through settings so the stream engine
         // knows whether to map input 0's audio track or use the
         // silent-lavfi fallback. (Setting a transient field on the
@@ -1200,6 +1238,20 @@ export default function App() {
         // 250ms timeslice — ~4 chunks/sec. Low enough latency for
         // live chat interaction, high enough that each chunk is a
         // reasonable container unit (not thousands of 1ms fragments).
+        //
+        // v3.4.43: hold the segmenter for 3s across any active beauty
+        // filters so MediaRecorder's hardware H.264 encoder has GPU
+        // bandwidth to ramp up without contention. The first seconds
+        // of a stream are when Chaturbate's ingest decides whether
+        // the source is healthy or stalled — if effBitrate is far
+        // below target in those first seconds, we get the -10053
+        // kick. Holding segmenter inference for 3s trades a briefly
+        // stale background blur (previous mask stays bound, viewers
+        // see ~3s of slight motion trail) for a stream that actually
+        // stays connected. Much better UX trade.
+        for (const f of Object.values(beautyFiltersRef.current)) {
+          try { f?.setQuietPeriod?.(3000); } catch {}
+        }
         recorder.start(250);
         webcamRecorderRef.current = recorder;
         return;

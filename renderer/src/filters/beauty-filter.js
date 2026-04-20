@@ -77,7 +77,7 @@ function hexToRgb(hex) {
 }
 
 export class BeautyFilter {
-  constructor(inputStream, config = {}, { onAutoBeautyUpdate } = {}) {
+  constructor(inputStream, config = {}, { onAutoBeautyUpdate, skipSegmenterPrewarm } = {}) {
     this.inputStream = inputStream;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this._passthrough = false;      // true → getStream() returns inputStream
@@ -89,6 +89,25 @@ export class BeautyFilter {
     this._segmenterInitStarted = false;
     this._prewarmScheduled = false;
     this._frameTimer = null;
+
+    // When true, skip the prewarm path that eagerly initializes the
+    // MediaPipe segmenter even when the user has background effects
+    // off. Prewarm trades an idle ~1-2s of GPU work for a snappier
+    // first-toggle — a good trade on discrete GPUs but a bad trade
+    // on integrated GPUs where any extra warm-up hit makes the first
+    // stream attempt stutter. App.jsx sets this based on gpu-tier
+    // classification. See _schedulePrewarm gate below.
+    this._skipSegmenterPrewarm = !!skipSegmenterPrewarm;
+
+    // Optional stream-startup quiet period for the segmenter. When
+    // setQuietPeriod(ms) is called with ms > 0, this timestamp marks
+    // the end of the window during which pushFrame calls are held —
+    // the previous mask stays bound, the WebGL pipeline gets the
+    // readback bandwidth it would otherwise have spent on new mask
+    // inferences, and MediaRecorder has breathing room to ramp its
+    // own hardware H.264 encoder without contending. Set by App.jsx
+    // right before recorder.start() on stream start.
+    this._quietUntil = 0;
 
     // Blur-stage working resolution. The bilateral and gaussian blur
     // FBOs are allocated at HALF canvas resolution to cut GPU work
@@ -167,12 +186,16 @@ export class BeautyFilter {
     const installed = this.config.mediapipeInstalled === true;
     if (wantsBg && installed && !this._passthrough) {
       this._startSegmenter('ctor');
-    } else if (installed && !this._passthrough) {
+    } else if (installed && !this._passthrough && !this._skipSegmenterPrewarm) {
       // PREWARM: MediaPipe is installed but the user's session starts
       // with blur OFF. Defer-schedule the segmenter so it's ready by
       // the time the user clicks Blur — eliminates the perceptible
       // 500-2000ms cold-start delay they'd otherwise see on first
       // toggle. See _schedulePrewarm for the mechanics.
+      //
+      // Skipped when _skipSegmenterPrewarm is true (iGPU detection).
+      // Those users pay a ~1-2s delay on first Blur toggle but avoid
+      // an idle warm-up that can destabilize a stream about to start.
       this._schedulePrewarm('ctor');
     }
   }
@@ -214,6 +237,36 @@ export class BeautyFilter {
     // If the filter is runtime-disabled, still return the processed stream
     // but render a pass-through frame so downstream consumers don't re-bind.
     return this._outputStream;
+  }
+
+  /**
+   * Temporarily stop pushing new frames to the segmenter for `ms`
+   * milliseconds. The last-known mask stays bound so preview composite
+   * doesn't regress to a flat frame — the mask just stops updating.
+   * Called by App.jsx immediately before recorder.start() on stream
+   * start, with ms=3000: the first 3 seconds of a pipe-stream are when
+   * Chromium's MediaRecorder hardware H.264 encoder is warming up and
+   * fighting every other GPU consumer for bandwidth. Holding segmenter
+   * inference during that window lets MediaRecorder reach target
+   * bitrate cleanly, which is what matters to Chaturbate's ingest
+   * starvation detector.
+   *
+   * Impact on viewer experience: the background blur mask is frozen
+   * for ~3s at stream start. If the performer moves substantially in
+   * that window the blur will trail. Trade-off accepted — a connected
+   * stream with slightly stale blur beats a disconnected stream with
+   * perfect blur.
+   *
+   * Pass 0 or a negative number to cancel any active quiet period.
+   */
+  setQuietPeriod(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) {
+      this._quietUntil = 0;
+      return;
+    }
+    this._quietUntil = performance.now() + ms;
+    // eslint-disable-next-line no-console
+    console.log(`[BeautyFilter] segmenter quiet period: ${ms}ms`);
   }
 
   update(partial) {
@@ -871,8 +924,14 @@ export class BeautyFilter {
     // until the render loop recovers.
     const segIntervalMs = this._segIntervalMs || 50;
     const nowSeg = performance.now();
+    // Quiet period: if setQuietPeriod(ms) was called and the window
+    // hasn't elapsed, hold pushFrame entirely. The last-known mask
+    // stays bound to texMask below and compositing continues — only
+    // the inference loop pauses. Used by App.jsx to give MediaRecorder
+    // a clean 3s ramp-up without segmenter GPU contention.
+    const inQuietPeriod = this._quietUntil && nowSeg < this._quietUntil;
     const segDue = !this._lastSegPushTime || (nowSeg - this._lastSegPushTime) >= segIntervalMs;
-    if (bgModeActive && this._segmenter && segDue) {
+    if (bgModeActive && this._segmenter && segDue && !inQuietPeriod) {
       this._lastSegPushTime = nowSeg;
       this._segmenter.pushFrame(this.video);
     }
