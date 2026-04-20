@@ -17,6 +17,21 @@ function findFFmpeg() {
   return findFFmpegPath() || 'ffmpeg';
 }
 
+/** Path to ffprobe next to the bundled ffmpeg (Windows: ffprobe.exe). */
+function findFfprobePath() {
+  const ffmpeg = findFFmpegPath();
+  if (!ffmpeg) return null;
+  const dir = path.dirname(ffmpeg);
+  const base = path.basename(ffmpeg).replace(/^ffmpeg/i, 'ffprobe');
+  let candidate = path.join(dir, base);
+  if (fs.existsSync(candidate)) return candidate;
+  if (process.platform === 'win32') {
+    candidate = path.join(dir, 'ffprobe.exe');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 // H.264 encoder preference order. Ordered hardware-first (zero CPU cost)
 // → software fallback (works anywhere). CRITICAL: being in this list and
 // being returned by `ffmpeg -encoders` only means the encoder is COMPILED
@@ -461,6 +476,97 @@ class StreamEngine extends EventEmitter {
       return ['-f', 'dshow', '-i', `audio=${deviceName}`];
     }
     return ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo'];
+  }
+
+  /**
+   * ffprobe the primary video file or URL to see if an audio stream exists.
+   * Used so we mux embedded track (0:a:0) instead of the separate mic /
+   * anullsrc input (1:a:0), which was incorrectly selected by FFmpeg's
+   * default stream mapping for media / video_url sources.
+   */
+  _probePrimaryHasAudioStream(settings) {
+    const src = settings.videoSource || 'screen';
+    if (src !== 'media' && src !== 'video_url') return Promise.resolve(false);
+
+    let target;
+    if (src === 'media') {
+      target = settings.mediaPath;
+      if (!target || !String(target).trim() || !fs.existsSync(target)) {
+        return Promise.resolve(false);
+      }
+    } else {
+      target = settings.videoUrl;
+      if (!target || !String(target).trim()) return Promise.resolve(false);
+    }
+
+    const ffprobe = findFfprobePath();
+    if (!ffprobe) {
+      // No probe binary: assume embedded audio (fixes the common case);
+      // video-only files will error at runtime unless the user has ffprobe.
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      const proc = spawn(
+        ffprobe,
+        [
+          '-v', 'error',
+          '-select_streams', 'a',
+          '-show_entries', 'stream=index',
+          '-of', 'csv=p=0',
+          target,
+        ],
+        { windowsHide: true },
+      );
+      let out = '';
+      let settled = false;
+      let timer;
+      const done = (has) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(has);
+      };
+      proc.stdout.on('data', (d) => { out += d.toString(); });
+      proc.on('close', (code) => {
+        const has = code === 0 && out.trim().length > 0;
+        done(has);
+      });
+      proc.on('error', () => done(false));
+      timer = setTimeout(() => {
+        try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+        // Slow / flaky remote URL: still try embedded audio first.
+        done(true);
+      }, 15000);
+    });
+  }
+
+  /**
+   * Decide FFmpeg stream maps and whether to append a second audio input.
+   * - media / video_url with embedded audio: single input, map 0:v + 0:a.
+   * - media / video_url without audio: gdigrab-style layout (0=video, 1=mic/silent).
+   * - all other sources: unchanged (0=video, 1=mic/silent).
+   */
+  async _resolveStreamMapsAndExtraAudioInputs(settings) {
+    const src = settings.videoSource || 'screen';
+    if (src !== 'media' && src !== 'video_url') {
+      return {
+        extraAudioInputs: this._audioInputArgs(settings),
+        mapArgs: ['-map', '0:v:0', '-map', '1:a:0'],
+      };
+    }
+
+    const hasEmbedded = await this._probePrimaryHasAudioStream(settings);
+    if (hasEmbedded) {
+      return {
+        extraAudioInputs: [],
+        mapArgs: ['-map', '0:v:0', '-map', '0:a:0'],
+      };
+    }
+    return {
+      extraAudioInputs: this._audioInputArgs(settings),
+      mapArgs: ['-map', '0:v:0', '-map', '1:a:0'],
+    };
   }
 
   // Resolve a webcam friendly name to the argv value we hand to FFmpeg's
@@ -1238,14 +1344,17 @@ class StreamEngine extends EventEmitter {
     // colons need an alt-name lookup via detectWebcams.
     const videoInputArgs = await this._videoInputArgs(settings, fps);
 
+    // Explicit -map is required whenever there are two inputs (video +
+    // mic/silent); otherwise FFmpeg's default stream selection picks
+    // audio from the wrong input — e.g. anullsrc/mic instead of the
+    // video file's embedded track for media / video_url sources.
+    const { extraAudioInputs, mapArgs } = await this._resolveStreamMapsAndExtraAudioInputs(settings);
+
     // Build FFmpeg args for RTMP streaming
     const args = [
       ...videoInputArgs,
-
-      // Audio input: dshow with configured device, or silent lavfi
-      // fallback when no device is configured. Device name is
-      // sanitized (browser prefix stripped).
-      ...this._audioInputArgs(settings),
+      ...extraAudioInputs,
+      ...mapArgs,
 
       // Video encoding with auto-detected encoder + per-encoder args
       ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
@@ -2455,9 +2564,11 @@ class StreamEngine extends EventEmitter {
     }
 
     const videoInputArgs = await this._videoInputArgs(settings, fps);
+    const { extraAudioInputs, mapArgs } = await this._resolveStreamMapsAndExtraAudioInputs(settings);
     const args = [
       ...videoInputArgs,
-      ...this._audioInputArgs(settings),
+      ...extraAudioInputs,
+      ...mapArgs,
       ...this._videoEncodeArgs(encoder, videoBitrate, fps, resolution),
       ...(encoder === 'libx264' ? ['-crf', '18'] : []),
       '-c:a', 'aac',
